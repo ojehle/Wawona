@@ -1,0 +1,81 @@
+# Build directories
+build/
+cmake-build-*/
+*.xcodeproj/
+*.xcworkspace/
+
+# Compiled binaries
+macos_wlcompositor
+*.o
+*.a
+*.dylib
+
+# CMake cache
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Wayland runtime
+wayland-*
+
+# Wayland build directory (from install-wayland.sh)
+wayland/
+wayland-build/
+
+# Log files (build logs in project, runtime logs in /tmp)
+*.log
+wayland-install.log
+compositor-build.log
+compositor-run.log
+compositor.log
+client-build.log
+client-run.log
+client.log
+
+# Test client
+test_client
+test_xdg-shell-client-protocol.h
+test_xdg-shell-client-protocol.c
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Launchd (keep template, ignore customized versions)
+# com.calayerwayland.compositor.plist
+
+# Node.js (docs)
+docs/node_modules/
+docs/npm-debug.log
+docs/.DS_Store
+
+# Generated protocol files
+protocols/*-protocol.h
+protocols/*-protocol.c
+protocols/*-client-protocol.h
+protocols/*-server-protocol.h
+
+# Apple Containerization framework (submodule or cloned repo)
+containerization/
+Containerization/
+containerization.framework/
+Containerization.framework/
+container-build/
+containerization-build/
+
+# Container build cache (in user's Library/Caches)
+# Note: This is outside the repo, but listed for reference
+# ~/Library/Caches/container-build/
+
+# Container build logs
+/tmp/container-build*.log
+container-build*.log
+

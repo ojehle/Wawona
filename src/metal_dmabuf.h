@@ -1,0 +1,44 @@
+#pragma once
+
+#include <wayland-server.h>
+#include <stdint.h>
+
+#ifdef __OBJC__
+#import <Metal/Metal.h>
+#import <IOSurface/IOSurface.h>
+#import <CoreVideo/CoreVideo.h>
+#else
+// Forward declarations for C code
+typedef struct objc_object* id;
+typedef void* IOSurfaceRef;
+#endif
+
+// DMA-BUF emulation for macOS using IOSurface
+// Allows efficient buffer sharing between processes via Metal textures
+
+struct metal_dmabuf_buffer {
+    IOSurfaceRef iosurface;
+    id texture;  // id<MTLTexture> in Objective-C
+    uint32_t width;
+    uint32_t height;
+    uint32_t format;
+    uint32_t stride;
+    void *data;
+    size_t size;
+};
+
+// Create a DMA-BUF compatible buffer using IOSurface
+struct metal_dmabuf_buffer *metal_dmabuf_create_buffer(uint32_t width, uint32_t height, uint32_t format);
+
+// Get Metal texture from DMA-BUF buffer (returns id in Objective-C, void* in C)
+id metal_dmabuf_get_texture(struct metal_dmabuf_buffer *buffer, id device);
+
+// Release DMA-BUF buffer
+void metal_dmabuf_destroy_buffer(struct metal_dmabuf_buffer *buffer);
+
+// Create IOSurface from Wayland buffer data
+IOSurfaceRef metal_dmabuf_create_iosurface_from_data(void *data, uint32_t width, uint32_t height, uint32_t stride, uint32_t format);
+
+// Get file descriptor for sharing IOSurface (for waypipe)
+int metal_dmabuf_get_fd(struct metal_dmabuf_buffer *buffer);
+
