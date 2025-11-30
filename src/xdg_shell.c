@@ -54,11 +54,19 @@ xdg_toplevel_resize(struct wl_client *client, struct wl_resource *resource, stru
 static void
 xdg_toplevel_set_max_size(struct wl_client *client, struct wl_resource *resource, int32_t width, int32_t height)
 {
+    // Accept any max size (including 0x0 which means no restriction)
+    // This signals arbitrary resolution support - clients can create surfaces of any size
+    // Log for debugging
+    log_printf("[XDG-SHELL] ", "set_max_size: %dx%d (0x0 means no restriction)\n", width, height);
 }
 
 static void
 xdg_toplevel_set_min_size(struct wl_client *client, struct wl_resource *resource, int32_t width, int32_t height)
 {
+    // Accept any min size (including 0x0 which means no restriction)
+    // This signals arbitrary resolution support - clients can create surfaces of any size
+    // Log for debugging
+    log_printf("[XDG-SHELL] ", "set_min_size: %dx%d (0x0 means no restriction)\n", width, height);
 }
 
 static void
@@ -116,7 +124,10 @@ xdg_surface_get_toplevel(struct wl_client *client, struct wl_resource *resource,
 {
     log_printf("[XDG-SHELL] ", "xdg_surface_get_toplevel called for resource %p\n", resource);
     struct xdg_surface_impl *xdg_surface = wl_resource_get_user_data(resource);
-    struct wl_resource *toplevel_resource = wl_resource_create(client, &xdg_toplevel_interface, wl_resource_get_version(resource), id);
+    // Use the same version as the xdg_surface (which matches wm_base version)
+    // We can't use a higher version for child resources - Wayland protocol requires version <= parent
+    int requested_version = wl_resource_get_version(resource);
+    struct wl_resource *toplevel_resource = wl_resource_create(client, &xdg_toplevel_interface, requested_version, id);
     if (!toplevel_resource) {
         wl_resource_post_no_memory(resource);
         return;
@@ -126,18 +137,36 @@ xdg_surface_get_toplevel(struct wl_client *client, struct wl_resource *resource,
     xdg_surface->role = toplevel_resource;
     
     // Send initial configure event to unblock client
+    
+    // First send configure_bounds with 0x0 to signal no bounds restriction (version 4+)
+    // Only send if client bound with version 4 or higher
+    int toplevel_version = wl_resource_get_version(toplevel_resource);
+    if (toplevel_version >= XDG_TOPLEVEL_CONFIGURE_BOUNDS_SINCE_VERSION) {
+        log_printf("[XDG-SHELL] ", "Sending configure_bounds 0x0 to toplevel %p (version %u, arbitrary resolution)\n", 
+                   toplevel_resource, toplevel_version);
+        xdg_toplevel_send_configure_bounds(toplevel_resource, 0, 0);
+    } else {
+        log_printf("[XDG-SHELL] ", "⚠️ Cannot send configure_bounds: toplevel_version=%u (need >=4, client bound with version %u)\n",
+                   toplevel_version, requested_version);
+    }
+    
     struct wl_array states;
     wl_array_init(&states);
     // Add activated state
     uint32_t *activated = wl_array_add(&states, sizeof(uint32_t));
     if (activated) *activated = XDG_TOPLEVEL_STATE_ACTIVATED;
     
-    // Use output size from wm_base if available
-    int32_t width = xdg_surface->wm_base->output_width;
-    int32_t height = xdg_surface->wm_base->output_height;
+    // Add maximized/fullscreen for initial state too
+    uint32_t *maximized = wl_array_add(&states, sizeof(uint32_t));
+    if (maximized) *maximized = XDG_TOPLEVEL_STATE_MAXIMIZED;
     
-    log_printf("[XDG-SHELL] ", "Sending initial configure to toplevel %p (size: %dx%d)\n", toplevel_resource, width, height);
-    xdg_toplevel_send_configure(toplevel_resource, width, height, &states);
+    uint32_t *fullscreen = wl_array_add(&states, sizeof(uint32_t));
+    if (fullscreen) *fullscreen = XDG_TOPLEVEL_STATE_FULLSCREEN;
+    
+    // Send 0x0 initially to let client pick size, OR send output size if we know it?
+    // For now keep 0x0 for initial to let client adapt to output mode it sees.
+    log_printf("[XDG-SHELL] ", "Sending initial configure to toplevel %p (size: 0x0)\n", toplevel_resource);
+    xdg_toplevel_send_configure(toplevel_resource, 0, 0, &states);
     wl_array_release(&states);
     
     xdg_surface_send_configure(resource, 1); // Serial 1
@@ -225,7 +254,7 @@ bind_wm_base(struct wl_client *client, void *data, uint32_t version, uint32_t id
     struct xdg_wm_base_impl *wm_base = data;
     struct wl_resource *resource;
 
-    resource = wl_resource_create(client, &xdg_wm_base_interface, version, id);
+    resource = wl_resource_create(client, &xdg_wm_base_interface, (int)version, id);
     if (!resource) {
         wl_client_post_no_memory(client);
         return;
@@ -241,9 +270,9 @@ xdg_wm_base_create(struct wl_display *display)
     if (!wm_base) return NULL;
 
     wm_base->display = display;
-    wm_base->version = 1;
+    wm_base->version = 4;  // Use version 4 to support configure_bounds (needed for arbitrary resolution detection)
     
-    wm_base->global = wl_global_create(display, &xdg_wm_base_interface, 1, wm_base, bind_wm_base);
+    wm_base->global = wl_global_create(display, &xdg_wm_base_interface, 4, wm_base, bind_wm_base);
     if (!wm_base->global) {
         free(wm_base);
         return NULL;
@@ -278,12 +307,32 @@ xdg_wm_base_send_configure_to_all_toplevels(struct xdg_wm_base_impl *wm_base, in
             // Only send if it's a toplevel (check interface or implementation)
             // For simplicity, assume role is toplevel if set (we only support toplevel now)
             
+            // Send configure_bounds with 0x0 first (version 4+) to signal no bounds restriction
+            uint32_t toplevel_version = wl_resource_get_version(toplevel_resource);
+            uint32_t wm_base_version = wl_resource_get_version(surface->resource); // xdg_surface version = wm_base version
+            if (toplevel_version >= XDG_TOPLEVEL_CONFIGURE_BOUNDS_SINCE_VERSION && 
+                wm_base_version >= XDG_TOPLEVEL_CONFIGURE_BOUNDS_SINCE_VERSION) {
+                log_printf("[XDG-SHELL] ", "Sending configure_bounds 0x0 to toplevel %p (version %u, arbitrary resolution)\n", 
+                           toplevel_resource, toplevel_version);
+                xdg_toplevel_send_configure_bounds(toplevel_resource, 0, 0);
+            } else {
+                log_printf("[XDG-SHELL] ", "⚠️ Cannot send configure_bounds: toplevel_version=%u, wm_base_version=%u (need >=4)\n",
+                           toplevel_version, wm_base_version);
+            }
+            
             struct wl_array states;
             wl_array_init(&states);
             uint32_t *activated = wl_array_add(&states, sizeof(uint32_t));
             if (activated) *activated = XDG_TOPLEVEL_STATE_ACTIVATED;
-            // Add maximized/fullscreen if needed...
             
+            // Force maximized and fullscreen state to ensure client fills the screen
+            uint32_t *maximized = wl_array_add(&states, sizeof(uint32_t));
+            if (maximized) *maximized = XDG_TOPLEVEL_STATE_MAXIMIZED;
+            
+            uint32_t *fullscreen = wl_array_add(&states, sizeof(uint32_t));
+            if (fullscreen) *fullscreen = XDG_TOPLEVEL_STATE_FULLSCREEN;
+            
+            // Send explicit size to force resize (0x0 means client choice, but explicit forces it)
             log_printf("[XDG-SHELL] ", "Sending resize configure to toplevel %p (size: %dx%d)\n", toplevel_resource, width, height);
             xdg_toplevel_send_configure(toplevel_resource, width, height, &states);
             wl_array_release(&states);

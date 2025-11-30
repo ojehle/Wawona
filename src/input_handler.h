@@ -13,6 +13,7 @@
 @property (nonatomic, assign) struct wl_seat_impl *seat;
 #if TARGET_OS_IPHONE || TARGET_OS_SIMULATOR
 @property (nonatomic, assign) UIWindow *window;
+@property (nonatomic, weak) UIView *targetView; // Optional: View to convert coordinates relative to (e.g. safe area view)
 @property (nonatomic, assign) id compositor; // Reference to MacOSCompositor to trigger redraws
 
 - (instancetype)initWithSeat:(struct wl_seat_impl *)seat window:(UIWindow *)window compositor:(id)compositor;

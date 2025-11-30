@@ -211,6 +211,8 @@ set(SOURCES
     src/protocols/xdg-decoration-protocol.h
     src/protocols/xdg-toplevel-icon-protocol.c
     src/protocols/xdg-toplevel-icon-protocol.h
+    src/protocols/fullscreen-shell-unstable-v1-protocol.c
+    src/protocols/fullscreen-shell-unstable-v1-protocol.h
     src/surface_renderer.m
     src/surface_renderer.h
     src/input_handler.m
@@ -221,6 +223,8 @@ set(SOURCES
     src/xdg_shell.h
     src/wayland_viewporter.c
     src/wayland_viewporter.h
+    src/wayland_fullscreen_shell.c
+    src/wayland_fullscreen_shell.h
     src/protocols/viewporter-protocol.c
     src/protocols/viewporter-protocol.h
     src/wayland_shell.c

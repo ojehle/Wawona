@@ -1,6 +1,6 @@
 # Wawona iOS Compositor - Progress Report
 
-**Last Updated**: November 29, 2025
+**Last Updated**: November 30, 2025
 
 ## Overview
 
@@ -18,6 +18,7 @@ Wawona is a Wayland compositor for iOS and macOS. This document tracks the progr
   - Color Management (ColorSync Support)
   - Advanced settings (Nested Compositors, Metal 4, Multiple Clients, Waypipe RS Support)
   - **Network / Remote Access**: Controls for TCP listener and port selection ✅
+  - **Arbitrary Resolution Support**: Implemented `zwp_fullscreen_shell_v1` and `xdg_shell` improvements for dynamic resizing.
 
 ### 2. Wayland Socket Creation ✅
 
@@ -72,12 +73,13 @@ Wawona is a Wayland compositor for iOS and macOS. This document tracks the progr
 4. ✅ Launcher client connection (via socketpair)
 5. ✅ Registry Roundtrip (handshake complete)
 6. ✅ **Visible Launcher UI**: 800x600 surface (resizable) with buttons
-7. ✅ **Touch Input**: Touch events are detected and processed
+7. ✅ **Touch Input**: Touch events are detected and processed (Crash fixed, Frame events added)
 8. ✅ **External Connections**: TCP listener supports remote clients
+9. ✅ **Rotation/Resizing**: Thread-safe output resizing implemented (Weston integration pending verification)
 
 ### In Progress
 
-1. **Input Handling**: Verify touch events are correctly forwarded to the launcher client surface (client logs pending)
+1. **Weston Resizing**: Verify Weston properly resizes its surface on screen rotation (Possible `arbitrary resolutions` flag issue).
 2. **Performance**: Evaluate frame rate and responsiveness
 
 ## Technical Details
@@ -112,6 +114,7 @@ Wawona is a Wayland compositor for iOS and macOS. This document tracks the progr
 - `src/ios_launcher_client.m`: In-process Wayland client launcher
 - `src/resources/Settings.bundle/Root.plist`: iOS Settings app configuration
 - `src/WawonaPreferencesManager.m`: Settings handling
+- `src/wayland_seat.c`: Input handling and device resource management
 
 ## Build Commands
 

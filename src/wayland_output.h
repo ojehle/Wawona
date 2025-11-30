@@ -19,7 +19,7 @@ struct wl_output_impl {
     struct wl_list resource_list;
 };
 
-struct wl_output_impl *wl_output_create(struct wl_display *display, int32_t width, int32_t height, const char *name);
+struct wl_output_impl *wl_output_create(struct wl_display *display, int32_t width, int32_t height, int32_t scale, const char *name);
 void wl_output_destroy(struct wl_output_impl *output);
-void wl_output_update_size(struct wl_output_impl *output, int32_t width, int32_t height);
+void wl_output_update_size(struct wl_output_impl *output, int32_t width, int32_t height, int32_t scale);
 

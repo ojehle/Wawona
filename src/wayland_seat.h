@@ -58,6 +58,7 @@ void wl_seat_send_pointer_enter(struct wl_seat_impl *seat, struct wl_resource *s
 void wl_seat_send_pointer_leave(struct wl_seat_impl *seat, struct wl_resource *surface, uint32_t serial);
 void wl_seat_send_pointer_motion(struct wl_seat_impl *seat, uint32_t time, double x, double y);
 void wl_seat_send_pointer_button(struct wl_seat_impl *seat, uint32_t serial, uint32_t time, uint32_t button, uint32_t state);
+void wl_seat_send_pointer_frame(struct wl_seat_impl *seat);
 void wl_seat_send_keyboard_enter(struct wl_seat_impl *seat, struct wl_resource *surface, uint32_t serial, struct wl_array *keys);
 void wl_seat_send_keyboard_leave(struct wl_seat_impl *seat, struct wl_resource *surface, uint32_t serial);
 void wl_seat_send_keyboard_key(struct wl_seat_impl *seat, uint32_t serial, uint32_t time, uint32_t key, uint32_t state);

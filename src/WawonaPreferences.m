@@ -2,6 +2,7 @@
 #import "WawonaPreferencesManager.h"
 
 #if TARGET_OS_IPHONE || TARGET_OS_SIMULATOR
+#import <UIKit/UIKit.h>
 // iOS: Full implementation with table view
 #import "WawonaAboutPanel.h"
 
@@ -26,59 +27,74 @@
     if (self) {
         self.title = @"Wawona Settings";
         self.modalPresentationStyle = UIModalPresentationPageSheet;
-        
-        // Initialize settings sections with method names
-        self.settingsSections = @[
-            @{
-                @"title": @"Display",
-                @"items": @[
-                    @{@"title": @"Force Server-Side Decorations", @"getter": @"forceServerSideDecorations", @"setter": @"setForceServerSideDecorations:", @"type": @"switch"},
-                    @{@"title": @"Auto Retina Scaling", @"getter": @"autoRetinaScalingEnabled", @"setter": @"setAutoRetinaScalingEnabled:", @"type": @"switch"},
-                ]
-            },
-            @{
-                @"title": @"Input",
-                @"items": @[
-                    @{@"title": @"Render macOS Pointer", @"getter": @"renderMacOSPointer", @"setter": @"setRenderMacOSPointer:", @"type": @"switch"},
-                    @{@"title": @"Swap Cmd as Ctrl", @"getter": @"swapCmdAsCtrl", @"setter": @"setSwapCmdAsCtrl:", @"type": @"switch"},
-                    @{@"title": @"Universal Clipboard", @"getter": @"universalClipboardEnabled", @"setter": @"setUniversalClipboardEnabled:", @"type": @"switch"},
-                ]
-            },
-            @{
-                @"title": @"Color Management",
-                @"items": @[
-                    @{@"title": @"ColorSync Support", @"getter": @"colorSyncSupportEnabled", @"setter": @"setColorSyncSupportEnabled:", @"type": @"switch"},
-                ]
-            },
-            @{
-                @"title": @"Nested Compositors",
-                @"items": @[
-                    @{@"title": @"Enable Nested Compositors", @"getter": @"nestedCompositorsSupportEnabled", @"setter": @"setNestedCompositorsSupportEnabled:", @"type": @"switch"},
-                    @{@"title": @"Use Metal 4 for Nested", @"getter": @"useMetal4ForNested", @"setter": @"setUseMetal4ForNested:", @"type": @"switch"},
-                ]
-            },
-            @{
-                @"title": @"Client Management",
-                @"items": @[
-                    @{@"title": @"Multiple Clients", @"getter": @"multipleClientsEnabled", @"setter": @"setMultipleClientsEnabled:", @"type": @"switch"},
-                ]
-            },
-            @{
-                @"title": @"Waypipe",
-                @"items": @[
-                    @{@"title": @"Waypipe RS Support", @"getter": @"waypipeRSSupportEnabled", @"setter": @"setWaypipeRSSupportEnabled:", @"type": @"switch"},
-                ]
-            },
-            @{
-                @"title": @"About",
-                @"items": @[
-                    @{@"title": @"Version", @"key": @"version", @"type": @"info"},
-                    @{@"title": @"About Wawona", @"key": @"about", @"type": @"button"},
-                ]
-            },
-        ];
+        [self loadSettingsFromBundle];
     }
     return self;
+}
+
+- (void)loadSettingsFromBundle {
+    NSMutableArray *sections = [NSMutableArray array];
+    
+    NSString *settingsBundlePath = [[NSBundle mainBundle] pathForResource:@"Settings" ofType:@"bundle"];
+    NSString *rootPlistPath = [settingsBundlePath stringByAppendingPathComponent:@"Root.plist"];
+    NSDictionary *rootDict = [NSDictionary dictionaryWithContentsOfFile:rootPlistPath];
+    NSArray *specifiers = rootDict[@"PreferenceSpecifiers"];
+    
+    NSMutableDictionary *currentSection = nil;
+    NSMutableArray *currentItems = nil;
+    
+    for (NSDictionary *specifier in specifiers) {
+        NSString *type = specifier[@"Type"];
+        
+        if ([type isEqualToString:@"PSGroupSpecifier"]) {
+            // Start new section
+            if (currentSection) {
+                currentSection[@"items"] = [currentItems copy];
+                [sections addObject:[currentSection copy]];
+            }
+            currentSection = [NSMutableDictionary dictionary];
+            currentItems = [NSMutableArray array];
+            currentSection[@"title"] = specifier[@"Title"] ? specifier[@"Title"] : @"";
+        } else if ([type isEqualToString:@"PSToggleSwitchSpecifier"]) {
+            // Switch item
+            if (!currentSection) {
+                currentSection = [NSMutableDictionary dictionary];
+                currentItems = [NSMutableArray array];
+                currentSection[@"title"] = @"General";
+            }
+            [currentItems addObject:@{
+                @"title": specifier[@"Title"],
+                @"key": specifier[@"Key"],
+                @"type": @"switch",
+                @"default": specifier[@"DefaultValue"] ? specifier[@"DefaultValue"] : @NO
+            }];
+        } else if ([type isEqualToString:@"PSTextFieldSpecifier"]) {
+             // Text field item
+             [currentItems addObject:@{
+                @"title": specifier[@"Title"],
+                @"key": specifier[@"Key"],
+                @"type": @"textfield",
+                @"keyboard": specifier[@"KeyboardType"] ? specifier[@"KeyboardType"] : @"Alphabet"
+            }];
+        }
+    }
+    
+    // Add last section
+    if (currentSection) {
+        currentSection[@"items"] = [currentItems copy];
+        [sections addObject:[currentSection copy]];
+    }
+    
+    // Append manual About section
+    [sections addObject:@{
+        @"title": @"About",
+        @"items": @[
+            @{@"title": @"Version", @"key": @"version", @"type": @"info"},
+            @{@"title": @"About Wawona", @"key": @"about", @"type": @"button"}
+        ]
+    }];
+    
+    self.settingsSections = sections;
 }
 
 - (void)loadView {
@@ -134,28 +150,27 @@
     NSArray *items = self.settingsSections[indexPath.section][@"items"];
     NSDictionary *item = items[indexPath.row];
     NSString *type = item[@"type"];
+    NSString *title = item[@"title"];
     
     UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"SettingsCell"];
     if (!cell) {
         cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:@"SettingsCell"];
     }
     
-    cell.textLabel.text = item[@"title"];
+    cell.textLabel.text = title;
+    cell.accessoryView = nil; // Reset
+    cell.accessoryType = UITableViewCellAccessoryNone;
     
     if ([type isEqualToString:@"switch"]) {
-        NSString *getter = item[@"getter"];
-        WawonaPreferencesManager *manager = [WawonaPreferencesManager sharedManager];
+        NSString *key = item[@"key"];
+        NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
         
-        // Use NSInvocation to call the getter method dynamically
-        SEL getterSel = NSSelectorFromString(getter);
+        // Get value from defaults, or use bundle default if not set
         BOOL value = NO;
-        if ([manager respondsToSelector:getterSel]) {
-            NSMethodSignature *signature = [manager methodSignatureForSelector:getterSel];
-            NSInvocation *invocation = [NSInvocation invocationWithMethodSignature:signature];
-            [invocation setTarget:manager];
-            [invocation setSelector:getterSel];
-            [invocation invoke];
-            [invocation getReturnValue:&value];
+        if ([defaults objectForKey:key]) {
+            value = [defaults boolForKey:key];
+        } else {
+            value = [item[@"default"] boolValue];
         }
         
         UISwitch *switchView = [[UISwitch alloc] init];
@@ -164,13 +179,38 @@
         switchView.tag = indexPath.section * 1000 + indexPath.row;
         cell.accessoryView = switchView;
         cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    } else if ([type isEqualToString:@"textfield"]) {
+        NSString *key = item[@"key"];
+        NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+        
+        UITextField *textField = [[UITextField alloc] initWithFrame:CGRectMake(0, 0, 100, 30)];
+        textField.textAlignment = NSTextAlignmentRight;
+        textField.textColor = [UIColor secondaryLabelColor];
+        if ([item[@"keyboard"] isEqualToString:@"NumberPad"]) {
+            textField.keyboardType = UIKeyboardTypeNumberPad;
+        }
+        
+        // Value
+        if ([defaults objectForKey:key]) {
+            if ([item[@"keyboard"] isEqualToString:@"NumberPad"]) {
+                textField.text = [NSString stringWithFormat:@"%ld", (long)[defaults integerForKey:key]];
+            } else {
+                textField.text = [defaults stringForKey:key];
+            }
+        }
+        
+        [textField addTarget:self action:@selector(textFieldChanged:) forControlEvents:UIControlEventEditingDidEnd];
+        textField.tag = indexPath.section * 1000 + indexPath.row;
+        
+        cell.accessoryView = textField;
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
     } else if ([type isEqualToString:@"info"]) {
-        cell.detailTextLabel.text = @"1.0.0"; // TODO: Get actual version
+        NSString *version = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
+        NSString *build = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleVersion"];
+        cell.detailTextLabel.text = [NSString stringWithFormat:@"%@ (%@)", version, build];
         cell.selectionStyle = UITableViewCellSelectionStyleNone;
     } else if ([type isEqualToString:@"button"]) {
         cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
-    } else {
-        cell.selectionStyle = UITableViewCellSelectionStyleNone;
     }
     
     return cell;
@@ -181,19 +221,25 @@
     NSInteger row = sender.tag % 1000;
     NSArray *items = self.settingsSections[section][@"items"];
     NSDictionary *item = items[row];
-    NSString *setter = item[@"setter"];
+    NSString *key = item[@"key"];
     
-    WawonaPreferencesManager *manager = [WawonaPreferencesManager sharedManager];
-    SEL setterSel = NSSelectorFromString(setter);
-    if ([manager respondsToSelector:setterSel]) {
-        NSMethodSignature *signature = [manager methodSignatureForSelector:setterSel];
-        NSInvocation *invocation = [NSInvocation invocationWithMethodSignature:signature];
-        [invocation setTarget:manager];
-        [invocation setSelector:setterSel];
-        BOOL value = sender.on;
-        [invocation setArgument:&value atIndex:2];
-        [invocation invoke];
+    [[NSUserDefaults standardUserDefaults] setBool:sender.on forKey:key];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+}
+
+- (void)textFieldChanged:(UITextField *)sender {
+    NSInteger section = sender.tag / 1000;
+    NSInteger row = sender.tag % 1000;
+    NSArray *items = self.settingsSections[section][@"items"];
+    NSDictionary *item = items[row];
+    NSString *key = item[@"key"];
+    
+    if ([item[@"keyboard"] isEqualToString:@"NumberPad"]) {
+        [[NSUserDefaults standardUserDefaults] setInteger:[sender.text integerValue] forKey:key];
+    } else {
+        [[NSUserDefaults standardUserDefaults] setObject:sender.text forKey:key];
     }
+    [[NSUserDefaults standardUserDefaults] synchronize];
 }
 
 #pragma mark - UITableViewDelegate
@@ -796,8 +842,6 @@
 #endif
 }
 
-@end
-
 - (void)browseSocketDir:(NSButton *)sender {
     NSOpenPanel *panel = [NSOpenPanel openPanel];
     panel.canChooseFiles = NO;
@@ -904,4 +948,3 @@
 
 @end
 #endif
-

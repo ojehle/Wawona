@@ -406,8 +406,20 @@ extern IOSurfaceRef metal_dmabuf_create_iosurface_from_data(void *data, uint32_t
                 metalSurface.lastWidth == width &&
                 metalSurface.lastHeight == height &&
                 metalSurface.lastFormat == format) {
-                // Buffer hasn't changed - reuse existing texture
+                // Buffer data pointer matches - reuse existing texture object
                 needsNewTexture = NO;
+                
+                // CRITICAL: For SHM buffers, we MUST re-upload data even if pointer is the same
+                // The client likely updated the content in place
+                // Only skip upload if we know for sure content hasn't changed (difficult for SHM)
+                // Since renderSurface is called on commit, we assume content changed
+                if (shm_buffer || (buf_data && buf_data->data)) {
+                    MTLRegion region = MTLRegionMake2D(0, 0, width, height);
+                    [metalSurface.texture replaceRegion:region
+                                            mipmapLevel:0
+                                              withBytes:data
+                                            bytesPerRow:stride];
+                }
             }
         }
         

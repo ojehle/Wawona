@@ -19,6 +19,7 @@
 #include <assert.h>
 #include <wayland-server-protocol.h>
 #import "WawonaPreferencesManager.h"
+#include "wayland_fullscreen_shell.h"
 // --- Forward Declarations ---
 
 static struct wl_surface_impl *g_surface_list = NULL;
@@ -260,20 +261,10 @@ static void surface_frame(struct wl_client *client, struct wl_resource *resource
     }
     surface->frame_callback = callback_resource;
     
-    // Notify compositor
-    struct wl_compositor_impl *comp = wl_resource_get_user_data(wl_resource_get_user_data(resource)); // Hacky? No.
-    // We don't have backpointer to compositor in surface directly in the struct definition in header?
-    // Wait, the header struct wl_surface_impl doesn't have compositor pointer.
-    // But we can get it from global or pass it.
-    
-    // Actually, we can use a global or pass it via user_data?
-    // wl_surface_impl is user_data of surface resource.
-    
-    // Check if we have a global compositor instance available or if we can access it.
-    // For now, let's assume we trigger the callback mechanism.
-    
-    // Using the function pointer in compositor impl?
-    // We need to find the compositor.
+    // Notify compositor to ensure frame callback timer is running
+    if (g_compositor && g_compositor->frame_callback_requested) {
+        g_compositor->frame_callback_requested();
+    }
 }
 
 static void surface_set_opaque_region(struct wl_client *client, struct wl_resource *resource, struct wl_resource *region_resource) {
@@ -567,8 +558,78 @@ struct wl_surface_impl *wl_get_all_surfaces(void) {
 @end
 
 @implementation CompositorView
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        // Ensure background is transparent so window's black background shows through in unsafe areas
+        self.backgroundColor = [UIColor clearColor];
+        self.opaque = NO;
+    }
+    return self;
+}
+
+- (void)safeAreaInsetsDidChange {
+    [super safeAreaInsetsDidChange];
+    if (self.compositor) {
+        // Force update when safe area changes (e.g. startup, rotation)
+        [self.compositor updateOutputSize:self.bounds.size];
+    }
+}
+
 - (void)layoutSubviews {
     [super layoutSubviews];
+    
+    // CRITICAL: If respecting safe area, ensure our frame stays constrained to safe area
+    // This prevents the view from being resized back to fullscreen by UIKit
+#if TARGET_OS_IPHONE || TARGET_OS_SIMULATOR
+    BOOL respectSafeArea = [[NSUserDefaults standardUserDefaults] boolForKey:@"RespectSafeArea"];
+    if ([[NSUserDefaults standardUserDefaults] objectForKey:@"RespectSafeArea"] == nil) {
+        respectSafeArea = YES;
+    }
+    
+    if (respectSafeArea && self.autoresizingMask == UIViewAutoresizingNone) {
+        // We're respecting safe area and have disabled autoresizing
+        // Re-apply safe area frame if it was changed
+        UIWindow *window = self.window;
+        if (!window) {
+            // If not in window yet, try superview
+            window = (UIWindow *)self.superview;
+            if (![window isKindOfClass:[UIWindow class]]) {
+                return; // Can't determine safe area without window
+            }
+        }
+        CGRect windowBounds = window.bounds;
+        CGRect safeAreaFrame = windowBounds;
+        
+        if (@available(iOS 11.0, *)) {
+            UIWindow *window = self.window;
+            if (window) {
+                UILayoutGuide *safeArea = window.safeAreaLayoutGuide;
+                safeAreaFrame = safeArea.layoutFrame;
+                if (CGRectIsEmpty(safeAreaFrame)) {
+                    UIEdgeInsets insets = self.safeAreaInsets;
+                    if (insets.top != 0 || insets.left != 0 || insets.bottom != 0 || insets.right != 0) {
+                        safeAreaFrame = UIEdgeInsetsInsetRect(windowBounds, insets);
+                    }
+                }
+            }
+        } else {
+            UIEdgeInsets insets = self.safeAreaInsets;
+            if (insets.top != 0 || insets.left != 0 || insets.bottom != 0 || insets.right != 0) {
+                safeAreaFrame = UIEdgeInsetsInsetRect(windowBounds, insets);
+            }
+        }
+        
+        // Only update if frame doesn't match safe area (prevent infinite loop)
+        if (!CGRectEqualToRect(self.frame, safeAreaFrame)) {
+            self.frame = safeAreaFrame;
+            NSLog(@"🔵 CompositorView frame corrected in layoutSubviews to safe area: (%.0f, %.0f) %.0fx%.0f",
+                  safeAreaFrame.origin.x, safeAreaFrame.origin.y,
+                  safeAreaFrame.size.width, safeAreaFrame.size.height);
+        }
+    }
+#endif
+    
     if (self.compositor) {
         [self.compositor updateOutputSize:self.bounds.size];
     }
@@ -585,6 +646,31 @@ struct wl_surface_impl *wl_get_all_surfaces(void) {
         UIRectFill(rect);
     }
 }
+
+- (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if (self.inputHandler) {
+        [self.inputHandler handleTouchEvent:event];
+    }
+}
+
+- (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if (self.inputHandler) {
+        [self.inputHandler handleTouchEvent:event];
+    }
+}
+
+- (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if (self.inputHandler) {
+        [self.inputHandler handleTouchEvent:event];
+    }
+}
+
+- (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if (self.inputHandler) {
+        [self.inputHandler handleTouchEvent:event];
+    }
+}
+
 @end
 #else
 // macOS: Use NSView
@@ -938,10 +1024,28 @@ void macos_compositor_check_and_hide_window_if_needed(void) {
         // Create custom view that accepts first responder and handles drawing
         CompositorView *compositorView;
 #if TARGET_OS_IPHONE || TARGET_OS_SIMULATOR
-        CGRect contentRect = CGRectMake(0, 0, 800, 600);
-        compositorView = [[CompositorView alloc] initWithFrame:contentRect];
-        window.rootViewController = [[UIViewController alloc] init];
-        window.rootViewController.view = compositorView;
+        // On iOS, we need to use a container view approach because rootViewController.view
+        // is automatically managed by UIKit to fill the window
+        UIViewController *rootVC = [[UIViewController alloc] init];
+        UIView *containerView = [[UIView alloc] initWithFrame:window.bounds];
+        containerView.backgroundColor = [UIColor blackColor]; // Black background for unsafe areas
+        rootVC.view = containerView;
+        window.rootViewController = rootVC;
+        
+        // Create CompositorView as a subview with constraints to safe area
+        compositorView = [[CompositorView alloc] initWithFrame:CGRectZero];
+        compositorView.translatesAutoresizingMaskIntoConstraints = NO;
+        compositorView.backgroundColor = [UIColor clearColor];
+        [containerView addSubview:compositorView];
+        
+        // Set up constraints - will be updated based on safe area setting
+        // Initially pin to safe area (will be changed if setting is disabled)
+        [NSLayoutConstraint activateConstraints:@[
+            [compositorView.topAnchor constraintEqualToAnchor:containerView.safeAreaLayoutGuide.topAnchor],
+            [compositorView.leadingAnchor constraintEqualToAnchor:containerView.safeAreaLayoutGuide.leadingAnchor],
+            [compositorView.trailingAnchor constraintEqualToAnchor:containerView.safeAreaLayoutGuide.trailingAnchor],
+            [compositorView.bottomAnchor constraintEqualToAnchor:containerView.safeAreaLayoutGuide.bottomAnchor],
+        ]];
 #else
         NSRect contentRect = NSMakeRect(0, 0, 800, 600);
         compositorView = [[CompositorView alloc] initWithFrame:contentRect];
@@ -1120,15 +1224,20 @@ bool wl_has_pending_frame_callbacks(void) {
     // Get window size for output
 #if TARGET_OS_IPHONE || TARGET_OS_SIMULATOR
     CGRect frame = _window.bounds;
+    CGFloat scale = [UIScreen mainScreen].scale;
 #else
     NSRect frame = [_window.contentView bounds];
+    CGFloat scale = _window.backingScaleFactor;
 #endif
-    _output = wl_output_create(_display, (int32_t)frame.size.width, (int32_t)frame.size.height, "iOS");
+    _output = wl_output_create(_display, (int32_t)(frame.size.width * scale), (int32_t)(frame.size.height * scale), (int32_t)scale, "iOS");
     if (!_output) {
         NSLog(@"❌ Failed to create wl_output");
         return NO;
     }
-    NSLog(@"   ✓ wl_output created (%dx%d)", (int)frame.size.width, (int)frame.size.height);
+    NSLog(@"   ✓ wl_output created (%dx%d, scale %d)", (int)(frame.size.width * scale), (int)(frame.size.height * scale), (int)scale);
+    
+    // Ensure output size respects Safe Area preferences immediately
+    [self updateOutputSize:frame.size];
     
     _seat = wl_seat_create(_display);
     if (!_seat) {
@@ -1316,6 +1425,10 @@ bool wl_has_pending_frame_callbacks(void) {
     struct zwp_keyboard_shortcuts_inhibit_manager_v1_impl *keyboard_shortcuts = zwp_keyboard_shortcuts_inhibit_manager_v1_create(_display);
     (void)keyboard_shortcuts; // Suppress unused variable warning
     NSLog(@"   ✓ Keyboard shortcuts inhibit protocol created");
+    
+    // Initialize fullscreen shell (needed for arbitrary resolution support in Weston)
+    wayland_fullscreen_shell_init(_display);
+    NSLog(@"   ✓ Fullscreen shell protocol created");
     
     // GTK Shell protocol (for GTK applications)
     struct gtk_shell1_impl *gtk_shell = gtk_shell1_create(_display);
@@ -1559,10 +1672,8 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     
     // Resize window to match client surface size
 #if TARGET_OS_IPHONE || TARGET_OS_SIMULATOR
-    // iOS: Set window frame directly
-    CGRect windowFrame = CGRectMake(0, 0, width, height);
-    _window.frame = windowFrame;
-    (void)width; (void)height; // Used in NSLog below
+    // iOS: Window is always fullscreen, ignore client requested size
+    // We will verify output size respects Safe Area at the end
 #else
     // macOS: frameRectForContentRect automatically accounts for window frame (titlebar, borders)
     NSRect contentRect = NSMakeRect(0, 0, width, height);
@@ -1574,10 +1685,52 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     CGFloat x = screenFrame.origin.x + (screenFrame.size.width - windowFrame.size.width) / 2;
 #endif
 #if TARGET_OS_IPHONE || TARGET_OS_SIMULATOR
-    // iOS: Set window frame directly
-    _window.frame = windowFrame;
+    // iOS: Ensure view matches window (respecting safe area if enabled)
     UIView *contentView = _window.rootViewController.view;
-    contentView.frame = windowFrame;
+    
+    // Check if we should respect safe area
+    BOOL respectSafeArea = [[NSUserDefaults standardUserDefaults] boolForKey:@"RespectSafeArea"];
+    if ([[NSUserDefaults standardUserDefaults] objectForKey:@"RespectSafeArea"] == nil) {
+        respectSafeArea = YES; // Default to YES
+    }
+    
+    if (respectSafeArea && [contentView isKindOfClass:[CompositorView class]]) {
+        CompositorView *compositorView = (CompositorView *)contentView;
+        [compositorView setNeedsLayout];
+        [compositorView layoutIfNeeded];
+        
+        // Calculate safe area frame
+        CGRect windowBounds = _window.bounds;
+        CGRect safeAreaFrame = windowBounds;
+        
+        if (@available(iOS 11.0, *)) {
+            UILayoutGuide *safeArea = _window.safeAreaLayoutGuide;
+            safeAreaFrame = safeArea.layoutFrame;
+            if (CGRectIsEmpty(safeAreaFrame)) {
+                UIEdgeInsets insets = compositorView.safeAreaInsets;
+                if (insets.top != 0 || insets.left != 0 || insets.bottom != 0 || insets.right != 0) {
+                    safeAreaFrame = UIEdgeInsetsInsetRect(windowBounds, insets);
+                }
+            }
+        } else {
+            UIEdgeInsets insets = compositorView.safeAreaInsets;
+            if (insets.top != 0 || insets.left != 0 || insets.bottom != 0 || insets.right != 0) {
+                safeAreaFrame = UIEdgeInsetsInsetRect(windowBounds, insets);
+            }
+        }
+        
+        compositorView.frame = safeAreaFrame;
+        compositorView.autoresizingMask = UIViewAutoresizingNone;
+        NSLog(@"🔵 CompositorView frame set to safe area in showAndSizeWindowForFirstClient: (%.0f, %.0f) %.0fx%.0f",
+              safeAreaFrame.origin.x, safeAreaFrame.origin.y,
+              safeAreaFrame.size.width, safeAreaFrame.size.height);
+    } else {
+        contentView.frame = _window.bounds;
+        if ([contentView isKindOfClass:[CompositorView class]]) {
+            CompositorView *compositorView = (CompositorView *)contentView;
+            compositorView.autoresizingMask = (UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight);
+        }
+    }
 #else
     CGFloat y = screenFrame.origin.y + (screenFrame.size.height - windowFrame.size.height) / 2;
     windowFrame.origin = NSMakePoint(x, y);
@@ -1622,10 +1775,15 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
         }
     }
     
-    // Update output size to match client
-    if (_output) {
-        wl_output_update_size(_output, width, height);
-    }
+    // Update output size (respecting Safe Area on iOS)
+#if TARGET_OS_IPHONE || TARGET_OS_SIMULATOR
+    // Use the actual contentView size (which may be safe area if respecting)
+    UIView *contentViewForSize = _window.rootViewController.view;
+    [self updateOutputSize:contentViewForSize.bounds.size];
+#else
+    [self updateOutputSize:_window.contentView.bounds.size];
+#endif
+
     if (_xdg_wm_base) {
         xdg_wm_base_set_output_size(_xdg_wm_base, width, height);
     }
@@ -1643,6 +1801,199 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     _windowShown = YES;
     
     NSLog(@"[WINDOW] Window shown and sized to %dx%d", width, height);
+}
+
+// Update output size and notify clients
+- (void)updateOutputSize:(CGSize)size {
+    CGRect outputRect = CGRectMake(0, 0, size.width, size.height);
+    CGRect safeAreaFrame = CGRectZero; // Will be set if respecting safe area
+    
+#if TARGET_OS_IPHONE || TARGET_OS_SIMULATOR
+    // Check Safe Area setting
+    BOOL respectSafeArea = [[NSUserDefaults standardUserDefaults] boolForKey:@"RespectSafeArea"];
+    // Default to YES if not set (for notch devices)
+    if ([[NSUserDefaults standardUserDefaults] objectForKey:@"RespectSafeArea"] == nil) {
+        respectSafeArea = YES;
+    }
+    
+    if (respectSafeArea) {
+        UIView *contentView = _window.rootViewController.view;
+        
+        // CRITICAL: Ensure view is laid out before reading safe area insets
+        if ([contentView isKindOfClass:[CompositorView class]]) {
+            CompositorView *compositorView = (CompositorView *)contentView;
+            [compositorView setNeedsLayout];
+            [compositorView layoutIfNeeded];
+        }
+        
+        CGRect windowBounds = _window.bounds;
+        
+        // Try multiple methods to get safe area frame
+        if (@available(iOS 11.0, *)) {
+            // First try: Use window's safeAreaLayoutGuide (most reliable)
+            UILayoutGuide *safeArea = _window.safeAreaLayoutGuide;
+            safeAreaFrame = safeArea.layoutFrame;
+            
+            // If safe area frame is empty, try reading insets from view
+            if (CGRectIsEmpty(safeAreaFrame)) {
+                UIEdgeInsets insets = contentView.safeAreaInsets;
+                if (insets.top != 0 || insets.left != 0 || insets.bottom != 0 || insets.right != 0) {
+                    safeAreaFrame = UIEdgeInsetsInsetRect(windowBounds, insets);
+                } else {
+                    safeAreaFrame = windowBounds; // Fallback to full window
+                }
+            }
+        } else {
+            // iOS < 11: Use view's safeAreaInsets (though this might not be available)
+            UIEdgeInsets insets = contentView.safeAreaInsets;
+            if (insets.top != 0 || insets.left != 0 || insets.bottom != 0 || insets.right != 0) {
+                safeAreaFrame = UIEdgeInsetsInsetRect(windowBounds, insets);
+            } else {
+                safeAreaFrame = windowBounds; // Fallback to full window
+            }
+        }
+        
+        NSLog(@"🔵 Safe Area Frame: (%.0f, %.0f) %.0fx%.0f (window: %.0fx%.0f)",
+              safeAreaFrame.origin.x, safeAreaFrame.origin.y,
+              safeAreaFrame.size.width, safeAreaFrame.size.height,
+              windowBounds.size.width, windowBounds.size.height);
+        
+        // If safe area frame equals window bounds, the view might not be laid out yet
+        // Only retry if window is visible (to avoid infinite retries on devices without notches)
+        if (CGRectEqualToRect(safeAreaFrame, windowBounds) && 
+            _window && _window.isKeyWindow && _window.windowScene) {
+            NSLog(@"⚠️ Safe area frame equals window bounds - will retry after layout...");
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                // Only retry if still respecting safe area
+                BOOL stillRespecting = [[NSUserDefaults standardUserDefaults] boolForKey:@"RespectSafeArea"];
+                if ([[NSUserDefaults standardUserDefaults] objectForKey:@"RespectSafeArea"] == nil) {
+                    stillRespecting = YES;
+                }
+                if (stillRespecting) {
+                    UIView *cv = _window.rootViewController.view;
+                    if ([cv isKindOfClass:[CompositorView class]]) {
+                        [self updateOutputSize:((CompositorView *)cv).bounds.size];
+                    }
+                }
+            });
+        }
+        
+        // Apply safe area to output rect (for Wayland output size calculation)
+        UIEdgeInsets insets = UIEdgeInsetsMake(
+            safeAreaFrame.origin.y - windowBounds.origin.y,
+            safeAreaFrame.origin.x - windowBounds.origin.x,
+            (windowBounds.origin.y + windowBounds.size.height) - (safeAreaFrame.origin.y + safeAreaFrame.size.height),
+            (windowBounds.origin.x + windowBounds.size.width) - (safeAreaFrame.origin.x + safeAreaFrame.size.width)
+        );
+        outputRect = UIEdgeInsetsInsetRect(outputRect, insets);
+        
+        NSLog(@"🔵 Output rect after safe area: (%.0f, %.0f) %.0fx%.0f",
+              outputRect.origin.x, outputRect.origin.y,
+              outputRect.size.width, outputRect.size.height);
+    }
+    
+    // Update CompositorView - it's now constrained via Auto Layout
+    // The constraints are set up in initWithDisplay and will automatically respect safe area
+    UIView *containerView = _window.rootViewController.view;
+    CompositorView *compositorView = nil;
+    
+    // Find CompositorView (it's now a subview of containerView)
+    for (UIView *subview in containerView.subviews) {
+        if ([subview isKindOfClass:[CompositorView class]]) {
+            compositorView = (CompositorView *)subview;
+            break;
+        }
+    }
+    
+    if (!compositorView) {
+        // Fallback: check if containerView itself is CompositorView (old setup)
+        if ([containerView isKindOfClass:[CompositorView class]]) {
+            compositorView = (CompositorView *)containerView;
+        }
+    }
+    
+    if (compositorView) {
+        // Update constraints if needed (for new container-based setup)
+        if (compositorView.superview != containerView || compositorView.superview == nil) {
+            // Not in container yet, or different parent - this shouldn't happen but handle it
+            NSLog(@"⚠️ CompositorView not in expected container");
+        } else {
+            // View is in container with constraints - they should auto-update
+            // But we need to update them if the setting changed
+            NSArray<NSLayoutConstraint *> *constraints = compositorView.constraints;
+            BOOL hasSafeAreaConstraints = NO;
+            for (NSLayoutConstraint *constraint in containerView.constraints) {
+                if (constraint.firstItem == compositorView || constraint.secondItem == compositorView) {
+                    if (constraint.firstAnchor == containerView.safeAreaLayoutGuide.topAnchor ||
+                        constraint.secondAnchor == containerView.safeAreaLayoutGuide.topAnchor) {
+                        hasSafeAreaConstraints = YES;
+                        break;
+                    }
+                }
+            }
+            
+            // If setting changed, we need to update constraints
+            // For now, constraints are set initially and should work
+            // We'll rely on the initial constraint setup
+        }
+        
+        if (compositorView.metalView) {
+            // CRITICAL: Disable autoresizing when safe area is enabled, otherwise it will override our frame
+            if (respectSafeArea) {
+                compositorView.metalView.autoresizingMask = UIViewAutoresizingNone;
+            } else {
+                compositorView.metalView.autoresizingMask = (UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight);
+            }
+            
+            // Set frame relative to CompositorView bounds
+            // When respecting safe area, CompositorView is already sized to safe area, so metalView should fill it
+            // When not respecting, CompositorView fills window, so metalView should also fill it
+            CGRect metalFrame = compositorView.bounds;
+            compositorView.metalView.frame = metalFrame;
+            [compositorView.metalView setNeedsDisplay];
+            
+            // Verify frame was set correctly
+            CGRect actualFrame = compositorView.metalView.frame;
+            NSLog(@"🔵 Metal view frame set: (%.0f, %.0f) %.0fx%.0f (safe area: %@)",
+                  metalFrame.origin.x, metalFrame.origin.y,
+                  metalFrame.size.width, metalFrame.size.height,
+                  respectSafeArea ? @"YES" : @"NO");
+            NSLog(@"🔵 Metal view actual frame: (%.0f, %.0f) %.0fx%.0f",
+                  actualFrame.origin.x, actualFrame.origin.y,
+                  actualFrame.size.width, actualFrame.size.height);
+            
+            // Warn if frame doesn't match (autoresizing might have overridden it)
+            if (respectSafeArea && 
+                (fabs(actualFrame.origin.x - metalFrame.origin.x) > 0.1 ||
+                 fabs(actualFrame.origin.y - metalFrame.origin.y) > 0.1 ||
+                 fabs(actualFrame.size.width - metalFrame.size.width) > 0.1 ||
+                 fabs(actualFrame.size.height - metalFrame.size.height) > 0.1)) {
+                NSLog(@"⚠️ WARNING: Metal view frame doesn't match expected frame! Autoresizing may have overridden it.");
+            }
+            
+            // Update input handler target view for coordinate conversion
+            if (_inputHandler) {
+                _inputHandler.targetView = compositorView.metalView;
+            }
+        }
+    }
+#endif
+
+    // Convert points to pixels for Retina displays
+#if TARGET_OS_IPHONE || TARGET_OS_SIMULATOR
+    CGFloat scale = [UIScreen mainScreen].scale;
+#else
+    CGFloat scale = _window.backingScaleFactor;
+#endif
+    
+    int32_t pixelWidth = (int32_t)(outputRect.size.width * scale);
+    int32_t pixelHeight = (int32_t)(outputRect.size.height * scale);
+    
+    // Store for resize handling on event thread to avoid race conditions
+    _pending_resize_width = pixelWidth;
+    _pending_resize_height = pixelHeight;
+    _pending_resize_scale = (int32_t)scale;
+    _needs_resize_configure = YES;
 }
 
 #if !TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
@@ -1810,7 +2161,13 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 #endif
     
     if (_output) {
-        wl_output_update_size(_output, width, height);
+        int32_t scale = 1;
+#if TARGET_OS_IPHONE || TARGET_OS_SIMULATOR
+        scale = (int32_t)[UIScreen mainScreen].scale;
+#else
+        scale = (int32_t)_window.backingScaleFactor;
+#endif
+        wl_output_update_size(_output, width, height, scale);
     }
     
     // Update xdg_wm_base output size immediately
@@ -1919,6 +2276,14 @@ static int send_frame_callbacks_timer(void *data) {
         
         // Handle pending resize configure events first
         if (compositor.needs_resize_configure) {
+            // Update wl_output mode/geometry (must be done on event thread to avoid races)
+            if (compositor.output) {
+                wl_output_update_size(compositor.output, 
+                                     compositor.pending_resize_width, 
+                                     compositor.pending_resize_height,
+                                     compositor.pending_resize_scale);
+            }
+            
             if (compositor.xdg_wm_base) {
                 xdg_wm_base_send_configure_to_all_toplevels(compositor.xdg_wm_base, 
                                                              compositor.pending_resize_width, 
@@ -2199,6 +2564,16 @@ static void disconnect_all_clients(struct wl_display *display) {
     
     NSLog(@"🔄 Switching to Metal rendering backend for full compositor support");
     
+    // Check Safe Area setting (used throughout this function)
+#if TARGET_OS_IPHONE || TARGET_OS_SIMULATOR
+    BOOL respectSafeArea = [[NSUserDefaults standardUserDefaults] boolForKey:@"RespectSafeArea"];
+    if ([[NSUserDefaults standardUserDefaults] objectForKey:@"RespectSafeArea"] == nil) {
+        respectSafeArea = YES;
+    }
+#else
+    BOOL respectSafeArea = NO;
+#endif
+    
     // Get the compositor view
 #if TARGET_OS_IPHONE || TARGET_OS_SIMULATOR
     UIView *contentView = _window.rootViewController.view;
@@ -2214,21 +2589,73 @@ static void disconnect_all_clients(struct wl_display *display) {
     
     CompositorView *compositorView = (CompositorView *)contentView;
     
+    // CRITICAL: Ensure CompositorView is sized to safe area before creating Metal view
+#if TARGET_OS_IPHONE || TARGET_OS_SIMULATOR
+    [compositorView setNeedsLayout];
+    [compositorView layoutIfNeeded];
+    
+    // Update CompositorView frame to safe area if respecting
+    
+    if (respectSafeArea) {
+        CGRect windowBoundsLocal = _window.bounds;
+        CGRect safeAreaFrame = windowBoundsLocal;
+        
+        if (@available(iOS 11.0, *)) {
+            UILayoutGuide *safeArea = _window.safeAreaLayoutGuide;
+            safeAreaFrame = safeArea.layoutFrame;
+            if (CGRectIsEmpty(safeAreaFrame)) {
+                UIEdgeInsets insets = compositorView.safeAreaInsets;
+                if (insets.top != 0 || insets.left != 0 || insets.bottom != 0 || insets.right != 0) {
+                    safeAreaFrame = UIEdgeInsetsInsetRect(windowBoundsLocal, insets);
+                }
+            }
+        } else {
+            UIEdgeInsets insets = compositorView.safeAreaInsets;
+            if (insets.top != 0 || insets.left != 0 || insets.bottom != 0 || insets.right != 0) {
+                safeAreaFrame = UIEdgeInsetsInsetRect(windowBoundsLocal, insets);
+            }
+        }
+        
+        compositorView.frame = safeAreaFrame;
+        compositorView.autoresizingMask = UIViewAutoresizingNone;
+    } else {
+        compositorView.frame = _window.bounds;
+        compositorView.autoresizingMask = (UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight);
+    }
+#endif
+    
     // Get current window size for Metal view
+    // Note: CompositorView bounds will be safe area if respecting, or full window if not
     windowBounds = compositorView.bounds;
     
-    // Create Metal view with exact window size
+    // Metal view should fill CompositorView (which is already sized to safe area if respecting)
+#if TARGET_OS_IPHONE || TARGET_OS_SIMULATOR
+    CGRect initialFrame = compositorView.bounds;
+    NSLog(@"🔵 Metal view initial frame (CompositorView bounds): (%.0f, %.0f) %.0fx%.0f (safe area: %@)",
+          initialFrame.origin.x, initialFrame.origin.y,
+          initialFrame.size.width, initialFrame.size.height,
+          respectSafeArea ? @"YES" : @"NO");
+#else
+    CGRect initialFrame = windowBounds;
+#endif
+    
+    // Create Metal view with safe area-aware frame
     // Use a custom class that allows window dragging for proper window controls
     Class CompositorMTKViewClass = NSClassFromString(@"CompositorMTKView");
     MTKView *metalView = nil;
     if (CompositorMTKViewClass) {
-        metalView = [[CompositorMTKViewClass alloc] initWithFrame:windowBounds];
+        metalView = [[CompositorMTKViewClass alloc] initWithFrame:initialFrame];
     } else {
         // Fallback to regular MTKView if custom class not available
-        metalView = [[MTKView alloc] initWithFrame:windowBounds];
+        metalView = [[MTKView alloc] initWithFrame:initialFrame];
     }
 #if TARGET_OS_IPHONE || TARGET_OS_SIMULATOR
-    metalView.autoresizingMask = (UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight);
+    // CRITICAL: Disable autoresizing when safe area is enabled, otherwise it will override our frame
+    if (respectSafeArea) {
+        metalView.autoresizingMask = UIViewAutoresizingNone;
+    } else {
+        metalView.autoresizingMask = (UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight);
+    }
 #else
     metalView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     // Ensure Metal view is opaque and properly configured
@@ -2245,12 +2672,13 @@ static void disconnect_all_clients(struct wl_display *display) {
     // Don't set ignoresMouseEvents - we need to receive events for Wayland clients
     // But ensure the view doesn't block window controls
     
-    // Ensure Metal view matches window size exactly
-    metalView.frame = windowBounds;
+    // Frame is already set above based on safe area setting
+    // metalView.frame = initialFrame; // Already set in initWithFrame
     
-    NSLog(@"   Creating Metal view with frame: %.0fx%.0f at (%.0f, %.0f)",
-          windowBounds.size.width, windowBounds.size.height,
-          windowBounds.origin.x, windowBounds.origin.y);
+    NSLog(@"   Creating Metal view with frame: %.0fx%.0f at (%.0f, %.0f) (safe area: %@)",
+          initialFrame.size.width, initialFrame.size.height,
+          initialFrame.origin.x, initialFrame.origin.y,
+          respectSafeArea ? @"YES" : @"NO");
     
     // Create Metal renderer
     MetalRenderer *metalRenderer = [[MetalRenderer alloc] initWithMetalView:metalView];
@@ -2264,6 +2692,11 @@ static void disconnect_all_clients(struct wl_display *display) {
 #if TARGET_OS_IPHONE || TARGET_OS_SIMULATOR
     [compositorView addSubview:metalView];
     compositorView.metalView = metalView;
+    
+    // CRITICAL: Update output size after Metal view is added to ensure safe area is respected
+    // This will recalculate and reposition the metalView if needed
+    [self updateOutputSize:compositorView.bounds.size];
+    
     // iOS: Touch events are handled via UIKit gesture recognizers
     // Re-setup input handling if needed
     if (_inputHandler) {

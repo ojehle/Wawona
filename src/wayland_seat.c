@@ -4,6 +4,48 @@
 #include <string.h>
 #include <stdio.h>
 
+// Pointer implementation
+static void
+pointer_set_cursor(struct wl_client *client, struct wl_resource *resource,
+                   uint32_t serial, struct wl_resource *surface,
+                   int32_t hotspot_x, int32_t hotspot_y)
+{
+    // TODO: Implement cursor surface handling
+}
+
+static void
+pointer_release(struct wl_client *client, struct wl_resource *resource)
+{
+    wl_resource_destroy(resource);
+}
+
+static const struct wl_pointer_interface pointer_implementation = {
+    .set_cursor = pointer_set_cursor,
+    .release = pointer_release,
+};
+
+// Keyboard implementation
+static void
+keyboard_release(struct wl_client *client, struct wl_resource *resource)
+{
+    wl_resource_destroy(resource);
+}
+
+static const struct wl_keyboard_interface keyboard_implementation = {
+    .release = keyboard_release,
+};
+
+// Touch implementation
+static void
+touch_release(struct wl_client *client, struct wl_resource *resource)
+{
+    wl_resource_destroy(resource);
+}
+
+static const struct wl_touch_interface touch_implementation = {
+    .release = touch_release,
+};
+
 static void
 seat_get_pointer(struct wl_client *client, struct wl_resource *resource, uint32_t id)
 {
@@ -13,8 +55,8 @@ seat_get_pointer(struct wl_client *client, struct wl_resource *resource, uint32_
         wl_client_post_no_memory(client);
         return;
     }
-    // We should set implementation for pointer (empty for now or standard)
-    // wl_resource_set_implementation(pointer, &pointer_interface, seat, NULL);
+    
+    wl_resource_set_implementation(pointer, &pointer_implementation, seat, NULL);
     seat->pointer_resource = pointer; // Simple tracking (last one wins)
 }
 
@@ -27,7 +69,8 @@ seat_get_keyboard(struct wl_client *client, struct wl_resource *resource, uint32
         wl_client_post_no_memory(client);
         return;
     }
-    // wl_resource_set_implementation(keyboard, &keyboard_interface, seat, NULL);
+    
+    wl_resource_set_implementation(keyboard, &keyboard_implementation, seat, NULL);
     seat->keyboard_resource = keyboard;
     
     // Send keymap if we have one (todo)
@@ -42,6 +85,8 @@ seat_get_touch(struct wl_client *client, struct wl_resource *resource, uint32_t 
         wl_client_post_no_memory(client);
         return;
     }
+    
+    wl_resource_set_implementation(touch, &touch_implementation, seat, NULL);
     seat->touch_resource = touch;
 }
 
@@ -132,43 +177,77 @@ wl_seat_set_focused_surface(struct wl_seat_impl *seat, void *surface)
     if (seat) seat->focused_surface = surface;
 }
 
-// Input event handlers stubs
+// Input event handlers
 void wl_seat_send_pointer_enter(struct wl_seat_impl *seat, struct wl_resource *surface, uint32_t serial, double x, double y) {
-    (void)seat; (void)surface; (void)serial; (void)x; (void)y;
+    if (seat && seat->pointer_resource) {
+        wl_pointer_send_enter(seat->pointer_resource, serial, surface, wl_fixed_from_double(x), wl_fixed_from_double(y));
+    }
 }
 void wl_seat_send_pointer_leave(struct wl_seat_impl *seat, struct wl_resource *surface, uint32_t serial) {
-    (void)seat; (void)surface; (void)serial;
+    if (seat && seat->pointer_resource) {
+        wl_pointer_send_leave(seat->pointer_resource, serial, surface);
+    }
 }
 void wl_seat_send_pointer_motion(struct wl_seat_impl *seat, uint32_t time, double x, double y) {
-    (void)seat; (void)time; (void)x; (void)y;
+    if (seat && seat->pointer_resource) {
+        wl_pointer_send_motion(seat->pointer_resource, time, wl_fixed_from_double(x), wl_fixed_from_double(y));
+    }
 }
 void wl_seat_send_pointer_button(struct wl_seat_impl *seat, uint32_t serial, uint32_t time, uint32_t button, uint32_t state) {
-    (void)seat; (void)serial; (void)time; (void)button; (void)state;
+    if (seat && seat->pointer_resource) {
+        wl_pointer_send_button(seat->pointer_resource, serial, time, button, state);
+    }
+}
+void wl_seat_send_pointer_frame(struct wl_seat_impl *seat) {
+    if (seat && seat->pointer_resource) {
+        if (wl_resource_get_version(seat->pointer_resource) >= WL_POINTER_FRAME_SINCE_VERSION) {
+            wl_pointer_send_frame(seat->pointer_resource);
+        }
+    }
 }
 void wl_seat_send_keyboard_enter(struct wl_seat_impl *seat, struct wl_resource *surface, uint32_t serial, struct wl_array *keys) {
-    (void)seat; (void)surface; (void)serial; (void)keys;
+    if (seat && seat->keyboard_resource) {
+        wl_keyboard_send_enter(seat->keyboard_resource, serial, surface, keys);
+    }
 }
 void wl_seat_send_keyboard_leave(struct wl_seat_impl *seat, struct wl_resource *surface, uint32_t serial) {
-    (void)seat; (void)surface; (void)serial;
+    if (seat && seat->keyboard_resource) {
+        wl_keyboard_send_leave(seat->keyboard_resource, serial, surface);
+    }
 }
 void wl_seat_send_keyboard_key(struct wl_seat_impl *seat, uint32_t serial, uint32_t time, uint32_t key, uint32_t state) {
-    (void)seat; (void)serial; (void)time; (void)key; (void)state;
+    if (seat && seat->keyboard_resource) {
+        wl_keyboard_send_key(seat->keyboard_resource, serial, time, key, state);
+    }
 }
 void wl_seat_send_keyboard_modifiers(struct wl_seat_impl *seat, uint32_t serial) {
-    (void)seat; (void)serial;
+    if (seat && seat->keyboard_resource) {
+        wl_keyboard_send_modifiers(seat->keyboard_resource, serial, 
+                                   seat->mods_depressed, seat->mods_latched, seat->mods_locked, seat->group);
+    }
 }
 void wl_seat_send_touch_down(struct wl_seat_impl *seat, uint32_t serial, uint32_t time, struct wl_resource *surface, int32_t id, wl_fixed_t x, wl_fixed_t y) {
-    (void)seat; (void)serial; (void)time; (void)surface; (void)id; (void)x; (void)y;
+    if (seat && seat->touch_resource) {
+        wl_touch_send_down(seat->touch_resource, serial, time, surface, id, x, y);
+    }
 }
 void wl_seat_send_touch_up(struct wl_seat_impl *seat, uint32_t serial, uint32_t time, int32_t id) {
-    (void)seat; (void)serial; (void)time; (void)id;
+    if (seat && seat->touch_resource) {
+        wl_touch_send_up(seat->touch_resource, serial, time, id);
+    }
 }
 void wl_seat_send_touch_motion(struct wl_seat_impl *seat, uint32_t time, int32_t id, wl_fixed_t x, wl_fixed_t y) {
-    (void)seat; (void)time; (void)id; (void)x; (void)y;
+    if (seat && seat->touch_resource) {
+        wl_touch_send_motion(seat->touch_resource, time, id, x, y);
+    }
 }
 void wl_seat_send_touch_frame(struct wl_seat_impl *seat) {
-    (void)seat;
+    if (seat && seat->touch_resource) {
+        wl_touch_send_frame(seat->touch_resource);
+    }
 }
 void wl_seat_send_touch_cancel(struct wl_seat_impl *seat) {
-    (void)seat;
+    if (seat && seat->touch_resource) {
+        wl_touch_send_cancel(seat->touch_resource);
+    }
 }

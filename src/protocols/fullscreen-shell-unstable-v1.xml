@@ -1,0 +1,167 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="fullscreen_shell_unstable_v1">
+  <copyright>
+    Copyright © 2016 Yong Bakos
+    Copyright © 2015 Jason Ekstrand
+    Copyright © 2015 Jonas Ådahl
+
+    Permission is hereby granted, free of charge, to any person obtaining a
+    copy of this software and associated documentation files (the "Software"),
+    to deal in the Software without restriction, including without limitation
+    the rights to use, copy, modify, merge, publish, distribute, sublicense,
+    and/or sell copies of the Software, and to permit persons to whom the
+    Software is furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice (including the next
+    paragraph) shall be included in all copies or substantial portions of the
+    Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+    THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+    FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+    DEALINGS IN THE SOFTWARE.
+  </copyright>
+
+  <interface name="zwp_fullscreen_shell_v1" version="1">
+    <description summary="displays a single surface per output">
+      Displays a single surface per output.
+
+      This interface provides a mechanism for a single client to display
+      simple full-screen surfaces.  While there technically may be multiple
+      clients that bind to this interface, only one client should bind to
+      it at a time.
+
+      To form the surfaces to be displayed, the client creates one or more
+      wl_surfaces.  It then requests one of those surfaces to be displayed
+      on a given output.  The client may also request a mode switch to
+      a particular mode.
+
+      When a surface is presented on an output, that output is considered
+      to be "owned" by the client and the client should expect to receive
+      all input from that output.  If the client wants to present the same
+      surface on multiple outputs, it should request the surface be presented
+      on each output individually.
+
+      If the client releases the interface, all surfaces presented by the
+      client are removed from the outputs.
+    </description>
+
+    <request name="release" type="destructor">
+      <description summary="release the zwp_fullscreen_shell_v1 interface">
+	Release the binding from the zwp_fullscreen_shell_v1 interface.
+	Any surfaces presented by this client will be hidden and the
+	outputs they were presented on will be released.
+      </description>
+    </request>
+
+    <enum name="capability">
+      <description summary="capabilities advertised by the compositor">
+	Various capabilities that can be advertised by the compositor.  They
+	are advertised one-at-a-time when the interface is first bound.
+      </description>
+      <entry name="arbitrary_modes" value="1"
+	     summary="compositor is capable of some arbitrary modes"/>
+      <entry name="cursor_plane" value="2"
+	     summary="compositor has a separate cursor plane"/>
+    </enum>
+
+    <event name="capability">
+      <description summary="advertises a capability of the compositor">
+	Advertises a single capability of the compositor.
+
+	When the zwp_fullscreen_shell_v1 interface is bound, this event is emitted
+	once for each capability supported.  If this event is not sent for a
+	given capability, then the compositor does not support that capability.
+      </description>
+      <arg name="capability" type="uint" enum="capability"/>
+    </event>
+
+    <enum name="present_method">
+      <description summary="different methods to set the surface fullscreen">
+	Hints to indicate to the compositor how to deal with a conflict
+	between the dimensions of the surface and the dimensions of the
+	output. The compositor is free to ignore these hints.
+      </description>
+      <entry name="default" value="0" summary="no preference, apply default policy"/>
+      <entry name="center" value="1" summary="center the surface on the output"/>
+      <entry name="zoom" value="2" summary="scale the surface, maintaining aspect ratio, to the largest size that will fit on the output"/>
+      <entry name="zoom_crop" value="3" summary="scale the surface, maintaining aspect ratio, to fully cover the output, cropping if needed"/>
+      <entry name="stretch" value="4" summary="scale the surface to the size of the output, ignoring aspect ratio"/>
+    </enum>
+
+    <request name="present_surface">
+      <description summary="present surface for display">
+	Present a surface on the given output.
+
+	If the output is null, the compositor will present the surface on
+	whatever output (or outputs) it deems appropriate.  In particular,
+	this may replace any previous surface presented on that output.
+
+	The method parameter is a hint to the compositor for how the surface
+	should be presented.  The compositor is free to ignore this hint.
+      </description>
+      <arg name="surface" type="object" interface="wl_surface" allow-null="true"/>
+      <arg name="method" type="uint" enum="present_method"/>
+      <arg name="output" type="object" interface="wl_output" allow-null="true"/>
+    </request>
+
+    <request name="present_surface_for_mode">
+      <description summary="present surface for display at a particular mode">
+	Presents a surface on the given output for a particular mode.
+
+	If the current size of the output differs from that of the surface,
+	the compositor will attempt to change the size of the output to
+	match the surface.  The result of the mode-switch operation will be
+	returned via the provided zwp_fullscreen_shell_mode_feedback_v1
+	object.
+
+	If the presented surface is null, then the output's mode will be
+	changed to the one requested and the output will show a black
+	screen.
+
+	If the framerate parameter is 0, the compositor will choose the
+	framerate.  If the framerate parameter is not 0, the compositor
+	will attempt to match the framerate.
+      </description>
+      <arg name="surface" type="object" interface="wl_surface" allow-null="true"/>
+      <arg name="output" type="object" interface="wl_output"/>
+      <arg name="framerate" type="int"/>
+      <arg name="feedback" type="new_id" interface="zwp_fullscreen_shell_mode_feedback_v1"/>
+    </request>
+
+    <enum name="error">
+      <entry name="invalid_method" value="0"
+	     summary="present_method is not known"/>
+    </enum>
+  </interface>
+
+  <interface name="zwp_fullscreen_shell_mode_feedback_v1" version="1">
+    <event name="mode_successful">
+      <description summary="mode switch succeeded">
+	Network the success of a mode-switch operation.  If the surface
+	is non-null, this event implies that the mode switch operation
+	succeeded and the surface was presented.
+      </description>
+    </event>
+    <event name="mode_failed">
+      <description summary="mode switch failed">
+	Network the failure of a mode-switch operation.  If the surface
+	is non-null, this event implies that the mode switch operation
+	failed and the surface was not presented.
+      </description>
+    </event>
+    <event name="present_cancelled">
+      <description summary="mode switch cancelled">
+	Network the cancellation of a mode-switch operation.  This event
+	is sent when the presented surface is no longer being displayed
+	on the output.  This can happen if another client takes over
+	the output or if the compositor decides to stop displaying the
+	surface for some other reason.
+      </description>
+    </event>
+  </interface>
+</protocol>
+

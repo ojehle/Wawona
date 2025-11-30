@@ -163,6 +163,7 @@ void wl_compositor_destroy_all_clients(void);
 @property (nonatomic, assign) struct wl_event_source *frame_callback_source;
 @property (nonatomic, assign) int32_t pending_resize_width;
 @property (nonatomic, assign) int32_t pending_resize_height;
+@property (nonatomic, assign) int32_t pending_resize_scale;
 @property (nonatomic, assign) volatile BOOL needs_resize_configure;
 @property (nonatomic, assign) BOOL windowShown; // Track if window has been shown (delayed until first client)
 @property (nonatomic, assign) BOOL isFullscreen; // Track if window is in fullscreen mode

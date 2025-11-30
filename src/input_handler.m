@@ -1,5 +1,6 @@
 #import "input_handler.h"
 #import "wayland_seat.h"
+#include "WawonaCompositor.h" // For wl_get_all_surfaces and wl_surface_impl
 #include <wayland-server-protocol.h>
 #include <wayland-server.h>
 #include <time.h>
@@ -167,14 +168,22 @@ static uint32_t macButtonToWaylandButton(NSEventType eventType, NSEvent *event) 
     return self;
 }
 
+static uint32_t getWaylandTime() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint32_t)((ts.tv_sec * 1000) + (ts.tv_nsec / 1000000));
+}
+
 - (void)setupInputHandling {
 #if TARGET_OS_IPHONE || TARGET_OS_SIMULATOR
     if (_seat) {
         struct wl_seat_impl *seat_impl = _seat;
-        seat_impl->capabilities = WL_SEAT_CAPABILITY_TOUCH;
-        NSLog(@"✅ iOS input handling configured");
+        // Enable both TOUCH and POINTER to support desktop apps that only handle mouse
+        seat_impl->capabilities = WL_SEAT_CAPABILITY_TOUCH | WL_SEAT_CAPABILITY_POINTER;
+        NSLog(@"✅ iOS input handling configured (Touch + Pointer emulation)");
     }
-    [self setupGestureRecognizers];
+    // Use direct touch handling in CompositorView instead of gesture recognizers
+    // [self setupGestureRecognizers];
 #else
     NSTrackingArea *trackingArea = [[NSTrackingArea alloc] initWithRect:[_window.contentView bounds]
                                                                 options:(NSTrackingMouseMoved | NSTrackingActiveInKeyWindow | NSTrackingInVisibleRect)
@@ -201,9 +210,10 @@ static uint32_t macButtonToWaylandButton(NSEventType eventType, NSEvent *event) 
 
 - (void)handleTouchEvent:(UIEvent *)event {
     NSSet<UITouch *> *touches = [event allTouches];
+    UIView *view = self.targetView ? self.targetView : _window;
     
     for (UITouch *touch in touches) {
-        CGPoint location = [touch locationInView:_window];
+        CGPoint location = [touch locationInView:view];
         
         switch (touch.phase) {
             case UITouchPhaseBegan:
@@ -224,33 +234,92 @@ static uint32_t macButtonToWaylandButton(NSEventType eventType, NSEvent *event) 
     }
 }
 
+- (struct wl_surface_impl *)pickSurfaceAt:(CGPoint)location {
+    // Simple hit testing: return the first surface that contains the point
+    // For fullscreen shell, this usually returns the main surface
+    // TODO: Handle z-order and subsurfaces correctly
+    
+    struct wl_surface_impl *surface = wl_get_all_surfaces();
+    while (surface) {
+        // In fullscreen mode, the surface covers the screen, so we just check if it has a resource
+        if (surface->resource) {
+            return surface;
+        }
+        surface = surface->next;
+    }
+    return NULL;
+}
+
 - (void)sendTouchDown:(CGPoint)location touch:(UITouch *)touch {
     if (_seat) {
         struct wl_seat_impl *seat_impl = _seat;
-        wl_fixed_t x = wl_fixed_from_double(location.x);
-        wl_fixed_t y = wl_fixed_from_double(location.y);
+        struct wl_surface_impl *surface = [self pickSurfaceAt:location];
+        
+        if (!surface || !surface->resource) {
+            // No surface found - can't send event
+            return;
+        }
+        
+        // Convert view points to surface-local coordinates (pixels)
+        // Assume surface covers the window/view 1:1 (or scaled)
+        // If using fullscreen shell, output size matches surface size (in pixels)
+        // Location is in points. We need pixels.
+#if TARGET_OS_IPHONE || TARGET_OS_SIMULATOR
+        CGFloat scale = _window.screen.scale;
+#else
+        CGFloat scale = _window.backingScaleFactor;
+#endif
+        wl_fixed_t x = wl_fixed_from_double(location.x * scale);
+        wl_fixed_t y = wl_fixed_from_double(location.y * scale);
         
         wl_seat_send_touch_down(seat_impl, 
                                wl_seat_get_serial(seat_impl),
-                               0, // timestamp
-                               NULL, // surface
+                               getWaylandTime(), // timestamp
+                               surface->resource, // Valid surface!
                                (int32_t)(intptr_t)touch, 
                                x, y);
-        NSLog(@"📱 Touch down at (%.1f, %.1f)", location.x, location.y);
+        wl_seat_send_touch_frame(seat_impl); // REQUIRED: Group events
+        
+        // Also send pointer events for desktop apps compatibility (emulate mouse click)
+        wl_seat_send_pointer_enter(seat_impl, surface->resource, wl_seat_get_serial(seat_impl), x, y);
+        wl_seat_send_pointer_frame(seat_impl);
+        
+        // Send explicit motion to ensure client updates cursor position before click
+        wl_seat_send_pointer_motion(seat_impl, getWaylandTime(), x, y);
+        wl_seat_send_pointer_frame(seat_impl);
+        
+        wl_seat_send_pointer_button(seat_impl, wl_seat_get_serial(seat_impl), getWaylandTime(), 272, 1); // BTN_LEFT down
+        wl_seat_send_pointer_frame(seat_impl);
+        
+        NSLog(@"📱 Touch down at (%.1f, %.1f) on surface %p", location.x, location.y, surface);
     }
 }
 
 - (void)sendTouchMotion:(CGPoint)location touch:(UITouch *)touch {
     if (_seat) {
         struct wl_seat_impl *seat_impl = _seat;
-        wl_fixed_t x = wl_fixed_from_double(location.x);
-        wl_fixed_t y = wl_fixed_from_double(location.y);
+        
+        // Convert to pixels
+#if TARGET_OS_IPHONE || TARGET_OS_SIMULATOR
+        CGFloat scale = _window.screen.scale;
+#else
+        CGFloat scale = _window.backingScaleFactor;
+#endif
+        wl_fixed_t x = wl_fixed_from_double(location.x * scale);
+        wl_fixed_t y = wl_fixed_from_double(location.y * scale);
         
         wl_seat_send_touch_motion(seat_impl,
-                                0, // timestamp
+                                getWaylandTime(), // timestamp
                                 (int32_t)(intptr_t)touch,
                                 x, y);
-        NSLog(@"📱 Touch motion at (%.1f, %.1f)", location.x, location.y);
+        wl_seat_send_touch_frame(seat_impl); // REQUIRED
+        
+        // Send pointer motion
+        wl_seat_send_pointer_motion(seat_impl, getWaylandTime(), x, y);
+        wl_seat_send_pointer_frame(seat_impl);
+        
+        // Reduce log spam for motion
+        // NSLog(@"📱 Touch motion at (%.1f, %.1f)", location.x, location.y);
     }
 }
 
@@ -259,8 +328,14 @@ static uint32_t macButtonToWaylandButton(NSEventType eventType, NSEvent *event) 
         struct wl_seat_impl *seat_impl = _seat;
         wl_seat_send_touch_up(seat_impl,
                              wl_seat_get_serial(seat_impl),
-                             0, // timestamp
+                             getWaylandTime(), // timestamp
                              (int32_t)(intptr_t)touch);
+        wl_seat_send_touch_frame(seat_impl); // REQUIRED
+                             
+        // Send pointer button up
+        wl_seat_send_pointer_button(seat_impl, wl_seat_get_serial(seat_impl), getWaylandTime(), 272, 0); // BTN_LEFT up
+        wl_seat_send_pointer_frame(seat_impl);
+        
         NSLog(@"📱 Touch up at (%.1f, %.1f)", location.x, location.y);
     }
 }
@@ -269,12 +344,14 @@ static uint32_t macButtonToWaylandButton(NSEventType eventType, NSEvent *event) 
     if (_seat) {
         struct wl_seat_impl *seat_impl = _seat;
         wl_seat_send_touch_cancel(seat_impl);
+        wl_seat_send_touch_frame(seat_impl); // REQUIRED
         NSLog(@"📱 Touch cancelled");
     }
 }
 
 - (void)handleTapGesture:(UITapGestureRecognizer *)gesture {
-    CGPoint location = [gesture locationInView:_window];
+    UIView *view = self.targetView ? self.targetView : _window;
+    CGPoint location = [gesture locationInView:view];
     NSLog(@"📱 Tap gesture at (%.1f, %.1f)", location.x, location.y);
     if (_seat) {
         UITouch *syntheticTouch = (__bridge UITouch *)((void *)gesture.hash);
@@ -285,7 +362,8 @@ static uint32_t macButtonToWaylandButton(NSEventType eventType, NSEvent *event) 
 
 - (void)handlePanGesture:(UIPanGestureRecognizer *)gesture {
     if (_seat && gesture.state == UIGestureRecognizerStateChanged) {
-        CGPoint location = [gesture locationInView:_window];
+        UIView *view = self.targetView ? self.targetView : _window;
+        CGPoint location = [gesture locationInView:view];
         [self sendTouchMotion:location touch:nil];
     }
 }

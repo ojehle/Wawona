@@ -33,6 +33,16 @@
 			<key>DefaultValue</key>
 			<true/>
 		</dict>
+		<dict>
+			<key>Type</key>
+			<string>PSToggleSwitchSpecifier</string>
+			<key>Title</key>
+			<string>Respect Safe Area (Notch)</string>
+			<key>Key</key>
+			<string>RespectSafeArea</string>
+			<key>DefaultValue</key>
+			<true/>
+		</dict>
 		
 		<!-- Input Settings -->
 		<dict>

@@ -290,7 +290,8 @@ static void signal_handler(int sig) {
     // Create iOS window
     CGRect screenBounds = [[UIScreen mainScreen] bounds];
     self.window = [[UIWindow alloc] initWithFrame:screenBounds];
-    self.window.backgroundColor = [UIColor colorWithRed:0.1 green:0.1 blue:0.2 alpha:1.0];
+    // Use black background to create "letterboxing" effect for safe area rendering
+    self.window.backgroundColor = [UIColor blackColor];
     
     // Root view controller
     UIViewController *rootViewController = [[UIViewController alloc] init];
@@ -351,11 +352,13 @@ static void signal_handler(int sig) {
     settingsButton.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.7];
     settingsButton.layer.cornerRadius = 25.0;
     [settingsButton addTarget:self action:@selector(showSettings:) forControlEvents:UIControlEventTouchUpInside];
-    [rootViewController.view addSubview:settingsButton];
+    // Use active root view controller (compositor might have replaced it)
+    UIViewController *activeRootVC = self.window.rootViewController;
+    [activeRootVC.view addSubview:settingsButton];
     
     [NSLayoutConstraint activateConstraints:@[
-        [settingsButton.topAnchor constraintEqualToAnchor:rootViewController.view.safeAreaLayoutGuide.topAnchor constant:20],
-        [settingsButton.trailingAnchor constraintEqualToAnchor:rootViewController.view.safeAreaLayoutGuide.trailingAnchor constant:-20],
+        [settingsButton.topAnchor constraintEqualToAnchor:activeRootVC.view.safeAreaLayoutGuide.topAnchor constant:20],
+        [settingsButton.trailingAnchor constraintEqualToAnchor:activeRootVC.view.safeAreaLayoutGuide.trailingAnchor constant:-20],
         [settingsButton.widthAnchor constraintEqualToConstant:50],
         [settingsButton.heightAnchor constraintEqualToConstant:50],
     ]];
