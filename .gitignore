@@ -22,8 +22,9 @@ cmake_install.cmake
 .AppleDouble
 .LSOverride
 
-# Wayland runtime
+# Wayland runtime (but not .pc source files)
 wayland-*
+!**/*wayland*.pc
 
 # Log files
 *.log
