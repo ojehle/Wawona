@@ -215,8 +215,17 @@ let
       
       # Determine build inputs based on dependency name
       waylandDeps = with pkgs; [ expat libffi libxml2 ];
+          mesaDeps = with pkgs; [
+            libclc  # Required by Mesa build system
+            zlib  # Required by Mesa
+            zstd  # libzstd
+            expat  # XML parsing
+            llvmPackages.llvm  # LLVM (may be needed for some drivers)
+          ];
       defaultDeps = [];
-      depInputs = if name == "wayland" then waylandDeps else defaultDeps;
+      depInputs = if name == "wayland" then waylandDeps
+                 else if name == "mesa-kosmickrisp" then mesaDeps
+                 else defaultDeps;
     in
       if buildSystem == "cmake" then
         pkgs.stdenv.mkDerivation {
@@ -240,7 +249,13 @@ let
             meson
             ninja
             pkg-config
-            python3
+            (python3.withPackages (ps: with ps; [
+              setuptools
+              pip
+              packaging
+              mako
+              pyyaml
+            ]))
             bison
             flex
           ];
@@ -256,6 +271,12 @@ let
               ${lib.concatMapStringsSep " \\\n  " (flag: flag) buildFlags}
             runHook postConfigure
           '';
+          
+          # Disable features that require missing dependencies
+          mesonFlags = buildFlags ++ [
+            "-Dglvnd=false"
+            "-Dgallium-va=false"
+          ];
           
           buildPhase = ''
             runHook preBuild

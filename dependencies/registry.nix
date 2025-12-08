@@ -124,27 +124,27 @@
     buildFlags = {
       ios = [
         "-Dvulkan-drivers=kosmickrisp"
-        "-Dgallium-drivers="  # Disable Gallium drivers (we only need Vulkan)
-        "-Dplatforms="  # Disable platform backends (we'll use Metal directly)
-        "-Ddri-drivers="  # Disable DRI drivers
+        "-Dgallium-drivers="  # Disable Gallium drivers (empty list)
+        "-Dplatforms="  # Disable platform backends (empty list)
         "-Dglx=disabled"  # Disable GLX
         "-Degl=disabled"  # Disable EGL
         "-Dgbm=disabled"  # Disable GBM
-        "-Dtools="  # Disable tools
+        "-Dtools="  # Disable tools (empty list)
         "-Dvulkan-beta=true"  # Enable Vulkan beta extensions
         "-Dbuildtype=release"
       ];
       macos = [
         "-Dvulkan-drivers=kosmickrisp"
-        "-Dgallium-drivers="  # Disable Gallium drivers
-        "-Dplatforms="  # Disable platform backends
-        "-Ddri-drivers="  # Disable DRI drivers
+        "-Dgallium-drivers="  # Disable Gallium drivers (empty list)
+        "-Dplatforms="  # Disable platform backends (empty list)
         "-Dglx=disabled"  # Disable GLX
         "-Degl=disabled"  # Disable EGL
         "-Dgbm=disabled"  # Disable GBM
-        "-Dtools="  # Disable tools
+        "-Dtools="  # Disable tools (empty list)
         "-Dvulkan-beta=true"  # Enable Vulkan beta extensions
         "-Dbuildtype=release"
+        "-Dglvnd=disabled"  # Disable libglvnd
+        "-Dgallium-va=disabled"  # Disable libva
       ];
     };
     # Patches will be added when needed - for now build without patches
