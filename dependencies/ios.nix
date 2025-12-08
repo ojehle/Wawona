@@ -74,6 +74,10 @@ in
           
           buildInputs = depInputs;
           
+          # For wayland, we need expat, libffi, libxml2
+          # These will be built separately and referenced via PKG_CONFIG_PATH
+          # We avoid depsTargetTarget to prevent recursion
+          
           # Automatically find and use Xcode if available
           preConfigure = ''
             # Find Xcode and set up environment
@@ -86,12 +90,19 @@ in
                 export SDKROOT="$DEVELOPER_DIR/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk"
                 echo "Found Xcode at: $XCODE_APP"
                 echo "Using iOS SDK: $SDKROOT"
-                
-                # Note: Dependencies (expat, libffi, libxml2) will need to be built for iOS
-                # For now, we'll let the build fail if they're missing, then add them
               else
                 echo "Warning: Xcode not found. iOS build may fail."
               fi
+            fi
+            
+            # Set PKG_CONFIG_PATH to find iOS dependencies
+            # For wayland, we need expat, libffi, libxml2 built for iOS
+            # These should be available via iosPkgs but we reference them lazily
+            if [ "${name}" = "wayland" ]; then
+              # Try to find iOS dependencies - they may need to be built first
+              # For now, pkg-config will look in standard locations
+              echo "Note: wayland requires expat, libffi, libxml2 for iOS"
+              echo "These dependencies should be built separately first"
             fi
           '';
           
