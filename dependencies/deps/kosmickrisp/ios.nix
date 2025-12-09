@@ -23,6 +23,7 @@ let
     "-Dbuildtype=release"
     "-Dglvnd=disabled"
     "-Dgallium-va=disabled"
+    "-Dmesa-clc=system"
   ];
   patches = [];
   # For iOS, we need cross-compiled dependencies, not macOS versions
@@ -39,6 +40,53 @@ let
   spirvToolsIOS = buildModule.buildForIOS "spirv-tools" {};
   libclcIOS = buildModule.buildForIOS "libclc" {};
   
+  # Helper to build mesa_clc tool for the build host (macOS)
+  # This is required to compile CL kernels during the cross-compilation of the driver
+  mesaClcNative = pkgs.stdenv.mkDerivation {
+    name = "mesa-clc-native";
+    inherit src patches;
+    nativeBuildInputs = with buildPackages; [
+      meson ninja pkg-config clang cmake
+      (python3.withPackages (ps: with ps; [ setuptools pip packaging mako pyyaml ]))
+      bison flex
+    ];
+    buildInputs = with buildPackages; [
+            llvmPackages.llvm llvmPackages.libclang llvmPackages.clang-unwrapped.lib llvmPackages.clang-unwrapped.dev
+            spirv-headers libclc spirv-llvm-translator spirv-tools libxml2
+          ];
+    postPatch = ''
+      # Fix clang lib detection by allowing search in other directories (LDFLAGS)
+      sed -i "s/dirs : llvm_libdir/dirs : []/g" meson.build
+      
+      # Fix clang resource dir path to point to clang-unwrapped instead of llvm
+      substituteInPlace src/compiler/clc/meson.build \
+        --replace "join_paths(llvm_libdir, 'clang'" "join_paths('${buildPackages.llvmPackages.clang-unwrapped.lib}/lib', 'clang'"
+
+      # Force dynamic linking for LLVM to avoid crashes (exit code 139) on macOS
+      sed -i "s/static : not _shared_llvm/static : false/g" meson.build
+    '';
+    preConfigure = ''
+      export LDFLAGS="-L${buildPackages.llvmPackages.clang-unwrapped.lib}/lib $LDFLAGS"
+      export CPPFLAGS="-I${buildPackages.llvmPackages.clang-unwrapped.dev}/include $CPPFLAGS"
+    '';
+    mesonBuildType = "release";
+    mesonFlags = [
+      "-Dauto_features=disabled"
+      "-Dgallium-drivers="
+      "-Dvulkan-drivers="
+      "-Dplatforms="
+      "-Dglx=disabled"
+      "-Degl=disabled"
+      "-Dgbm=disabled"
+      "-Dxlib-lease=disabled"
+      "-Dglvnd=disabled"
+      "-Dllvm=enabled"
+      "-Dspirv-tools=enabled"
+      "-Dmesa-clc=enabled"
+      "-Dinstall-mesa-clc=true"
+    ];
+  };
+
   getDeps = depNames:
     map (depName:
       if depName == "zlib" then zlibIOS
@@ -54,20 +102,25 @@ let
       else throw "Unknown dependency: ${depName}"
     ) depNames;
   depInputs = getDeps [ "zlib" "zstd" "expat" "llvm" "clang" "clang-dev" "spirv-llvm-translator" "spirv-tools" "spirv-headers" "libclc" ];
+
 in
 pkgs.stdenv.mkDerivation {
   name = "kosmickrisp-ios";
   inherit src patches;
   nativeBuildInputs = with buildPackages; [
-    meson ninja pkg-config
+    meson ninja pkg-config clang
     (python3.withPackages (ps: with ps; [ setuptools pip packaging mako pyyaml ]))
     bison flex
+    mesaClcNative
   ];
   # Metal frameworks are linked via -framework flags, not as buildInputs
   # Mesa's meson.build will find them via pkg-config or direct linking
   buildInputs = depInputs;
+  
   postPatch = ''
-    echo "=== Patching Mesa meson.build for Clang library detection (iOS) ==="
+    echo "DEBUG: Starting postPatch"
+    set -x
+    # echo "=== Patching Mesa meson.build for Clang library detection (iOS) ==="
     # Fix Clang library detection: Mesa expects Clang libraries in LLVM libdir
     # but in Nixpkgs, Clang libraries are in a separate package (clang-unwrapped.lib)
     # Write patch lines to a temp file to avoid Nix string escaping issues
@@ -99,6 +152,48 @@ ENDPATCH
       "dep_clang += cpp.find_library(m, dirs : clang_libdirs, required : true)"
     
     echo "Applied Clang library detection patch for iOS"
+
+    # Patch MTLCopyAllDevices (iOS 18.0+) for older iOS versions
+    # We inject a compatibility shim at the top of mtl_device.m
+    # This replaces MTLCopyAllDevices() with a fallback using MTLCreateSystemDefaultDevice()
+    # which is appropriate for iOS (usually single GPU)
+    echo "Patching MTLCopyAllDevices usage in src/kosmickrisp/bridge/mtl_device.m"
+    sed -i '1i\
+#import <Metal/Metal.h>\
+#include <Availability.h>\
+// Compatibility shim for MTLCopyAllDevices (iOS 18.0+)\
+// If we are targeting older iOS, or if the symbol is weak-linked but we want to be safe\
+static inline NSArray<id<MTLDevice>> * Compat_MTLCopyAllDevices() {\
+    if (@available(iOS 18.0, *)) {\
+        return MTLCopyAllDevices();\
+    } else {\
+        id<MTLDevice> device = MTLCreateSystemDefaultDevice();\
+        return device ? @[device] : @[];\
+    }\
+}\
+#define MTLCopyAllDevices Compat_MTLCopyAllDevices' src/kosmickrisp/bridge/mtl_device.m
+
+    # Patch peerGroupID and peerIndex (missing on iOS < 18.0 or Mac-only)
+    echo "Patching peerGroupID/peerIndex in src/kosmickrisp/bridge/mtl_device.m"
+    # Replace property access with 0
+    sed -i 's/device\.peerGroupID/0/g' src/kosmickrisp/bridge/mtl_device.m
+    sed -i 's/\[device peerGroupID\]/0/g' src/kosmickrisp/bridge/mtl_device.m
+    sed -i 's/device\.peerIndex/0/g' src/kosmickrisp/bridge/mtl_device.m
+    sed -i 's/\[device peerIndex\]/0/g' src/kosmickrisp/bridge/mtl_device.m
+
+    # Patch MTLResidencySet usage in mtl_residency_set.m
+    echo "Patching MTLResidencySet in src/kosmickrisp/bridge/mtl_residency_set.m"
+    # Initialize error to avoid uninitialized usage warning
+    sed -i 's/NSError \*error;/NSError *error = nil;/g' src/kosmickrisp/bridge/mtl_residency_set.m
+    # Wrap newResidencySetWithDescriptor:error: in @available
+    sed -i '/id<MTLResidencySet> set = \[dev newResidencySetWithDescriptor:setDescriptor/,/error:&error\];/c\
+      id<MTLResidencySet> set = nil;\
+      if (@available(iOS 18.0, *)) {\
+          set = [dev newResidencySetWithDescriptor:setDescriptor error:&error];\
+      }' src/kosmickrisp/bridge/mtl_residency_set.m
+
+
+    set +x
     echo "Verifying patch was applied:"
     grep -A 7 "clang_libdirs = \[llvm_libdir\]" meson.build || echo "WARNING: Patch may not have been applied correctly"
   '';
@@ -108,7 +203,8 @@ ENDPATCH
       if [ -n "$XCODE_APP" ]; then
         export XCODE_APP
         export DEVELOPER_DIR="$XCODE_APP/Contents/Developer"
-        export PATH="$DEVELOPER_DIR/usr/bin:$PATH"
+        # Put Xcode tools after Nix tools so we pick up Nix python, etc.
+        export PATH="$PATH:$DEVELOPER_DIR/usr/bin"
         export SDKROOT="$DEVELOPER_DIR/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk"
       fi
     fi
@@ -121,10 +217,21 @@ ENDPATCH
       IOS_CC="${buildPackages.clang}/bin/clang"
       IOS_CXX="${buildPackages.clang}/bin/clang++"
     fi
+
+    # Common flags for all languages
+    # Use -target for proper cross-compilation behavior
+    # Include paths for dependencies
+    COMMON_ARGS="['-target', 'arm64-apple-ios16.0', '-isysroot', '$SDKROOT', '-fPIC', '-I${zlibIOS}/include', '-I${zstdIOS}/include', '-I${expatIOS}/include', '-I${spirvLLVMTranslatorIOS}/include', '-I${spirvToolsIOS}/include', '-I${libclcIOS}/include', '-I${pkgs.llvmPackages.clang-unwrapped.dev}/include']"
+    
+    # Common link args
+    COMMON_LINK_ARGS="['-target', 'arm64-apple-ios16.0', '-isysroot', '$SDKROOT', '-L${zlibIOS}/lib', '-L${zstdIOS}/lib', '-L${expatIOS}/lib', '-L${spirvLLVMTranslatorIOS}/lib', '-L${spirvToolsIOS}/lib', '-L${pkgs.llvmPackages.clang-unwrapped.lib}/lib', '-lz', '-lzstd', '-lexpat', '-framework', 'Metal', '-framework', 'MetalKit', '-framework', 'Foundation', '-framework', 'IOKit']"
+
     cat > ios-cross-file.txt <<EOF
 [binaries]
 c = '$IOS_CC'
 cpp = '$IOS_CXX'
+objc = '$IOS_CC'
+objcpp = '$IOS_CXX'
 ar = 'ar'
 strip = 'strip'
 pkgconfig = '${buildPackages.pkg-config}/bin/pkg-config'
@@ -136,10 +243,14 @@ cpu = 'aarch64'
 endian = 'little'
 
 [built-in options]
-c_args = ['-arch', 'arm64', '-isysroot', '$SDKROOT', '-miphoneos-version-min=26.0', '-fPIC', '-I${zlibIOS}/include', '-I${zstdIOS}/include', '-I${expatIOS}/include', '-I${spirvLLVMTranslatorIOS}/include', '-I${spirvToolsIOS}/include', '-I${libclcIOS}/include']
-cpp_args = ['-arch', 'arm64', '-isysroot', '$SDKROOT', '-miphoneos-version-min=26.0', '-fPIC', '-I${zlibIOS}/include', '-I${zstdIOS}/include', '-I${expatIOS}/include', '-I${spirvLLVMTranslatorIOS}/include', '-I${spirvToolsIOS}/include', '-I${libclcIOS}/include']
-c_link_args = ['-arch', 'arm64', '-isysroot', '$SDKROOT', '-miphoneos-version-min=26.0', '-L${zlibIOS}/lib', '-L${zstdIOS}/lib', '-L${expatIOS}/lib', '-L${spirvLLVMTranslatorIOS}/lib', '-L${spirvToolsIOS}/lib', '-L${libclcIOS}/lib', '-lz', '-lzstd', '-lexpat', '-framework', 'Metal', '-framework', 'MetalKit', '-framework', 'Foundation', '-framework', 'IOKit']
-cpp_link_args = ['-arch', 'arm64', '-isysroot', '$SDKROOT', '-miphoneos-version-min=26.0', '-L${zlibIOS}/lib', '-L${zstdIOS}/lib', '-L${expatIOS}/lib', '-L${spirvLLVMTranslatorIOS}/lib', '-L${spirvToolsIOS}/lib', '-L${libclcIOS}/lib', '-lz', '-lzstd', '-lexpat', '-framework', 'Metal', '-framework', 'MetalKit', '-framework', 'Foundation', '-framework', 'IOKit']
+c_args = $COMMON_ARGS
+cpp_args = $COMMON_ARGS
+objc_args = $COMMON_ARGS
+objcpp_args = $COMMON_ARGS
+c_link_args = $COMMON_LINK_ARGS
+cpp_link_args = $COMMON_LINK_ARGS
+objc_link_args = $COMMON_LINK_ARGS
+objcpp_link_args = $COMMON_LINK_ARGS
 EOF
   '';
   configurePhase = ''
@@ -147,9 +258,10 @@ EOF
     # Ensure we build as .dylib (shared library) for iOS
     # Set PKG_CONFIG_PATH for iOS dependencies and SPIRV/LLVM dependencies
     # Note: iOS dependencies may not have pkg-config files, but we include paths anyway
-    export PKG_CONFIG_PATH="${zlibIOS}/lib/pkgconfig:${zstdIOS}/lib/pkgconfig:${expatIOS}/lib/pkgconfig:${spirvLLVMTranslatorIOS}/lib/pkgconfig:${spirvToolsIOS}/lib/pkgconfig:${pkgs.spirv-headers}/lib/pkgconfig:${pkgs.llvmPackages.llvm.dev}/lib/pkgconfig:''${PKG_CONFIG_PATH:-}"
+    export PKG_CONFIG_PATH="${zlibIOS}/lib/pkgconfig:${zstdIOS}/lib/pkgconfig:${expatIOS}/lib/pkgconfig:${spirvLLVMTranslatorIOS}/lib/pkgconfig:${spirvToolsIOS}/lib/pkgconfig:${libclcIOS}/share/pkgconfig:${pkgs.spirv-headers}/share/pkgconfig:${pkgs.spirv-headers}/lib/pkgconfig:${pkgs.llvmPackages.llvm.dev}/lib/pkgconfig:''${PKG_CONFIG_PATH:-}"
     # Ensure llvm-config is in PATH
     export PATH="${pkgs.llvmPackages.llvm.dev}/bin:''${PATH}"
+    export LLVM_CONFIG="${pkgs.llvmPackages.llvm.dev}/bin/llvm-config"
     meson setup build \
       --prefix=$out \
       --libdir=$out/lib \

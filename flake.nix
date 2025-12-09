@@ -1,14 +1,17 @@
 {
   description = "Wawona Multiplex Runner";
   inputs.nixpkgs.url = "github:NixOS/nixpkgs";
+  inputs.rust-overlay.url = "github:oxalica/rust-overlay";
+  inputs.rust-overlay.inputs.nixpkgs.follows = "nixpkgs";
   
-  outputs = { self, nixpkgs }: let
+  outputs = { self, nixpkgs, rust-overlay }: let
     systems = [ "aarch64-darwin" ];
     forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f system);
   in {
     packages = forAllSystems (system: let
       pkgs = import nixpkgs { 
         inherit system;
+        overlays = [ (import rust-overlay) ];
         config = {
           allowUnfree = true;
         };

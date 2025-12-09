@@ -51,6 +51,8 @@ pkgs.stdenv.mkDerivation {
     # Note: We set --host-cc to the macOS compiler to allow building helper tools
     ./configure \
       --prefix=$out \
+      --libdir=$out/lib \
+      --shlibdir=$out/lib \
       --enable-cross-compile \
       --target-os=android \
       --arch=aarch64 \

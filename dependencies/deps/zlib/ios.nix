@@ -2,10 +2,9 @@
 
 let
   xcodeUtils = import ../../../utils/xcode-wrapper.nix { inherit lib pkgs; };
-  # zlib source - fetch from zlib.net (same as nixpkgs)
   src = pkgs.fetchurl {
     url = "https://zlib.net/zlib-1.3.1.tar.gz";
-    sha256 = "sha256-08yzf8xz0q7vxs8mnn74xmpxsrs6wy0aan55lpmpriysvyvv54ws";
+    sha256 = "08yzf8xz0q7vxs8mnn74xmpxsrs6wy0aan55lpmpriysvyvv54ws";
   };
 in
 pkgs.stdenv.mkDerivation {
@@ -39,9 +38,9 @@ pkgs.stdenv.mkDerivation {
     # zlib uses configure script
     export CC="$IOS_CC"
     export CXX="$IOS_CXX"
-    export CFLAGS="-arch arm64 -isysroot $SDKROOT -miphoneos-version-min=26.0 -fPIC"
-    export CXXFLAGS="-arch arm64 -isysroot $SDKROOT -miphoneos-version-min=26.0 -fPIC"
-    export LDFLAGS="-arch arm64 -isysroot $SDKROOT -miphoneos-version-min=26.0"
+    export CFLAGS="-arch arm64 -isysroot $SDKROOT -miphoneos-version-min=15.0 -fPIC"
+    export CXXFLAGS="-arch arm64 -isysroot $SDKROOT -miphoneos-version-min=15.0 -fPIC"
+    export LDFLAGS="-arch arm64 -isysroot $SDKROOT -miphoneos-version-min=15.0"
     ./configure --prefix=$out --static
     runHook postConfigure
   '';
