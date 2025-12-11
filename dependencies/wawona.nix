@@ -933,6 +933,8 @@ EOF
     </array>
     <key>UIRequiresFullScreen</key>
     <false/>
+    <key>UILaunchScreen</key>
+    <dict/>
     <key>CFBundleIconFile</key>
     <string>AppIcon.png</string>
     <key>LSRequiresIPhoneOS</key>
