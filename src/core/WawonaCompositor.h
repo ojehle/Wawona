@@ -2,6 +2,15 @@
 #include <wayland-server-core.h>
 #include <wayland-server.h>
 
+#ifndef WAWONA_COMPOSITOR_TYPE_DEFINED
+#define WAWONA_COMPOSITOR_TYPE_DEFINED
+#ifdef __OBJC__
+@class WawonaCompositor;
+#else
+typedef struct WawonaCompositor WawonaCompositor;
+#endif
+#endif
+
 // Forward declaration
 struct wl_seat_impl;
 
@@ -99,6 +108,34 @@ void wl_compositor_clear_buffer_reference(struct wl_resource *buffer_resource);
 // Destroy all tracked clients (for shutdown) - explicitly disconnects all clients including waypipe
 void wl_compositor_destroy_all_clients(void);
 
+// C function to remove surface from renderer (for cleanup)
+void remove_surface_from_renderer(struct wl_surface_impl *surface);
+
+// C function to check if window should be hidden (called when client disconnects)
+void macos_compositor_check_and_hide_window_if_needed(void);
+
+// C function to set CSD mode for a toplevel (hide/show macOS window decorations)
+struct xdg_toplevel_impl;
+void macos_compositor_set_csd_mode_for_toplevel(struct xdg_toplevel_impl *toplevel, bool csd);
+
+// C function to activate/raise the window (called from activation protocol)
+void macos_compositor_activate_window(void);
+
+// C function to handle client disconnection (may exit fullscreen if needed)
+void macos_compositor_handle_client_disconnect(void);
+
+// C function to handle new client connection (cancel fullscreen exit timer)
+void macos_compositor_handle_client_connect(void);
+
+// C function to update window title when no clients are connected
+void macos_compositor_update_title_no_clients(void);
+
+#ifdef __OBJC__
+@class WawonaCompositor;
+#else
+typedef struct WawonaCompositor WawonaCompositor;
+#endif
+
 #ifdef __OBJC__
 #if TARGET_OS_IPHONE || TARGET_OS_SIMULATOR
 #import <UIKit/UIKit.h>
@@ -186,27 +223,6 @@ void wl_compositor_destroy_all_clients(void);
 - (void)updateOutputSize:(CGSize)size; // Update output size and notify clients (called on resize)
 
 @end
-
-// C function to remove surface from renderer (for cleanup)
-void remove_surface_from_renderer(struct wl_surface_impl *surface);
-
-// C function to check if window should be hidden (called when client disconnects)
-void macos_compositor_check_and_hide_window_if_needed(void);
-
-// C function to set CSD mode for a toplevel (hide/show macOS window decorations)
-void macos_compositor_set_csd_mode_for_toplevel(struct xdg_toplevel_impl *toplevel, bool csd);
-
-// C function to activate/raise the window (called from activation protocol)
-void macos_compositor_activate_window(void);
-
-// C function to handle client disconnection (may exit fullscreen if needed)
-void macos_compositor_handle_client_disconnect(void);
-
-// C function to handle new client connection (cancel fullscreen exit timer)
-void macos_compositor_handle_client_connect(void);
-
-// C function to update window title when no clients are connected
-void macos_compositor_update_title_no_clients(void);
 
 // C function to get EGL buffer handler (for rendering EGL buffers)
 #if !TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR

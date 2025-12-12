@@ -23,9 +23,12 @@ pkgs.stdenv.mkDerivation {
     export AR="${androidToolchain.androidAR}"
     export STRIP="${androidToolchain.androidSTRIP}"
     export RANLIB="${androidToolchain.androidRANLIB}"
-    export CFLAGS="--target=${androidToolchain.androidTarget} -fPIC"
-    export CXXFLAGS="--target=${androidToolchain.androidTarget} -fPIC"
-    export LDFLAGS="--target=${androidToolchain.androidTarget}"
+    
+    # Set sysroot for API level
+    NDK_SYSROOT="${androidToolchain.androidndkRoot}/toolchains/llvm/prebuilt/darwin-x86_64/sysroot"
+    export CFLAGS="--target=${androidToolchain.androidTarget} --sysroot=$NDK_SYSROOT -fPIC"
+    export CXXFLAGS="--target=${androidToolchain.androidTarget} --sysroot=$NDK_SYSROOT -fPIC"
+    export LDFLAGS="--target=${androidToolchain.androidTarget} --sysroot=$NDK_SYSROOT"
   '';
   
   # zstd has CMakeLists.txt in build/cmake subdirectory
@@ -38,7 +41,7 @@ pkgs.stdenv.mkDerivation {
     "-DCMAKE_ANDROID_NDK=${androidToolchain.androidndkRoot}"
     "-DCMAKE_C_COMPILER=${androidToolchain.androidCC}"
     "-DCMAKE_CXX_COMPILER=${androidToolchain.androidCXX}"
-    "-DCMAKE_ANDROID_PLATFORM=android-30"
+    "-DCMAKE_ANDROID_PLATFORM=android-${toString androidToolchain.androidNdkApiLevel}"
     "-DCMAKE_ANDROID_STL_TYPE=c++_static"
     "-DZSTD_BUILD_PROGRAMS=OFF"
     "-DZSTD_BUILD_SHARED=ON"

@@ -37,7 +37,7 @@ pkgs.stdenv.mkDerivation {
     "-DCMAKE_ANDROID_NDK=${androidToolchain.androidndkRoot}"
     "-DCMAKE_C_COMPILER=${androidToolchain.androidCC}"
     "-DCMAKE_CXX_COMPILER=${androidToolchain.androidCXX}"
-    "-DCMAKE_ANDROID_PLATFORM=android-30"
+    "-DCMAKE_ANDROID_PLATFORM=android-${toString androidToolchain.androidNdkApiLevel}"
     "-DCMAKE_ANDROID_STL_TYPE=c++_static"
     "-DBUILD_SHARED_LIBS=ON"
     "-DBUILD_STATIC_LIBS=ON"

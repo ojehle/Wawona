@@ -151,10 +151,15 @@ static void signal_handler(int sig) {
     g_display = display;
     self.display = display;
     
-    // Create iOS window
-    CGRect screenBounds = [[UIScreen mainScreen] bounds];
+    // Create iOS window - explicitly use main screen bounds to ensure correct sizing
+    UIScreen *mainScreen = [UIScreen mainScreen];
+    CGRect screenBounds = mainScreen.bounds;
     self.window = [[UIWindow alloc] initWithFrame:screenBounds];
+    self.window.screen = mainScreen; // Explicitly set screen
     self.window.backgroundColor = [UIColor colorWithRed:0.1 green:0.1 blue:0.2 alpha:1.0];
+    
+    NSLog(@"🔵 Window created: screen.bounds=%@, window.frame=%@",
+          NSStringFromCGRect(screenBounds), NSStringFromCGRect(self.window.frame));
     
     // Create compositor backend
     MacOSCompositor *compositor = [[MacOSCompositor alloc] initWithDisplay:display window:self.window];
@@ -175,10 +180,12 @@ static void signal_handler(int sig) {
     NSLog(@"   Ready for Wayland clients to connect");
     NSLog(@"");
     
-    // Create root view controller if needed
+    // Create root view controller - let UIKit handle view sizing automatically
     UIViewController *rootViewController = [[UIViewController alloc] init];
-    rootViewController.view = [[UIView alloc] initWithFrame:screenBounds];
+    // Don't manually set frame - let UIKit handle it with proper autoresizing
     rootViewController.view.backgroundColor = [UIColor clearColor];
+    // Ensure the view properly fills the window using autoresizing masks
+    rootViewController.view.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     self.window.rootViewController = rootViewController;
     
     [self teardownChromeWindowIfPresent];
@@ -187,6 +194,31 @@ static void signal_handler(int sig) {
     
     // Make window key and visible
     [self.window makeKeyAndVisible];
+    
+    // Force layout update after window is visible to ensure proper sizing
+    // This must happen after makeKeyAndVisible so the window is connected to the screen
+    [rootViewController.view setNeedsLayout];
+    [rootViewController.view layoutIfNeeded];
+    
+    // Update compositor output size after layout to ensure correct dimensions
+    // Use a small delay to ensure the compositor view has been added to the hierarchy
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (self.compositor) {
+            CGSize viewSize = rootViewController.view.bounds.size;
+            [self.compositor updateOutputSize:viewSize];
+            NSLog(@"🔵 Updated compositor output size to: %.0fx%.0f", viewSize.width, viewSize.height);
+        }
+    });
+    
+    // Log screen information for debugging
+    UIScreen *mainScreen = [UIScreen mainScreen];
+    CGRect screenBounds = mainScreen.bounds;
+    CGFloat screenScale = mainScreen.scale;
+    NSLog(@"📱 Screen info: bounds=%@, scale=%.0fx, nativeSize=%.0fx%.0f",
+          NSStringFromCGRect(screenBounds), screenScale,
+          screenBounds.size.width * screenScale, screenBounds.size.height * screenScale);
+    NSLog(@"   Window bounds: %@", NSStringFromCGRect(self.window.bounds));
+    NSLog(@"   Root view bounds: %@", NSStringFromCGRect(rootViewController.view.bounds));
     
     return YES;
 }
@@ -291,6 +323,21 @@ static void signal_handler(int sig) {
 - (void)applicationDidBecomeActive:(UIApplication *)application {
     (void)application;
     NSLog(@"✅ Application became active");
+    
+    // Force layout update to ensure views are properly sized
+    if (self.window && self.window.rootViewController) {
+        UIView *rootView = self.window.rootViewController.view;
+        [rootView setNeedsLayout];
+        [rootView layoutIfNeeded];
+        
+        // Update compositor output size if compositor exists
+        if (self.compositor) {
+            [self.compositor updateOutputSize:rootView.bounds.size];
+        }
+        
+        NSLog(@"   Window bounds after active: %@", NSStringFromCGRect(self.window.bounds));
+        NSLog(@"   Root view bounds after active: %@", NSStringFromCGRect(rootView.bounds));
+    }
 }
 
 - (void)applicationWillTerminate:(UIApplication *)application {

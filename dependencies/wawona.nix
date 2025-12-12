@@ -3,6 +3,10 @@
 let
   xcodeUtils = import ./utils/xcode-wrapper.nix { inherit lib pkgs; };
   androidToolchain = import ./common/android-toolchain.nix { inherit lib pkgs; };
+  gradleDeps = pkgs.callPackage ./gradle-deps.nix {
+    inherit wawonaSrc androidSDK;
+    inherit (pkgs) gradle jdk17;
+  };
 
   # Read version from VERSION file
   versionString = lib.fileContents (wawonaSrc + "/VERSION");
@@ -48,6 +52,9 @@ let
     "src/core/main.m"
     "src/core/WawonaCompositor.m"
     "src/core/WawonaCompositor.h"
+    "src/core/WawonaSettings.c"
+    "src/core/WawonaSettings.h"
+    "src/core/WawonaSettings.m"
     
     # Logging
     "src/logging/logging.c"
@@ -167,7 +174,7 @@ let
     "src/stubs/egl_buffer_handler.h"
   ];
 
-  iosSources = commonSources ++ [
+  iosSources = (lib.filter (f: f != "src/core/WawonaSettings.c") commonSources) ++ [
     "src/ui/ios_launcher_client.m"
     "src/ui/ios_launcher_client.h"
     "src/protocols/color-management-v1-protocol.c"
@@ -176,13 +183,14 @@ let
   # macOS sources - exclude Vulkan renderer for now (Metal is primary, Vulkan linking issues)
   macosSources = lib.filter (f: 
     f != "src/rendering/vulkan_renderer.m" &&
-    f != "src/rendering/vulkan_renderer.h"
+    f != "src/rendering/vulkan_renderer.h" &&
+    f != "src/core/WawonaSettings.c"
   ) commonSources;
 
   # Android sources - only C files, no Objective-C (no Apple frameworks)
   # Exclude Apple-specific files that use TargetConditionals.h or Apple frameworks
   androidSources = lib.filter (f: 
-    !(lib.hasSuffix ".m" f) &&  # No Objective-C files
+    (!(lib.hasSuffix ".m" f) || f == "src/core/WawonaCompositor.m") &&  # Allow WawonaCompositor.m (dual C/ObjC)
     f != "src/wayland/wayland_color_management.c" &&  # Uses TargetConditionals.h
     f != "src/wayland/wayland_color_management.h" &&  # Uses TargetConditionals.h
     f != "src/stubs/egl_buffer_handler.h" &&  # Header for Apple-specific implementation
@@ -239,6 +247,8 @@ let
 
   releaseCFlags = [ "-O3" "-DNDEBUG" "-flto" ];
   releaseObjCFlags = [ "-O3" "-DNDEBUG" "-flto" ];
+  
+  debugCFlags = [ "-g" "-O0" "-fno-omit-frame-pointer" ];
 
 in {
   macos = pkgs.stdenv.mkDerivation rec {
@@ -356,7 +366,6 @@ EOF
       
       # Compile Metal shaders
       if command -v metal >/dev/null 2>&1; then
-        echo "Compiling Metal shaders..."
         metal -c src/rendering/metal_shaders.metal -o metal_shaders.air || true
         if [ -f metal_shaders.air ] && command -v metallib >/dev/null 2>&1; then
           metallib metal_shaders.air -o metal_shaders.metallib || true
@@ -477,23 +486,12 @@ EOF
         # Try linking directly with full path
         VULKAN_LIB_PATH="$(pwd)/macos-dependencies/lib/libvulkan_kosmickrisp.dylib"
         VULKAN_LIB="$VULKAN_LIB_PATH"
-        echo "Linking Vulkan library from: $VULKAN_LIB_PATH"
       elif pkg-config --exists vulkan; then
         VULKAN_LIB=$(pkg-config --libs vulkan)
       fi
       
-      # Check if Vulkan symbols are actually needed (only if vulkan_renderer is compiled)
-      if echo "$OBJ_FILES" | grep -q "vulkan_renderer"; then
-        echo "Vulkan renderer detected, linking Vulkan library..."
-        if [ -z "$VULKAN_LIB" ]; then
-          echo "WARNING: Vulkan library not found but vulkan_renderer is being linked!"
-          echo "Attempting to continue without Vulkan (Metal will be used as fallback)..."
-        fi
-      fi
-      
       # Try linking with Vulkan first, fall back to without if it fails
       if [ -n "$VULKAN_LIB" ] && echo "$OBJ_FILES" | grep -q "vulkan_renderer"; then
-        echo "Attempting to link with Vulkan support..."
         set +e
         $CC $OBJ_FILES libgbm.a \
            -Lmacos-dependencies/lib \
@@ -509,7 +507,6 @@ EOF
         LINK_RESULT=$?
         set -e
         if [ $LINK_RESULT -ne 0 ]; then
-          echo "Vulkan linking failed, building without Vulkan (Metal will be used)..."
           # Remove vulkan_renderer object file and link without it
           OBJ_FILES_NO_VULKAN=$(echo "$OBJ_FILES" | sed 's/rendering_vulkan_renderer\.m\.o//g')
           $CC $OBJ_FILES_NO_VULKAN libgbm.a \
@@ -522,8 +519,6 @@ EOF
              -fobjc-arc -flto -O3 \
              -Wl,-rpath,\$PWD/macos-dependencies/lib \
              -o Wawona
-        else
-          echo "Successfully linked with Vulkan support"
         fi
       else
         # No Vulkan needed
@@ -721,7 +716,6 @@ EOF
       
       # Compile Metal shaders
       if command -v metal >/dev/null 2>&1; then
-        echo "Compiling Metal shaders..."
         metal -c src/rendering/metal_shaders.metal -o metal_shaders.air -isysroot "$SDKROOT" -mios-simulator-version-min=15.0 || true
         if [ -f metal_shaders.air ] && command -v metallib >/dev/null 2>&1; then
           metallib metal_shaders.air -o metal_shaders.metallib || true
@@ -968,7 +962,6 @@ EOF
       # Copy dynamic libraries to Frameworks
       mkdir -p $out/Applications/Wawona.app/Frameworks
       if [ -d ios-dependencies/lib ]; then
-        echo "Copying dynamic libraries..."
         # Copy dylibs
         find ios-dependencies/lib -name "*.dylib" -exec cp -L {} $out/Applications/Wawona.app/Frameworks/ \;
         
@@ -976,7 +969,6 @@ EOF
         cd $out/Applications/Wawona.app/Frameworks
         for lib in *.dylib; do
           if [ -f "$lib" ]; then
-            echo "Fixing library: $lib"
             # Change ID
             install_name_tool -id "@rpath/$lib" "$lib"
             
@@ -993,13 +985,11 @@ EOF
         cd -
         
         # Fix main executable dependencies
-        echo "Fixing executable dependencies..."
         EXECUTABLE="$out/Applications/Wawona.app/Wawona"
         otool -L "$EXECUTABLE" | grep ".dylib" | while read -r line; do
           dep_path=$(echo $line | awk '{print $1}')
           dep_name=$(basename "$dep_path")
           if [ -f "$out/Applications/Wawona.app/Frameworks/$dep_name" ]; then
-            echo "  Relinking $dep_name in executable..."
             install_name_tool -change "$dep_path" "@rpath/$dep_name" "$EXECUTABLE"
           fi
         done
@@ -1024,58 +1014,33 @@ if [ -z "$APP_BUNDLE" ]; then
 fi
 
 if [ ! -d "$APP_BUNDLE" ]; then
-  echo "Error: App bundle not found at $APP_BUNDLE" >&2
   exit 1
 fi
 
 # Check if xcrun is available
 if ! command -v xcrun >/dev/null 2>&1; then
-  echo "Error: xcrun not found. Please install Xcode Command Line Tools." >&2
-  echo "Run: xcode-select --install" >&2
   exit 1
 fi
 
 # Check if iOS Simulator runtime is installed
-echo "Checking for iOS Simulator runtime..."
 RUNTIMES=$(xcrun simctl list runtimes available 2>/dev/null | grep -i "iOS" | head -n 1 || true)
 
 if [ -z "$RUNTIMES" ]; then
-  echo "⚠️  No iOS Simulator runtime found."
-  echo ""
-  echo "To install iOS Simulator runtime:"
-  echo "  1. Open Xcode"
-  echo "  2. Go to Xcode > Settings > Platforms (or Components)"
-  echo "  3. Download the iOS Simulator runtime for your Xcode version"
-  echo ""
-  echo "Or install via command line:"
-  echo "  xcodebuild -downloadPlatform iOS"
-  echo ""
-  echo "Attempting to download iOS platform..."
   if xcodebuild -downloadPlatform iOS 2>&1; then
-    echo "✅ iOS Simulator runtime download initiated."
-    echo "   This may take several minutes. Please wait..."
     sleep 2
   else
-    echo "❌ Failed to automatically download iOS runtime."
-    echo "   Please install it manually via Xcode > Settings > Platforms"
     exit 1
   fi
 fi
 
 # Find an iOS simulator (prefer iPhone, then iPad)
-echo "Finding iOS Simulator..."
 DEVICE_ID=$(xcrun simctl list devices available 2>/dev/null | grep -iE "(iPhone|iPad)" | grep -v "unavailable" | head -n 1 | sed -E 's/.*\(([A-F0-9-]+)\).*/\1/' | head -n 1)
 
 if [ -z "$DEVICE_ID" ]; then
-  echo "⚠️  No available iOS Simulator device found."
-  echo ""
-  echo "Creating a default iPhone simulator..."
-  
   # Try to create a simulator if none exists
   RUNTIME=$(xcrun simctl list runtimes available 2>/dev/null | grep -i "iOS" | head -n 1 | sed -E 's/.*\(([^)]+)\).*/\1/' | head -n 1)
   
   if [ -z "$RUNTIME" ]; then
-    echo "Error: No iOS runtime available. Please install iOS Simulator runtime first." >&2
     exit 1
   fi
   
@@ -1090,38 +1055,27 @@ if [ -z "$DEVICE_ID" ]; then
   fi
   
   if [ -n "$DEVICE_TYPE" ] && [ -n "$RUNTIME" ]; then
-    echo "Creating simulator: $DEVICE_NAME ($DEVICE_TYPE) with runtime $RUNTIME"
     DEVICE_ID=$(xcrun simctl create "$DEVICE_NAME" "$DEVICE_TYPE" "$RUNTIME" 2>/dev/null || true)
     
     if [ -z "$DEVICE_ID" ]; then
-      echo "Error: Failed to create simulator. Please create one manually:" >&2
-      echo "  Xcode > Window > Devices and Simulators > + > iPhone" >&2
       exit 1
     fi
-    echo "✅ Created simulator: $DEVICE_ID"
   else
-    echo "Error: Could not determine device type or runtime." >&2
-    echo "Please create a simulator manually: Xcode > Window > Devices and Simulators" >&2
     exit 1
   fi
 fi
 
 DEVICE_NAME=$(xcrun simctl list devices available | grep "$DEVICE_ID" | sed -E 's/.*- (.*) \(.*/\1/' | head -n 1)
-echo "Using simulator: $DEVICE_NAME ($DEVICE_ID)"
 
 # Check if simulator is booted
 BOOTED=$(xcrun simctl list devices | grep "$DEVICE_ID" | grep -c "Booted" || true)
 if [ "$BOOTED" -eq 0 ]; then
-  echo "Booting iOS Simulator..."
-  xcrun simctl boot "$DEVICE_ID" 2>/dev/null || {
-    echo "Warning: Simulator may already be booting or boot failed. Continuing..." >&2
-  }
+  xcrun simctl boot "$DEVICE_ID" 2>/dev/null || true
   sleep 5
 fi
 
 # Open Simulator app and bring it to the foreground
 # Use 'open -a' which brings the app forward even if already running
-echo "Opening Simulator app..."
 open -a Simulator
 sleep 2
 
@@ -1132,21 +1086,15 @@ sleep 3
 # Copy app bundle to a writable location (simulator can't install from read-only Nix store)
 TEMP_APP_DIR=$(mktemp -d)
 TEMP_APP_BUNDLE="$TEMP_APP_DIR/Wawona.app"
-echo "Copying app bundle to temporary location..."
 cp -R "$APP_BUNDLE" "$TEMP_APP_BUNDLE" || {
-  echo "Error: Failed to copy app bundle" >&2
   rm -rf "$TEMP_APP_DIR"
   exit 1
 }
 
 # Fix permissions - make all files writable (simulator needs to modify them during install)
-echo "Fixing permissions..."
-chmod -R u+w "$TEMP_APP_BUNDLE" || {
-  echo "Warning: Failed to fix some permissions, continuing anyway..." >&2
-}
+chmod -R u+w "$TEMP_APP_BUNDLE" || true
 
 # Ad-hoc sign the app bundle for Simulator (required for Apple Silicon)
-echo "Signing app for Simulator (ad-hoc)..."
 if command -v codesign >/dev/null 2>&1; then
   # Create minimal entitlements for Simulator
   cat > "$TEMP_APP_DIR/entitlements.plist" <<ENTITLEMENTS
@@ -1163,18 +1111,13 @@ ENTITLEMENTS
   # Sign frameworks first
   if [ -d "$TEMP_APP_BUNDLE/Frameworks" ]; then
     find "$TEMP_APP_BUNDLE/Frameworks" -name "*.dylib" -o -name "*.framework" | while read -r fw; do
-      echo "  Signing $(basename "$fw")..."
-      codesign --force --sign - --timestamp=none "$fw" || echo "Warning: Failed to sign $fw"
+      codesign --force --sign - --timestamp=none "$fw" || true
     done
   fi
   
   # Sign main executable
-  echo "  Signing main bundle..."
   codesign --force --sign - --timestamp=none --entitlements "$TEMP_APP_DIR/entitlements.plist" "$TEMP_APP_BUNDLE" 2>/dev/null || \
-  codesign --force --sign - --timestamp=none "$TEMP_APP_BUNDLE" || \
-  echo "Warning: Failed to sign app bundle"
-else
-  echo "Warning: codesign command not found. App may fail to launch on Apple Silicon."
+  codesign --force --sign - --timestamp=none "$TEMP_APP_BUNDLE" || true
 fi
 
 # Cleanup function - use force removal to handle permission issues
@@ -1185,41 +1128,19 @@ cleanup() {
 trap cleanup EXIT
 
 # Uninstall existing app if present (to avoid conflicts)
-# Uninstall existing app if present (to avoid conflicts)
 BUNDLE_ID="com.aspauldingcode.Wawona"
-echo "Uninstalling existing app (if present)..."
 xcrun simctl uninstall "$DEVICE_ID" "$BUNDLE_ID" 2>/dev/null || true
 
 # Install the app from the temporary location
-echo "Installing Wawona app..."
 xcrun simctl install "$DEVICE_ID" "$TEMP_APP_BUNDLE" || {
-  echo "Error: Failed to install app" >&2
   exit 1
 }
 
 # Verify app was installed
-echo "Verifying installation..."
 INSTALLED=$(xcrun simctl listapps "$DEVICE_ID" 2>/dev/null | grep -c "$BUNDLE_ID" || echo "0")
-if [ "$INSTALLED" -eq 0 ]; then
-  echo "⚠️  Warning: App may not have been installed correctly."
-  echo "   Check the Simulator to see if Wawona appears on the home screen."
-else
-  echo "✅ App installed successfully."
-fi
 
 # Launch the app
-echo "Launching Wawona..."
-xcrun simctl launch "$DEVICE_ID" "$BUNDLE_ID" 2>&1 || {
-  echo "⚠️  Launch command returned an error, but the app is installed."
-}
-
-echo ""
-echo "✅ iOS Simulator setup complete!"
-echo "   Device: $DEVICE_NAME ($DEVICE_ID)"
-echo "   App Bundle ID: $BUNDLE_ID"
-echo ""
-echo "📋 Streaming logs (Ctrl+C to stop)..."
-echo ""
+xcrun simctl launch "$DEVICE_ID" "$BUNDLE_ID" 2>&1 || true
 
 # Stream logs to stdout for debugging
 xcrun simctl spawn "$DEVICE_ID" log stream --predicate 'processImagePath contains "Wawona" OR processImagePath endswith "Wawona"' --level debug --style compact
@@ -1239,7 +1160,8 @@ EOF
     nativeBuildInputs = with pkgs; [
       clang
       pkg-config
-      jdk17_headless  # For javac
+      jdk17  # Full JDK needed for Gradle
+      gradle
       unzip
       zip
       patchelf
@@ -1331,14 +1253,12 @@ EOF
     buildPhase = ''
       runHook preBuild
       
-      # Compile all source files (Android only uses C files, no Objective-C)
+      # Compile C/C++ code for Android (native library)
       OBJ_FILES=""
-      echo "=== Compiling Android sources ==="
       for src_file in ${lib.concatStringsSep " " androidSourcesFiltered}; do
         if [[ "$src_file" == *.c ]]; then
           obj_file="''${src_file//\//_}.o"
           obj_file="''${obj_file//src_/}"
-          echo "Compiling: $src_file -> $obj_file"
           
           if $CC -c "$src_file" \
              -Isrc -Isrc/core -Isrc/wayland \
@@ -1347,167 +1267,89 @@ EOF
              -Iandroid-dependencies/include \
              -fPIC \
              ${lib.concatStringsSep " " commonCFlags} \
-             ${lib.concatStringsSep " " releaseCFlags} \
+             ${lib.concatStringsSep " " debugCFlags} \
              --target=${androidToolchain.androidTarget} \
              -o "$obj_file"; then
             OBJ_FILES="$OBJ_FILES $obj_file"
-            echo "  ✓ Compiled successfully"
           else
-            echo "  ✗ Compilation failed!"
             exit 1
           fi
         fi
       done
       
       # Link shared library
-      echo "Linking shared library libwawona.so..."
       $CC -shared $OBJ_FILES \
          -Landroid-dependencies/lib \
          $(pkg-config --libs wayland-server wayland-client pixman-1) \
          -llog -landroid -lvulkan \
-         -flto -O3 --target=${androidToolchain.androidTarget} \
+         -g --target=${androidToolchain.androidTarget} \
          -o libwawona.so
+         
+      # Setup Gradle and dependencies
+      export GRADLE_USER_HOME=$(pwd)/.gradle_home
+      export ANDROID_USER_HOME=$(pwd)/.android_home
+      mkdir -p $ANDROID_USER_HOME
       
-      echo "=== Building APK ==="
+      # Copy gradleDeps to writable location
+      cp -r ${gradleDeps} $GRADLE_USER_HOME
+      chmod -R u+w $GRADLE_USER_HOME
       
-      # Setup build directories
-      mkdir -p build/gen build/obj build/apk build/res
+      export ANDROID_SDK_ROOT="${androidSDK.androidsdk}/libexec/android-sdk"
+      export ANDROID_HOME="$ANDROID_SDK_ROOT"
       
-      # Find Android tools and SDK
-      # We expect androidSDK to be in the environment or passed as argument
-      if [ -n "${androidSDK.androidsdk}" ]; then
-        export ANDROID_SDK_ROOT="${androidSDK.androidsdk}/libexec/android-sdk"
-      fi
+      # Place native libs where Gradle expects them
+      # Gradle sourceSets point to src/android/java, so jniLibs should be at src/android/jniLibs/arm64-v8a
+      mkdir -p src/android/jniLibs/arm64-v8a
+      cp libwawona.so src/android/jniLibs/arm64-v8a/
       
-      echo "Using Android SDK at $ANDROID_SDK_ROOT"
-      
-      if [ -d "$ANDROID_SDK_ROOT/build-tools" ]; then
-        BUILD_TOOLS_DIR=$(ls -d $ANDROID_SDK_ROOT/build-tools/* | tail -n 1)
-        export PATH="$BUILD_TOOLS_DIR:$PATH"
-        echo "Added build-tools to PATH: $BUILD_TOOLS_DIR"
-      else
-        echo "Warning: build-tools not found in SDK"
-      fi
-      
-      if [ -d "$ANDROID_SDK_ROOT/platforms" ]; then
-        if [ -d "$ANDROID_SDK_ROOT/platforms/android-35" ]; then
-          PLATFORM_DIR="$ANDROID_SDK_ROOT/platforms/android-35"
-        elif [ -d "$ANDROID_SDK_ROOT/platforms/android-34" ]; then
-          PLATFORM_DIR="$ANDROID_SDK_ROOT/platforms/android-34"
-        else
-           # Fallback to any platform
-           PLATFORM_DIR=$(ls -d $ANDROID_SDK_ROOT/platforms/android-* | tail -n 1)
-        fi
-        ANDROID_JAR="$PLATFORM_DIR/android.jar"
-        echo "Using android.jar: $ANDROID_JAR"
-      else
-        echo "Error: Platforms not found in SDK"
-        exit 1
-      fi
-      
-      # Compile resources
-      echo "Compiling resources..."
-      # Create necessary directory structure if it doesn't exist
-      mkdir -p src/android/res/values
-      
-      # Compile strings.xml
-      if [ -f src/android/res/values/strings.xml ]; then
-        aapt2 compile src/android/res/values/strings.xml -o build/res/
-      else
-        echo "Warning: strings.xml not found at src/android/res/values/strings.xml"
-        # Create a dummy strings.xml if needed? No, user should have created it.
-      fi
-      
-      # Link resources
-      echo "Linking resources..."
-      aapt2 link -o build/apk/resources.apk -I "$ANDROID_JAR" \
-          --manifest src/android/AndroidManifest.xml \
-          --java build/gen \
-          --output-text-symbols build/R.txt \
-          build/res/*.flat
-          
-      # Compile Java
-      echo "Compiling Java..."
-      javac -d build/obj -classpath "$ANDROID_JAR" \
-          src/android/java/com/aspauldingcode/wawona/MainActivity.java \
-          build/gen/com/aspauldingcode/wawona/R.java
-          
-      # Dexing
-      echo "Dexing..."
-      d8 --output build/apk --lib "$ANDROID_JAR" $(find build/obj -name "*.class")
-      
-      # Package APK
-      echo "Packaging APK..."
-      cp build/apk/resources.apk Wawona.apk
-      cd build/apk
-      zip -u ../../Wawona.apk classes.dex
-      cd ../..
-      
-      # Add native libraries
-      echo "Adding native libraries..."
-      mkdir -p lib/arm64-v8a
-      cp libwawona.so lib/arm64-v8a/
-      
-      # Copy dependencies (handling symlinks)
+      # Copy other shared libs (dependencies)
       if [ -d android-dependencies/lib ]; then
-        find android-dependencies/lib -name "*.so*" -exec cp -L {} lib/arm64-v8a/ \;
+        find android-dependencies/lib -name "*.so*" -exec cp -L {} src/android/jniLibs/arm64-v8a/ \;
       fi
       
-      # Fix shared library names and SONAMEs for Android
-      # Android expects libs to be named lib<name>.so and may have issues with versioned SONAMEs
-      echo "Fixing shared libraries..."
-      cd lib/arm64-v8a
+      # Also copy libc++_shared.so
+      NDK_ROOT="${androidToolchain.androidndkRoot}"
+      LIBCPP_SHARED=$(find "$NDK_ROOT" -name "libc++_shared.so" | grep "aarch64" | head -n 1)
+      if [ -f "$LIBCPP_SHARED" ]; then
+        cp "$LIBCPP_SHARED" src/android/jniLibs/arm64-v8a/
+      fi
+      
+      # Fix SONAMEs in copied libs (same logic as before, but in jniLibs)
+      cd src/android/jniLibs/arm64-v8a
       chmod +w *
       for lib in *.so*; do
-        # Check if file is a valid ELF file
-        if file "$lib" | grep -q "ELF"; then
-          # Strip version number from filename if present (e.g. libpixman-1.so.0 -> libpixman-1.so)
-          # Note: We need to be careful not to break dependencies
-          
-          # Use patchelf to set SONAME to the unversioned name
-          # But first we need to decide on the unversioned name
-          
-          # Simple heuristic: if it ends with .so.X.Y or .so.X, rename to .so
           if [[ "$lib" =~ \.so\.[0-9]+ ]]; then
              newname=$(echo "$lib" | sed -E 's/\.so\.[0-9.]*$/.so/')
              if [ "$lib" != "$newname" ]; then
-               echo "Renaming $lib -> $newname"
                mv "$lib" "$newname"
-               
-               # Update SONAME
                patchelf --set-soname "$newname" "$newname"
              fi
           fi
-        fi
       done
       
-      # Now we need to fix dependencies (DT_NEEDED) in all libs to match the new names
+      # Fix dependencies
       for lib in *.so; do
-         echo "Patching dependencies for $lib..."
          needed=$(patchelf --print-needed "$lib")
          for n in $needed; do
-           # Check if this needed lib was renamed
            if [[ "$n" =~ \.so\.[0-9]+ ]]; then
              newn=$(echo "$n" | sed -E 's/\.so\.[0-9.]*$/.so/')
-             # If the new name exists in our dir, update the dependency
              if [ -f "$newn" ]; then
-                echo "  Replacing dependency $n -> $newn in $lib"
                 patchelf --replace-needed "$n" "$newn" "$lib"
              fi
            fi
          done
       done
-      cd ../..
+      # Return to src/android directory (we were in jniLibs/arm64-v8a)
+      cd "$(pwd | sed 's|/jniLibs/arm64-v8a.*||')"
       
-      zip -u Wawona.apk lib/arm64-v8a/*.so
+      # We should now be in src/android, verify and build APK with Gradle
+      if [ ! -f "build.gradle.kts" ]; then
+        echo "Error: build.gradle.kts not found. Current directory: $(pwd)"
+        ls -la
+        exit 1
+      fi
       
-      # Sign APK
-      echo "Signing APK..."
-      keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
-      
-      apksigner sign --ks debug.keystore --ks-pass pass:android --key-pass pass:android Wawona.apk
-      
-      echo "✅ APK built successfully: Wawona.apk"
+      gradle assembleDebug --offline --no-daemon
       
       runHook postBuild
     '';
@@ -1518,13 +1360,25 @@ EOF
       mkdir -p $out/bin
       mkdir -p $out/lib
       
-      # Copy APK
-      if [ -f Wawona.apk ]; then
-        cp Wawona.apk $out/bin/
+      # Copy APK - APK is built in src/android/build/outputs/apk/debug/
+      # We're in source root, so check both possible locations
+      APK_PATH=""
+      if [ -f "src/android/build/outputs/apk/debug/Wawona-debug.apk" ]; then
+        APK_PATH="src/android/build/outputs/apk/debug/Wawona-debug.apk"
+      elif [ -f "src/android/app/build/outputs/apk/debug/app-debug.apk" ]; then
+        APK_PATH="src/android/app/build/outputs/apk/debug/app-debug.apk"
       else
-        echo "Error: Wawona.apk not found!"
-        exit 1
+        echo "APK not found in expected locations, searching..."
+        APK_PATH=$(find . -name "*.apk" -type f | head -1)
+        if [ -z "$APK_PATH" ]; then
+          echo "Error: No APK found!"
+          exit 1
+        fi
+        echo "Found APK at: $APK_PATH"
       fi
+      
+      cp "$APK_PATH" $out/bin/Wawona.apk
+      echo "Copied APK to $out/bin/Wawona.apk"
       
       # Copy runtime shared libraries (still useful for debugging or other purposes, 
       # though they are now inside the APK)
@@ -1538,8 +1392,9 @@ EOF
 set -e
 
 # Setup environment from Nix build
-export PATH="${androidSDK.androidsdk}/bin:\$PATH"
+export PATH="${lib.makeBinPath [ androidSDK.platform-tools androidSDK.emulator androidSDK.androidsdk ]}:\$PATH"
 export ANDROID_SDK_ROOT="${androidSDK.androidsdk}/libexec/android-sdk"
+export ANDROID_HOME="\$ANDROID_SDK_ROOT"
 
 APK_PATH="\$1"
 if [ -z "\$APK_PATH" ]; then
@@ -1547,87 +1402,69 @@ if [ -z "\$APK_PATH" ]; then
 fi
 
 if [ ! -f "\$APK_PATH" ]; then
-  echo "Error: APK not found at \$APK_PATH" >&2
   exit 1
 fi
 
 # Tools are provided via Nix runtimeInputs - they should be in PATH
 if ! command -v adb >/dev/null 2>&1; then
-  echo "Error: adb not found in PATH." >&2
   exit 1
 fi
 
 if ! command -v emulator >/dev/null 2>&1; then
-  echo "Error: emulator not found in PATH." >&2
   exit 1
 fi
-
-echo "✅ Android tools available from Nix"
-echo ""
-
-echo "   Using SDK root: \$ANDROID_SDK_ROOT"
 
 # Set up AVD home in a user-writable directory (use local directory to avoid permission issues)
 export ANDROID_USER_HOME="\$(pwd)/.android_home"
 export ANDROID_AVD_HOME="\$ANDROID_USER_HOME/avd"
 mkdir -p "\$ANDROID_AVD_HOME"
 
-AVD_NAME="WawonaEmulator_API35"
-SYSTEM_IMAGE="system-images;android-35;google_apis_playstore;arm64-v8a"
+AVD_NAME="WawonaEmulator_API36"
+SYSTEM_IMAGE="system-images;android-36;google_apis_playstore;arm64-v8a"
 
 # Check if AVD exists
 if ! emulator -list-avds | grep -q "^\$AVD_NAME\$"; then
-  echo "⚠️  AVD '\$AVD_NAME' not found. Creating it..."
   
   if ! command -v avdmanager >/dev/null 2>&1; then
-    echo "Error: avdmanager not found. Cannot create AVD." >&2
     exit 1
   fi
   
-  echo "Creating AVD '\$AVD_NAME' with system image '\$SYSTEM_IMAGE'..."
   # Create AVD
   echo "no" | avdmanager create avd -n "\$AVD_NAME" -k "\$SYSTEM_IMAGE" --device "pixel" --force
   
-  echo "✅ AVD created."
 fi
 
 # Check for running emulators
-echo "Checking for running Android emulators..."
 # Ensure adb server is running
 adb start-server
 
 RUNNING_EMULATORS=\$(adb devices | grep -E "emulator-[0-9]+" | grep "device$" | wc -l | tr -d ' ')
 
 if [ "\$RUNNING_EMULATORS" -gt 0 ]; then
-  echo "✅ Found \$RUNNING_EMULATORS running emulator(s)"
   EMULATOR_SERIAL=\$(adb devices | grep -E "emulator-[0-9]+" | grep "device$" | head -n 1 | awk '{print \$1}')
-  echo "Using emulator: \$EMULATOR_SERIAL"
 else
-  echo "⚠️  No Android emulator running."
-  echo ""
-  echo "Starting Android emulator '\$AVD_NAME'..."
   
-  # Start emulator in background
-  emulator -avd "\$AVD_NAME" -no-snapshot-load -gpu auto >/tmp/emulator.log 2>&1 &
+  # Start emulator in background - detached to survive script termination (e.g. SIGTERM/Ctrl+C)
+  # We use nohup and redirect input to detach from terminal signals
+  nohup emulator -avd "\$AVD_NAME" -no-snapshot-load -gpu auto < /dev/null >/tmp/emulator.log 2>&1 &
   EMULATOR_PID=\$!
+  
+  # Disown to remove from shell job table
+  disown \$EMULATOR_PID
   
   cleanup() {
     if [ -n "\$EMULATOR_PID" ]; then
-      echo "Stopping emulator..."
-      echo "   (Keeping emulator running for debugging)"
+      :
     fi
   }
   trap cleanup EXIT
   
-  echo "Waiting for emulator to boot..."
   TIMEOUT=300
   ELAPSED=0
   BOOTED=false
   
   while [ \$ELAPSED -lt \$TIMEOUT ]; do
     if ! kill -0 \$EMULATOR_PID 2>/dev/null; then
-       echo "❌ Emulator process died unexpectedly!"
-       echo "   Logs:"
        cat /tmp/emulator.log
        exit 1
     fi
@@ -1643,47 +1480,41 @@ else
     
     sleep 2
     ELAPSED=\$((ELAPSED + 2))
-    if [ \$((ELAPSED % 10)) -eq 0 ]; then
-      echo "   Waiting... (\''${ELAPSED}s)"
-    fi
   done
   
   if [ "\$BOOTED" = "true" ]; then
-    echo "✅ Emulator booted successfully!"
     sleep 5
   else
-    echo "❌ Timeout waiting for emulator to boot."
-    echo "   Check /tmp/emulator.log for details."
     cat /tmp/emulator.log
     exit 1
   fi
 fi
 
-echo "Deploying Wawona APK to Android Emulator..."
-
 # Uninstall existing app if present
-echo "Uninstalling existing app..."
 adb uninstall com.aspauldingcode.wawona || true
 
 # Clear logcat
 adb logcat -c || true
 
 # Install APK
-echo "Installing APK..."
 adb install -r "\$APK_PATH"
 
 # Launch Activity
-echo "Launching Wawona Activity..."
+echo "Launching Wawona app..."
 adb shell am start -n com.aspauldingcode.wawona/.MainActivity
 
-echo "✅ Wawona Android app launched!"
-echo "   Check the emulator screen."
-echo ""
-echo "📋 Streaming logs (Ctrl+C to stop)..."
-echo ""
+# Wait a moment for the app to start
+sleep 5
 
-# Stream logs to stdout for debugging
-adb logcat -s Wawona:D AndroidRuntime:E *:S
+# Get crash logs first - show everything related to Wawona and crashes
+echo "=== Recent crash logs ==="
+adb logcat -d -v time | grep -i -E "(wawona|androidruntime|fatal|exception|error.*3995)" | tail -200
+
+# Stream logs to stdout - show Wawona logs, AndroidRuntime errors, and system crashes
+echo ""
+echo "=== Starting live logcat stream ==="
+echo "Showing: Wawona, WawonaJNI, WawonaNative, AndroidRuntime errors"
+adb logcat -v time -s Wawona:D WawonaJNI:D WawonaNative:D AndroidRuntime:E
 
 EOF
       chmod +x $out/bin/wawona-android-run

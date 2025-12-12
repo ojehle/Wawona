@@ -38,10 +38,10 @@ pkgs.stdenv.mkDerivation {
     # Set up HOST compiler (runs on macOS)
     export HOST_CC="${pkgs.clang}/bin/clang"
     
-    # Android-specific flags
-    export CFLAGS="-target aarch64-linux-android${builtins.toString androidToolchain.androidApiLevel} -fPIC"
-    export CXXFLAGS="-target aarch64-linux-android${builtins.toString androidToolchain.androidApiLevel} -fPIC"
-    export LDFLAGS="-target aarch64-linux-android${builtins.toString androidToolchain.androidApiLevel}"
+    # Android-specific flags - use NDK API level for native builds
+    export CFLAGS="-target aarch64-linux-android${builtins.toString androidToolchain.androidNdkApiLevel} -fPIC"
+    export CXXFLAGS="-target aarch64-linux-android${builtins.toString androidToolchain.androidNdkApiLevel} -fPIC"
+    export LDFLAGS="-target aarch64-linux-android${builtins.toString androidToolchain.androidNdkApiLevel}"
   '';
   
   configurePhase = ''
@@ -56,7 +56,7 @@ pkgs.stdenv.mkDerivation {
       --enable-cross-compile \
       --target-os=android \
       --arch=aarch64 \
-      --cross-prefix=${androidToolchain.androidndkRoot}/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android${builtins.toString androidToolchain.androidApiLevel}- \
+      --cross-prefix=${androidToolchain.androidndkRoot}/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android${builtins.toString androidToolchain.androidNdkApiLevel}- \
       --sysroot=${androidToolchain.androidndkRoot}/toolchains/llvm/prebuilt/darwin-x86_64/sysroot \
       --cc="$CC" \
       --cxx="$CXX" \

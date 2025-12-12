@@ -1,9 +1,12 @@
 { lib, pkgs }:
 
 let
-  # Android API level and target
-  androidApiLevel = 35;
-  androidTarget = "aarch64-linux-android${toString androidApiLevel}";
+  # Android API level for the app (target SDK)
+  androidApiLevel = 36;
+  # NDK API level - NDK r27c supports up to API 35
+  # Native libraries can be built for API 35 while app targets API 36
+  androidNdkApiLevel = 35;
+  androidTarget = "aarch64-linux-android${toString androidNdkApiLevel}";
   androidndkPkgsMacOS = if pkgs.stdenv.isAarch64 && pkgs.stdenv.isDarwin then
     let
       ndkVersion = "27.0.12077987";
@@ -39,7 +42,7 @@ let
     pkgs.androidndkPkgs;
 in
 {
-  inherit androidApiLevel androidTarget;
+  inherit androidApiLevel androidNdkApiLevel androidTarget;
   androidCC = "${androidndkPkgs.clang}/bin/clang";
   androidCXX = "${androidndkPkgs.clang}/bin/clang++";
   androidAR = "${androidndkPkgs.binutils}/bin/llvm-ar";

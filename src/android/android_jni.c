@@ -16,20 +16,23 @@
 #include <android/native_window_jni.h>
 #include <android/log.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 #include <pthread.h>
 #include <unistd.h>
 #include <vulkan/vulkan.h>
 #include <vulkan/vulkan_android.h>
+#include "WawonaSettings.h"
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "WawonaJNI", __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "WawonaJNI", __VA_ARGS__)
 
 // JNI Function Prototypes
-JNIEXPORT void JNICALL Java_com_aspauldingcode_wawona_MainActivity_nativeInit(JNIEnv* env, jobject thiz);
-JNIEXPORT void JNICALL Java_com_aspauldingcode_wawona_MainActivity_nativeSetSurface(JNIEnv* env, jobject thiz, jobject surface);
-JNIEXPORT void JNICALL Java_com_aspauldingcode_wawona_MainActivity_nativeDestroySurface(JNIEnv* env, jobject thiz);
-JNIEXPORT void JNICALL Java_com_aspauldingcode_wawona_MainActivity_nativeApplySettings(JNIEnv* env, jobject thiz,
+JNIEXPORT void JNICALL Java_com_aspauldingcode_wawona_WawonaNative_nativeInit(JNIEnv* env, jobject thiz);
+JNIEXPORT void JNICALL Java_com_aspauldingcode_wawona_WawonaNative_nativeSetSurface(JNIEnv* env, jobject thiz, jobject surface);
+JNIEXPORT void JNICALL Java_com_aspauldingcode_wawona_WawonaNative_nativeDestroySurface(JNIEnv* env, jobject thiz);
+JNIEXPORT void JNICALL Java_com_aspauldingcode_wawona_WawonaNative_nativeUpdateSafeArea(JNIEnv* env, jobject thiz, jint left, jint top, jint right, jint bottom);
+JNIEXPORT void JNICALL Java_com_aspauldingcode_wawona_WawonaNative_nativeApplySettings(JNIEnv* env, jobject thiz,
                                                                 jboolean forceServerSideDecorations,
                                                                 jboolean autoRetinaScaling,
                                                                 jint renderingBackend,
@@ -57,6 +60,7 @@ VkDevice g_device = VK_NULL_HANDLE;
 VkQueue g_queue = VK_NULL_HANDLE;
 VkSwapchainKHR g_swapchain = VK_NULL_HANDLE;
 uint32_t g_queue_family = 0;
+ANativeWindow* g_window = NULL;
 
 // Threading
 static int g_running = 0;
@@ -68,49 +72,15 @@ static int g_safeAreaLeft = 0;
 static int g_safeAreaTop = 0;
 static int g_safeAreaRight = 0;
 static int g_safeAreaBottom = 0;
-static int g_respectSafeArea = 1; // Default to enabled like iOS
+
+// Raw safe area values from Android (independent of setting)
+static int g_rawSafeAreaLeft = 0;
+static int g_rawSafeAreaTop = 0;
+static int g_rawSafeAreaRight = 0;
+static int g_rawSafeAreaBottom = 0;
 
 // iOS Settings 1:1 mapping (for compatibility with iOS version)
-static struct {
-    // Display settings
-    int forceServerSideDecorations;
-    int autoRetinaScaling;
-    int renderingBackend; // 0=Automatic, 1=Metal(Vulkan), 2=Cocoa(Surface)
-    int respectSafeArea;
-    
-    // Input settings
-    int renderMacOSPointer;
-    int swapCmdAsCtrl;
-    int universalClipboard;
-    
-    // Color Management
-    int colorSyncSupport;
-    
-    // Advanced settings
-    int nestedCompositorsSupport;
-    int useMetal4ForNested;
-    int multipleClients;
-    int waypipeRSSupport;
-    
-    // Network settings
-    int enableTCPListener;
-    int tcpPort;
-} g_settings = {
-    .forceServerSideDecorations = 1,
-    .autoRetinaScaling = 1,
-    .renderingBackend = 0, // Automatic
-    .respectSafeArea = 1,
-    .renderMacOSPointer = 1,
-    .swapCmdAsCtrl = 0,
-    .universalClipboard = 1,
-    .colorSyncSupport = 1,
-    .nestedCompositorsSupport = 1,
-    .useMetal4ForNested = 0,
-    .multipleClients = 1,
-    .waypipeRSSupport = 1,
-    .enableTCPListener = 0,
-    .tcpPort = 0
-};
+// Now managed by WawonaSettings.c via WawonaSettings_UpdateConfig
 
 // ============================================================================
 // Safe Area Detection
@@ -121,13 +91,24 @@ static struct {
  * Handles display cutouts (notches, punch holes) and system gesture insets
  */
 static void update_safe_area(JNIEnv* env, jobject activity) {
-    if (!activity || !g_respectSafeArea) {
+    LOGI("update_safe_area called");
+    if (!activity) {
+        LOGE("update_safe_area: activity is NULL");
         g_safeAreaLeft = 0;
         g_safeAreaTop = 0;
         g_safeAreaRight = 0;
         g_safeAreaBottom = 0;
         return;
     }
+    if (!WawonaSettings_GetRespectSafeArea()) {
+        LOGI("Safe area respect disabled, setting to 0");
+        g_safeAreaLeft = 0;
+        g_safeAreaTop = 0;
+        g_safeAreaRight = 0;
+        g_safeAreaBottom = 0;
+        return;
+    }
+    LOGI("Updating safe area from WindowInsets...");
     
     // Get WindowInsets
     jclass activityClass = (*env)->GetObjectClass(env, activity);
@@ -222,11 +203,11 @@ static void update_safe_area(JNIEnv* env, jobject activity) {
 static VkResult create_instance(void) {
     // Set ICD before creating instance based on rendering backend setting
     // If Waypipe support is enabled, force SwiftShader for compatibility
-    if (g_settings.waypipeRSSupport) {
+    if (WawonaSettings_GetWaypipeRSSupportEnabled()) {
         LOGI("Waypipe support enabled: Forcing SwiftShader ICD");
         setenv("VK_ICD_FILENAMES", "/system/etc/vulkan/icd.d/swiftshader_icd.json", 1);
     } else {
-        switch (g_settings.renderingBackend) {
+        switch (WawonaSettings_GetRenderingBackend()) {
             case 1: // Metal (Vulkan)
                 setenv("VK_ICD_FILENAMES", "/data/local/tmp/freedreno_icd.json", 1);
                 break;
@@ -441,6 +422,114 @@ static int create_swapchain(VkPhysicalDevice pd) {
 // Rendering
 // ============================================================================
 
+static VkImageView* g_imageViews = NULL;
+static VkFramebuffer* g_framebuffers = NULL;
+static VkRenderPass g_renderPass = VK_NULL_HANDLE;
+static uint32_t g_swapchainImageCount = 0;
+
+/**
+ * Create Image Views
+ */
+static int create_image_views(uint32_t imageCount, VkImage* images) {
+    if (g_imageViews) free(g_imageViews);
+    g_imageViews = malloc(imageCount * sizeof(VkImageView));
+    g_swapchainImageCount = imageCount;
+    for (uint32_t i = 0; i < imageCount; i++) {
+        VkImageViewCreateInfo ivci = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+        ivci.image = images[i];
+        ivci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        ivci.format = VK_FORMAT_R8G8B8A8_UNORM; // Must match swapchain format
+        ivci.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
+        ivci.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
+        ivci.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
+        ivci.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
+        ivci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        ivci.subresourceRange.baseMipLevel = 0;
+        ivci.subresourceRange.levelCount = 1;
+        ivci.subresourceRange.baseArrayLayer = 0;
+        ivci.subresourceRange.layerCount = 1;
+        
+        if (vkCreateImageView(g_device, &ivci, NULL, &g_imageViews[i]) != VK_SUCCESS) {
+            LOGE("Failed to create image view %u", i);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+/**
+ * Create Render Pass
+ */
+static int create_render_pass(void) {
+    if (g_renderPass != VK_NULL_HANDLE) vkDestroyRenderPass(g_device, g_renderPass, NULL);
+
+    VkAttachmentDescription colorAttachment = {0};
+    colorAttachment.format = VK_FORMAT_R8G8B8A8_UNORM;
+    colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+    colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; // Clear to background (Dark Blue)
+    colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    colorAttachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+    VkAttachmentReference colorAttachmentRef = {0};
+    colorAttachmentRef.attachment = 0;
+    colorAttachmentRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+    VkSubpassDescription subpass = {0};
+    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.colorAttachmentCount = 1;
+    subpass.pColorAttachments = &colorAttachmentRef;
+
+    VkSubpassDependency dependency = {0};
+    dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
+    dependency.dstSubpass = 0;
+    dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependency.srcAccessMask = 0;
+    dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+
+    VkRenderPassCreateInfo renderPassInfo = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO };
+    renderPassInfo.attachmentCount = 1;
+    renderPassInfo.pAttachments = &colorAttachment;
+    renderPassInfo.subpassCount = 1;
+    renderPassInfo.pSubpasses = &subpass;
+    renderPassInfo.dependencyCount = 1;
+    renderPassInfo.pDependencies = &dependency;
+
+    if (vkCreateRenderPass(g_device, &renderPassInfo, NULL, &g_renderPass) != VK_SUCCESS) {
+        LOGE("Failed to create render pass");
+        return -1;
+    }
+    return 0;
+}
+
+/**
+ * Create Framebuffers
+ */
+static int create_framebuffers(uint32_t imageCount, VkExtent2D extent) {
+    if (g_framebuffers) free(g_framebuffers);
+    g_framebuffers = malloc(imageCount * sizeof(VkFramebuffer));
+    for (uint32_t i = 0; i < imageCount; i++) {
+        VkImageView attachments[] = { g_imageViews[i] };
+
+        VkFramebufferCreateInfo framebufferInfo = { .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
+        framebufferInfo.renderPass = g_renderPass;
+        framebufferInfo.attachmentCount = 1;
+        framebufferInfo.pAttachments = attachments;
+        framebufferInfo.width = extent.width;
+        framebufferInfo.height = extent.height;
+        framebufferInfo.layers = 1;
+
+        if (vkCreateFramebuffer(g_device, &framebufferInfo, NULL, &g_framebuffers[i]) != VK_SUCCESS) {
+            LOGE("Failed to create framebuffer %u", i);
+            return -1;
+        }
+    }
+    return 0;
+}
+
 /**
  * Render thread - renders frames to the swapchain
  * Currently renders a simple test pattern (clears screen with compositor background color)
@@ -448,24 +537,24 @@ static int create_swapchain(VkPhysicalDevice pd) {
 static void* render_thread(void* arg) {
     (void)arg;
     LOGI("Render thread started with settings:");
-    LOGI("  Force Server-Side Decorations: %s", g_settings.forceServerSideDecorations ? "enabled" : "disabled");
-    LOGI("  Auto Retina Scaling: %s", g_settings.autoRetinaScaling ? "enabled" : "disabled");
-    LOGI("  Rendering Backend: %d (0=Automatic, 1=Metal(Vulkan), 2=Cocoa(Surface))", g_settings.renderingBackend);
-    LOGI("  Respect Safe Area: %s", g_settings.respectSafeArea ? "enabled" : "disabled");
+    LOGI("  Force Server-Side Decorations: %s", WawonaSettings_GetForceServerSideDecorations() ? "enabled" : "disabled");
+    LOGI("  Auto Retina Scaling: %s", WawonaSettings_GetAutoRetinaScalingEnabled() ? "enabled" : "disabled");
+    LOGI("  Rendering Backend: %d (0=Automatic, 1=Vulkan, 2=Surface)", WawonaSettings_GetRenderingBackend());
+    LOGI("  Respect Safe Area: %s", WawonaSettings_GetRespectSafeArea() ? "enabled" : "disabled");
     LOGI("  Safe Area: left=%d, top=%d, right=%d, bottom=%d", 
          g_safeAreaLeft, g_safeAreaTop, g_safeAreaRight, g_safeAreaBottom);
-    LOGI("  Render macOS Pointer: %s", g_settings.renderMacOSPointer ? "enabled" : "disabled");
-    LOGI("  Swap Cmd as Ctrl: %s", g_settings.swapCmdAsCtrl ? "enabled" : "disabled");
-    LOGI("  Universal Clipboard: %s", g_settings.universalClipboard ? "enabled" : "disabled");
-    LOGI("  ColorSync Support: %s", g_settings.colorSyncSupport ? "enabled" : "disabled");
-    LOGI("  Nested Compositors Support: %s", g_settings.nestedCompositorsSupport ? "enabled" : "disabled");
-    LOGI("  Use Metal 4 for Nested: %s", g_settings.useMetal4ForNested ? "enabled" : "disabled");
-    LOGI("  Multiple Clients: %s", g_settings.multipleClients ? "enabled" : "disabled");
-    LOGI("  Waypipe RS Support: %s", g_settings.waypipeRSSupport ? "enabled" : "disabled");
-    LOGI("  Enable TCP Listener: %s", g_settings.enableTCPListener ? "enabled" : "disabled");
-    LOGI("  TCP Port: %d", g_settings.tcpPort);
+    LOGI("  Render macOS Pointer: %s", WawonaSettings_GetRenderMacOSPointer() ? "enabled" : "disabled");
+    LOGI("  Swap Cmd as Ctrl: %s", WawonaSettings_GetSwapCmdAsCtrl() ? "enabled" : "disabled");
+    LOGI("  Universal Clipboard: %s", WawonaSettings_GetUniversalClipboardEnabled() ? "enabled" : "disabled");
+    LOGI("  ColorSync Support: %s", WawonaSettings_GetColorSyncSupportEnabled() ? "enabled" : "disabled");
+    LOGI("  Nested Compositors Support: %s", WawonaSettings_GetNestedCompositorsSupportEnabled() ? "enabled" : "disabled");
+    LOGI("  Use Metal 4 for Nested: %s", WawonaSettings_GetUseMetal4ForNested() ? "enabled" : "disabled");
+    LOGI("  Multiple Clients: %s", WawonaSettings_GetMultipleClientsEnabled() ? "enabled" : "disabled");
+    LOGI("  Waypipe RS Support: %s", WawonaSettings_GetWaypipeRSSupportEnabled() ? "enabled" : "disabled");
+    LOGI("  Enable TCP Listener: %s", WawonaSettings_GetEnableTCPListener() ? "enabled" : "disabled");
+    LOGI("  TCP Port: %d", WawonaSettings_GetTCPListenerPort());
     
-    // Simple test - just clear the screen once
+    // Get swapchain images
     uint32_t imageCount = 0;
     VkResult res = vkGetSwapchainImagesKHR(g_device, g_swapchain, &imageCount, NULL);
     if (res != VK_SUCCESS || imageCount == 0) {
@@ -482,6 +571,17 @@ static void* render_thread(void* arg) {
     }
     
     LOGI("Got %u swapchain images", imageCount);
+
+    // Get surface capabilities for extent
+    VkSurfaceCapabilitiesKHR caps;
+    VkPhysicalDevice pd = pick_device();
+    vkGetPhysicalDeviceSurfaceCapabilitiesKHR(pd, g_surface, &caps);
+    VkExtent2D extent = caps.currentExtent;
+
+    // Create Render Pass and Framebuffers
+    if (create_image_views(imageCount, images) != 0) return NULL;
+    if (create_render_pass() != 0) return NULL;
+    if (create_framebuffers(imageCount, extent) != 0) return NULL;
     
     // Create command pool
     VkCommandPool cmdPool;
@@ -528,67 +628,93 @@ static void* render_thread(void* arg) {
             break;
         }
         
-        // Transition image to transfer dst optimal
-        VkImageMemoryBarrier barrier = {0};
-        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.image = images[imageIndex];
-        barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        barrier.subresourceRange.baseMipLevel = 0;
-        barrier.subresourceRange.levelCount = 1;
-        barrier.subresourceRange.baseArrayLayer = 0;
-        barrier.subresourceRange.layerCount = 1;
-        barrier.srcAccessMask = 0;
-        barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        // Begin Render Pass
+        // LoadOp CLEAR sets the whole framebuffer to Black (Background/Margins)
+        VkClearValue clearValue = {{{ 0.0f, 0.0f, 0.0f, 1.0f }}}; 
         
-        vkCmdPipelineBarrier(cmdBuf, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
-                             0, NULL, 0, NULL, 1, &barrier);
+        VkRenderPassBeginInfo rpbi = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+        rpbi.renderPass = g_renderPass;
+        rpbi.framebuffer = g_framebuffers[imageIndex];
+        rpbi.renderArea.offset.x = 0;
+        rpbi.renderArea.offset.y = 0;
+        rpbi.renderArea.extent = extent;
+        rpbi.clearValueCount = 1;
+        rpbi.pClearValues = &clearValue;
         
-        // Clear the image with iOS/macOS compositor background color
-        VkClearColorValue clearColor = { .float32 = { 24.0f/255.0f, 24.0f/255.0f, 49.0f/255.0f, 1.0f } }; // RGB(24, 24, 49)
+        vkCmdBeginRenderPass(cmdBuf, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
+
+        // Capture safe area state safely
+        int safeLeft = 0, safeTop = 0, safeRight = 0, safeBottom = 0;
+        int respectSafeArea = 0;
         
-        // If safe area is enabled, log the safe area bounds
-        if (g_respectSafeArea && (g_safeAreaLeft > 0 || g_safeAreaTop > 0 || g_safeAreaRight > 0 || g_safeAreaBottom > 0)) {
-            // Get surface dimensions from physical device
-            VkSurfaceCapabilitiesKHR caps;
-            VkPhysicalDevice pd = pick_device();
-            if (pd != VK_NULL_HANDLE) {
-                vkGetPhysicalDeviceSurfaceCapabilitiesKHR(pd, g_surface, &caps);
-                uint32_t surfaceWidth = caps.currentExtent.width;
-                uint32_t surfaceHeight = caps.currentExtent.height;
-                
-                // Calculate safe area bounds
-                uint32_t safeLeft = g_safeAreaLeft;
-                uint32_t safeTop = g_safeAreaTop;
-                uint32_t safeWidth = surfaceWidth - g_safeAreaLeft - g_safeAreaRight;
-                uint32_t safeHeight = surfaceHeight - g_safeAreaTop - g_safeAreaBottom;
-                
-                LOGI("Rendering in safe area: left=%u, top=%u, width=%u, height=%u", safeLeft, safeTop, safeWidth, safeHeight);
-            }
+        pthread_mutex_lock(&g_lock);
+        respectSafeArea = WawonaSettings_GetRespectSafeArea();
+        if (respectSafeArea) {
+            safeLeft = g_safeAreaLeft;
+            safeTop = g_safeAreaTop;
+            safeRight = g_safeAreaRight;
+            safeBottom = g_safeAreaBottom;
         }
-        
-        // Clear entire image (Vulkan doesn't support subregion clearing efficiently)
-        // Safe area rendering would require viewport/scissor setup in a full renderer
-        VkImageSubresourceRange range = {0};
-        range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        range.baseMipLevel = 0;
-        range.levelCount = 1;
-        range.baseArrayLayer = 0;
-        range.layerCount = 1;
-        
-        vkCmdClearColorImage(cmdBuf, images[imageIndex], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clearColor, 1, &range);
-        
-        // Transition to present src
-        barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        barrier.dstAccessMask = 0;
-        
-        vkCmdPipelineBarrier(cmdBuf, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0,
-                             0, NULL, 0, NULL, 1, &barrier);
+        pthread_mutex_unlock(&g_lock);
+
+        // If safe area enabled, clear the content area to Dark Blue
+        // This leaves the margins as Black (from Render Pass LoadOp)
+        if (respectSafeArea && (safeLeft > 0 || safeTop > 0 || safeRight > 0 || safeBottom > 0)) {
+            // Calculate safe area rect with additional 25px padding on top/bottom
+            VkRect2D safeRect;
+            safeRect.offset.x = safeLeft;
+            safeRect.offset.y = safeTop + 25;
+            safeRect.extent.width = extent.width - safeLeft - safeRight;
+            safeRect.extent.height = extent.height - safeTop - safeBottom - 50;
+            
+            // Log safe area for debugging (once per second)
+            if (frame_count % 60 == 0) {
+                LOGI("Safe Area Active - Viewport: x=%d, y=%d, w=%u, h=%u", 
+                     safeRect.offset.x, safeRect.offset.y, safeRect.extent.width, safeRect.extent.height);
+            }
+            
+            // Content clearing temporarily disabled (User Request)
+            /*
+            // Clear Safe Area to Dark Blue (Content)
+            VkClearAttachment attachment = {0};
+            attachment.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            attachment.colorAttachment = 0;
+            attachment.clearValue.color.float32[0] = 24.0f/255.0f; // Dark Blue
+            attachment.clearValue.color.float32[1] = 24.0f/255.0f;
+            attachment.clearValue.color.float32[2] = 49.0f/255.0f;
+            attachment.clearValue.color.float32[3] = 1.0f;
+            
+            VkClearRect rect = {0};
+            rect.rect = safeRect;
+            rect.baseArrayLayer = 0;
+            rect.layerCount = 1;
+            
+            vkCmdClearAttachments(cmdBuf, 1, &attachment, 1, &rect);
+            */
+        } else {
+            // Content clearing temporarily disabled (User Request)
+            /*
+            // Full Screen Content (Dark Blue)
+            VkClearAttachment attachment = {0};
+            attachment.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            attachment.colorAttachment = 0;
+            attachment.clearValue.color.float32[0] = 24.0f/255.0f; // Dark Blue
+            attachment.clearValue.color.float32[1] = 24.0f/255.0f;
+            attachment.clearValue.color.float32[2] = 49.0f/255.0f;
+            attachment.clearValue.color.float32[3] = 1.0f;
+            
+            VkClearRect rect = {0};
+            rect.rect.offset.x = 0;
+            rect.rect.offset.y = 0;
+            rect.rect.extent = extent;
+            rect.baseArrayLayer = 0;
+            rect.layerCount = 1;
+            
+            vkCmdClearAttachments(cmdBuf, 1, &attachment, 1, &rect);
+            */
+        }
+
+        vkCmdEndRenderPass(cmdBuf);
         
         res = vkEndCommandBuffer(cmdBuf);
         if (res != VK_SUCCESS) {
@@ -628,7 +754,7 @@ static void* render_thread(void* arg) {
         }
         
         frame_count++;
-        LOGI("Rendered frame %d", frame_count);
+        if (frame_count % 60 == 0) LOGI("Rendered frame %d", frame_count);
         usleep(166666); // ~60 FPS
     }
     
@@ -650,7 +776,7 @@ static void* render_thread(void* arg) {
  * Called from Android Activity.onCreate()
  */
 JNIEXPORT void JNICALL
-Java_com_aspauldingcode_wawona_MainActivity_nativeInit(JNIEnv* env, jobject thiz) {
+Java_com_aspauldingcode_wawona_WawonaNative_nativeInit(JNIEnv* env, jobject thiz) {
     (void)env; (void)thiz;
     pthread_mutex_lock(&g_lock);
     if (g_instance != VK_NULL_HANDLE) {
@@ -674,72 +800,114 @@ Java_com_aspauldingcode_wawona_MainActivity_nativeInit(JNIEnv* env, jobject thiz
  * Called when the SurfaceView is created/updated
  */
 JNIEXPORT void JNICALL
-Java_com_aspauldingcode_wawona_MainActivity_nativeSetSurface(JNIEnv* env, jobject thiz, jobject surface) {
+Java_com_aspauldingcode_wawona_WawonaNative_nativeSetSurface(JNIEnv* env, jobject thiz, jobject surface) {
     (void)thiz;
     pthread_mutex_lock(&g_lock);
     
+    LOGI("nativeSetSurface called");
+
+    if (g_window) {
+        LOGI("Releasing existing ANativeWindow");
+        ANativeWindow_release(g_window);
+        g_window = NULL;
+    }
+
     ANativeWindow* win = ANativeWindow_fromSurface(env, surface);
     if (!win) { 
         LOGE("ANativeWindow_fromSurface returned NULL"); 
         pthread_mutex_unlock(&g_lock);
         return; 
     }
+    g_window = win;
     LOGI("Received ANativeWindow %p", (void*)win);
     
-    // Update safe area from activity
-    update_safe_area(env, thiz);
+    // Skip safe area update for now - thiz is WawonaNative object, not Activity
+    // Safe area will be updated when settings are applied via nativeApplySettings
+    LOGI("Skipping safe area update (will be set via settings)");
+    g_safeAreaLeft = 0;
+    g_safeAreaTop = 0;
+    g_safeAreaRight = 0;
+    g_safeAreaBottom = 0;
     
     if (g_instance == VK_NULL_HANDLE) {
+        LOGI("Creating Vulkan instance...");
         if (create_instance() != VK_SUCCESS) {
+            LOGE("Failed to create Vulkan instance");
             ANativeWindow_release(win);
+            g_window = NULL;
             pthread_mutex_unlock(&g_lock);
             return;
         }
+        LOGI("Vulkan instance created");
+    } else {
+        LOGI("Vulkan instance already exists");
     }
     
+    LOGI("Creating Android surface...");
     VkAndroidSurfaceCreateInfoKHR sci = { .sType = VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR };
     sci.window = win;
     VkResult res = vkCreateAndroidSurfaceKHR(g_instance, &sci, NULL, &g_surface);
     if (res != VK_SUCCESS) { 
         LOGE("vkCreateAndroidSurfaceKHR failed: %d", res); 
         ANativeWindow_release(win);
+        g_window = NULL;
         pthread_mutex_unlock(&g_lock);
         return; 
     }
     LOGI("Android VkSurfaceKHR created: %p", (void*)g_surface);
     
+    LOGI("Picking Vulkan device...");
     VkPhysicalDevice pd = pick_device();
     if (pd == VK_NULL_HANDLE) {
         LOGE("No Vulkan devices found");
+        vkDestroySurfaceKHR(g_instance, g_surface, NULL);
         ANativeWindow_release(win);
+        g_window = NULL;
         pthread_mutex_unlock(&g_lock);
         return;
     }
+    LOGI("Vulkan device picked");
     
+    LOGI("Creating Vulkan device...");
     if (create_device(pd) != 0) {
         LOGE("Failed to create device");
+        vkDestroySurfaceKHR(g_instance, g_surface, NULL);
         ANativeWindow_release(win);
+        g_window = NULL;
         pthread_mutex_unlock(&g_lock);
         return;
     }
+    LOGI("Vulkan device created");
     
+    LOGI("Creating swapchain...");
     if (create_swapchain(pd) != 0) {
         LOGE("Failed to create swapchain");
+        vkDestroyDevice(g_device, NULL);
+        vkDestroySurfaceKHR(g_instance, g_surface, NULL);
         ANativeWindow_release(win);
+        g_window = NULL;
         pthread_mutex_unlock(&g_lock);
         return;
     }
+    LOGI("Swapchain created");
     
     // Start render thread with delay to ensure surface is ready
+    LOGI("Starting render thread...");
     g_running = 1; 
     usleep(500000); // 500ms delay to let surface stabilize
-    if (pthread_create(&g_render_thread, NULL, render_thread, NULL) != 0) {
-        LOGE("Failed to create render thread");
+    int thread_result = pthread_create(&g_render_thread, NULL, render_thread, NULL);
+    if (thread_result != 0) {
+        LOGE("Failed to create render thread: %d", thread_result);
         g_running = 0;
+        vkDestroySwapchainKHR(g_device, g_swapchain, NULL);
+        vkDestroyDevice(g_device, NULL);
+        vkDestroySurfaceKHR(g_instance, g_surface, NULL);
         ANativeWindow_release(win);
+        g_window = NULL;
         pthread_mutex_unlock(&g_lock);
         return;
     }
+    LOGI("Render thread created successfully");
     
     LOGI("Wawona Compositor initialized successfully");
     pthread_mutex_unlock(&g_lock);
@@ -750,7 +918,7 @@ Java_com_aspauldingcode_wawona_MainActivity_nativeSetSurface(JNIEnv* env, jobjec
  * Called when the SurfaceView is destroyed
  */
 JNIEXPORT void JNICALL
-Java_com_aspauldingcode_wawona_MainActivity_nativeDestroySurface(JNIEnv* env, jobject thiz) {
+Java_com_aspauldingcode_wawona_WawonaNative_nativeDestroySurface(JNIEnv* env, jobject thiz) {
     (void)env; (void)thiz;
     pthread_mutex_lock(&g_lock);
     
@@ -766,6 +934,30 @@ Java_com_aspauldingcode_wawona_MainActivity_nativeDestroySurface(JNIEnv* env, jo
     // Clean up Vulkan resources
     if (g_device != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(g_device);
+    }
+    
+    // Clean up Framebuffers
+    if (g_framebuffers) {
+        for (uint32_t i = 0; i < g_swapchainImageCount; i++) {
+            vkDestroyFramebuffer(g_device, g_framebuffers[i], NULL);
+        }
+        free(g_framebuffers);
+        g_framebuffers = NULL;
+    }
+
+    // Clean up Render Pass
+    if (g_renderPass != VK_NULL_HANDLE) {
+        vkDestroyRenderPass(g_device, g_renderPass, NULL);
+        g_renderPass = VK_NULL_HANDLE;
+    }
+
+    // Clean up Image Views
+    if (g_imageViews) {
+        for (uint32_t i = 0; i < g_swapchainImageCount; i++) {
+            vkDestroyImageView(g_device, g_imageViews[i], NULL);
+        }
+        free(g_imageViews);
+        g_imageViews = NULL;
     }
     
     if (g_swapchain && g_device) {
@@ -787,8 +979,44 @@ Java_com_aspauldingcode_wawona_MainActivity_nativeDestroySurface(JNIEnv* env, jo
         vkDestroyInstance(g_instance, NULL);
         g_instance = VK_NULL_HANDLE;
     }
+
+    if (g_window) {
+        ANativeWindow_release(g_window);
+        g_window = NULL;
+    }
     
     LOGI("Surface destroyed");
+    pthread_mutex_unlock(&g_lock);
+}
+
+/**
+ * Update safe area insets from Android WindowInsets API
+ * Called directly from Kotlin to avoid complex JNI reflection
+ */
+JNIEXPORT void JNICALL Java_com_aspauldingcode_wawona_WawonaNative_nativeUpdateSafeArea(JNIEnv* env, jobject thiz, jint left, jint top, jint right, jint bottom) {
+    (void)env;
+    (void)thiz;
+    pthread_mutex_lock(&g_lock);
+    
+    g_rawSafeAreaLeft = left;
+    g_rawSafeAreaTop = top;
+    g_rawSafeAreaRight = right;
+    g_rawSafeAreaBottom = bottom;
+    
+    if (WawonaSettings_GetRespectSafeArea()) {
+        g_safeAreaLeft = left;
+        g_safeAreaTop = top;
+        g_safeAreaRight = right;
+        g_safeAreaBottom = bottom;
+        LOGI("JNI Update Safe Area: Applied (L=%d, T=%d, R=%d, B=%d)", left, top, right, bottom);
+    } else {
+        g_safeAreaLeft = 0;
+        g_safeAreaTop = 0;
+        g_safeAreaRight = 0;
+        g_safeAreaBottom = 0;
+        LOGI("JNI Update Safe Area: Cached (L=%d, T=%d, R=%d, B=%d), but disabled", left, top, right, bottom);
+    }
+    
     pthread_mutex_unlock(&g_lock);
 }
 
@@ -797,7 +1025,7 @@ Java_com_aspauldingcode_wawona_MainActivity_nativeDestroySurface(JNIEnv* env, jo
  * Provides 1:1 mapping of iOS settings for cross-platform compatibility
  */
 JNIEXPORT void JNICALL
-Java_com_aspauldingcode_wawona_MainActivity_nativeApplySettings(JNIEnv* env, jobject thiz,
+Java_com_aspauldingcode_wawona_WawonaNative_nativeApplySettings(JNIEnv* env, jobject thiz,
                                                                 jboolean forceServerSideDecorations,
                                                                 jboolean autoRetinaScaling,
                                                                 jint renderingBackend,
@@ -815,14 +1043,12 @@ Java_com_aspauldingcode_wawona_MainActivity_nativeApplySettings(JNIEnv* env, job
     (void)thiz;
     pthread_mutex_lock(&g_lock);
     
-    LOGI("Applying iOS settings 1:1:");
+    LOGI("Applying Wawona settings:");
     LOGI("  Force Server-Side Decorations: %s", forceServerSideDecorations ? "enabled" : "disabled");
     LOGI("  Auto Retina Scaling: %s", autoRetinaScaling ? "enabled" : "disabled");
-    LOGI("  Rendering Backend: %d (0=Automatic, 1=Metal(Vulkan), 2=Cocoa(Surface))", renderingBackend);
+    LOGI("  Rendering Backend: %d (0=Automatic, 1=Vulkan, 2=Surface)", renderingBackend);
     LOGI("  Respect Safe Area: %s", respectSafeArea ? "enabled" : "disabled");
-    LOGI("  Safe Area: left=%d, top=%d, right=%d, bottom=%d", 
-         g_safeAreaLeft, g_safeAreaTop, g_safeAreaRight, g_safeAreaBottom);
-    LOGI("  Render macOS Pointer: %s", renderMacOSPointer ? "enabled" : "disabled");
+    LOGI("  Render Software Pointer: %s", renderMacOSPointer ? "enabled" : "disabled");
     LOGI("  Swap Cmd as Ctrl: %s", swapCmdAsCtrl ? "enabled" : "disabled");
     LOGI("  Universal Clipboard: %s", universalClipboard ? "enabled" : "disabled");
     LOGI("  ColorSync Support: %s", colorSyncSupport ? "enabled" : "disabled");
@@ -833,48 +1059,80 @@ Java_com_aspauldingcode_wawona_MainActivity_nativeApplySettings(JNIEnv* env, job
     LOGI("  Enable TCP Listener: %s", enableTCPListener ? "enabled" : "disabled");
     LOGI("  TCP Port: %d", tcpPort);
     
-    // Apply settings to match iOS exactly
-    g_settings.forceServerSideDecorations = forceServerSideDecorations ? 1 : 0;
-    g_settings.autoRetinaScaling = autoRetinaScaling ? 1 : 0;
-    g_settings.renderingBackend = renderingBackend;
-    g_settings.respectSafeArea = respectSafeArea ? 1 : 0;
-    g_settings.renderMacOSPointer = renderMacOSPointer ? 1 : 0;
-    g_settings.swapCmdAsCtrl = swapCmdAsCtrl ? 1 : 0;
-    g_settings.universalClipboard = universalClipboard ? 1 : 0;
-    g_settings.colorSyncSupport = colorSyncSupport ? 1 : 0;
-    g_settings.nestedCompositorsSupport = nestedCompositorsSupport ? 1 : 0;
-    g_settings.useMetal4ForNested = useMetal4ForNested ? 1 : 0;
-    g_settings.multipleClients = multipleClients ? 1 : 0;
-    g_settings.waypipeRSSupport = waypipeRSSupport ? 1 : 0;
-    g_settings.enableTCPListener = enableTCPListener ? 1 : 0;
-    g_settings.tcpPort = tcpPort;
+    // Apply settings
+    WawonaSettingsConfig config = {
+        .forceServerSideDecorations = forceServerSideDecorations,
+        .autoRetinaScaling = autoRetinaScaling,
+        .renderingBackend = renderingBackend,
+        .respectSafeArea = respectSafeArea,
+        .renderMacOSPointer = renderMacOSPointer,
+        .swapCmdAsCtrl = swapCmdAsCtrl,
+        .universalClipboard = universalClipboard,
+        .colorSyncSupport = colorSyncSupport,
+        .nestedCompositorsSupport = nestedCompositorsSupport,
+        .useMetal4ForNested = useMetal4ForNested,
+        .multipleClients = multipleClients,
+        .waypipeRSSupport = waypipeRSSupport,
+        .enableTCPListener = enableTCPListener,
+        .tcpPort = tcpPort,
+        .vulkanDrivers = false,
+        .eglDrivers = false
+    };
+    WawonaSettings_UpdateConfig(&config);
     
-    // Update safe area flag
-    g_respectSafeArea = respectSafeArea ? 1 : 0;
+    // Update safe area based on new setting
+    if (respectSafeArea) {
+        g_safeAreaLeft = g_rawSafeAreaLeft;
+        g_safeAreaTop = g_rawSafeAreaTop;
+        g_safeAreaRight = g_rawSafeAreaRight;
+        g_safeAreaBottom = g_rawSafeAreaBottom;
+    } else {
+        g_safeAreaLeft = 0;
+        g_safeAreaTop = 0;
+        g_safeAreaRight = 0;
+        g_safeAreaBottom = 0;
+    }
     
-    // Update safe area from current activity
-    update_safe_area(env, thiz);
+    LOGI("Safe area updated based on settings: %s (L=%d, T=%d, R=%d, B=%d)", 
+         respectSafeArea ? "enabled" : "disabled",
+         g_safeAreaLeft, g_safeAreaTop, g_safeAreaRight, g_safeAreaBottom);
     
-    // Set environment variables for native compositor
-    setenv("WAWONA_FORCE_SERVER_DECORATIONS", forceServerSideDecorations ? "1" : "0", 1);
-    setenv("WAWONA_AUTO_RETINA_SCALING", autoRetinaScaling ? "1" : "0", 1);
-    char backendStr[16];
-    snprintf(backendStr, sizeof(backendStr), "%d", renderingBackend);
-    setenv("WAWONA_RENDERING_BACKEND", backendStr, 1);
-    setenv("WAWONA_RESPECT_SAFE_AREA", respectSafeArea ? "1" : "0", 1);
-    setenv("WAWONA_RENDER_MACOS_POINTER", renderMacOSPointer ? "1" : "0", 1);
-    setenv("WAWONA_SWAP_CMD_AS_CTRL", swapCmdAsCtrl ? "1" : "0", 1);
-    setenv("WAWONA_UNIVERSAL_CLIPBOARD", universalClipboard ? "1" : "0", 1);
-    setenv("WAWONA_COLORSYNC_SUPPORT", colorSyncSupport ? "1" : "0", 1);
-    setenv("WAWONA_NESTED_COMPOSITORS_SUPPORT", nestedCompositorsSupport ? "1" : "0", 1);
-    setenv("WAWONA_USE_METAL4_FOR_NESTED", useMetal4ForNested ? "1" : "0", 1);
-    setenv("WAWONA_MULTIPLE_CLIENTS", multipleClients ? "1" : "0", 1);
-    setenv("WAWONA_WAYPIPE_RS_SUPPORT", waypipeRSSupport ? "1" : "0", 1);
-    setenv("WAWONA_ENABLE_TCP_LISTENER", enableTCPListener ? "1" : "0", 1);
-    char portStr[16];
-    snprintf(portStr, sizeof(portStr), "%d", tcpPort);
-    setenv("WAWONA_TCP_PORT", portStr, 1);
-    
-    LOGI("iOS settings applied successfully 1:1 with safe area support");
+    LOGI("Wawona settings applied successfully with safe area support");
     pthread_mutex_unlock(&g_lock);
 }
+
+// ============================================================================
+// JNI Initialization
+// ============================================================================
+
+static int pfd[2];
+static pthread_t thr;
+static const char *tag = "Wawona-Stdout";
+
+static void *thread_func(void *arg)
+{
+    ssize_t rdsz;
+    char buf[128];
+    while((rdsz = read(pfd[0], buf, sizeof buf - 1)) > 0) {
+        if(buf[rdsz - 1] == '\n') --rdsz;
+        buf[rdsz] = 0;  /* add null-terminator */
+        __android_log_write(ANDROID_LOG_DEBUG, tag, buf);
+    }
+    return 0;
+}
+
+JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
+    // Redirect stdout/stderr to logcat
+    setvbuf(stdout, 0, _IOLBF, 0);
+    setvbuf(stderr, 0, _IONBF, 0);
+    pipe(pfd);
+    dup2(pfd[1], 1);
+    dup2(pfd[1], 2);
+    if(pthread_create(&thr, 0, thread_func, 0) == -1)
+        return -1;
+    pthread_detach(thr);
+    
+    return JNI_VERSION_1_6;
+}
+
+

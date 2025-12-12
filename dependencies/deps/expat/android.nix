@@ -38,6 +38,7 @@ pkgs.stdenv.mkDerivation {
     "-DCMAKE_ANDROID_NDK=${androidToolchain.androidndkRoot}"
     "-DCMAKE_C_COMPILER=${androidToolchain.androidCC}"
     "-DCMAKE_CXX_COMPILER=${androidToolchain.androidCXX}"
+    "-DCMAKE_ANDROID_PLATFORM=android-${toString androidToolchain.androidNdkApiLevel}"
     "-DCMAKE_C_FLAGS=--target=${androidToolchain.androidTarget}"
     "-DCMAKE_CXX_FLAGS=--target=${androidToolchain.androidTarget}"
   ] ++ buildFlags;

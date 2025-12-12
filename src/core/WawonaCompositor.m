@@ -1,15 +1,20 @@
 #import "WawonaCompositor.h"
+#include "WawonaSettings.h"
+#ifdef __APPLE__
 #import <CoreVideo/CoreVideo.h>
 #import <QuartzCore/QuartzCore.h>
 #if !TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
 #import <libproc.h>
 #endif
-#import "WawonaPreferencesManager.h"
+// WawonaPreferencesManager.h is now wrapped by WawonaSettings.h
+#endif
 #include "logging.h"
 #include "wayland_fullscreen_shell.h"
 #include <arpa/inet.h>
 #include <assert.h>
+#ifdef __APPLE__
 #include <dispatch/dispatch.h>
+#endif
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
@@ -24,87 +29,30 @@
 
 static struct wl_surface_impl *g_surface_list = NULL;
 static struct wl_compositor_impl *g_compositor = NULL;
+
+#ifdef __APPLE__
 static WawonaCompositor *g_compositor_instance;
-
-// TCP accept() callback function for manual TCP connection handling
-// Declared static but used in tcp_accept_timer_handler below
-static int tcp_accept_handler(int fd, uint32_t mask, void *data);
-
-__attribute__((unused)) static int tcp_accept_handler(int fd, uint32_t mask,
-                                                      void *data) {
-  WawonaCompositor *compositor = (__bridge WawonaCompositor *)data;
-  if (!compositor || !compositor.display)
-    return 0;
-
-  // Only accept if socket is readable (has pending connections)
-  if (!(mask & WL_EVENT_READABLE)) {
-    return 0;
-  }
-
-  // Accept new TCP connection (non-blocking socket, so this won't block)
-  struct sockaddr_in client_addr;
-  socklen_t client_len = sizeof(client_addr);
-  int client_fd = accept(fd, (struct sockaddr *)&client_addr, &client_len);
-
-  if (client_fd >= 0) {
-    int flags = fcntl(client_fd, F_GETFL, 0);
-    if (flags >= 0) {
-      fcntl(client_fd, F_SETFL, flags | O_NONBLOCK);
-    }
-    BOOL allowMultiple = NO;
-    @try {
-        WawonaPreferencesManager *prefsManager = [WawonaPreferencesManager sharedManager];
-        if (prefsManager) {
-            allowMultiple = [prefsManager multipleClientsEnabled];
-        }
-    } @catch (NSException *exception) {
-        log_printf("[COMPOSITOR] ", "⚠️ Failed to read multipleClientsEnabled preference: %s\n", [exception.description UTF8String]);
-        allowMultiple = NO;
-    }
-    if (!allowMultiple && g_compositor_instance &&
-        g_compositor_instance.connectedClientCount > 0) {
-      log_printf("[COMPOSITOR] ",
-                 "🚫 TCP client rejected: multiple clients disabled\n");
-      close(client_fd);
-      return 0;
-    }
-    struct wl_client *client = wl_client_create(compositor.display, client_fd);
-    if (!client) {
-      log_printf("[COMPOSITOR] ",
-                 "⚠️ Failed to create Wayland client for TCP connection\n");
-      close(client_fd);
-    } else {
-      log_printf(
-          "[COMPOSITOR] ",
-          "✅ Accepted TCP connection (fd=%d), created Wayland client %p\n",
-          client_fd, client);
-    }
-  } else {
-    // Check error - only log if it's not a "would block" error
-    int err = errno;
-    if (err != EAGAIN && err != EWOULDBLOCK && err != EINTR) {
-      // EINVAL might mean the socket isn't actually a listening socket
-      // This shouldn't happen, but log it once
-      static int logged_inval = 0;
-      if (err == EINVAL && !logged_inval) {
-        log_printf(
-            "[COMPOSITOR] ",
-            "⚠️ TCP accept() failed: %s (fd=%d) - socket may not be listening\n",
-            strerror(err), fd);
-        logged_inval = 1;
-      } else if (err != EINVAL) {
-        log_printf("[COMPOSITOR] ", "⚠️ TCP accept() failed: %s\n",
-                   strerror(err));
-      }
-    }
-  }
-  return 0; // Continue watching
-}
+#else
+struct WawonaCompositor {
+    struct wl_display *display;
+    int tcp_listen_fd;
+    int connectedClientCount;
+    // Add other fields as needed
+};
+static struct WawonaCompositor *g_compositor_instance;
+#endif
 
 // Timer callback to check for TCP connections
 static int tcp_accept_timer_handler(void *data) {
+#ifdef __APPLE__
   WawonaCompositor *compositor = (__bridge WawonaCompositor *)data;
-  if (!compositor || compositor.tcp_listen_fd < 0) {
+  int listen_fd = compositor.tcp_listen_fd;
+#else
+  WawonaCompositor *compositor = (WawonaCompositor *)data;
+  int listen_fd = compositor->tcp_listen_fd;
+#endif
+
+  if (!compositor || listen_fd < 0) {
     return 0; // Stop timer
   }
 
@@ -116,10 +64,10 @@ static int tcp_accept_timer_handler(void *data) {
   // Use select() to check if socket has pending connections (non-blocking)
   fd_set read_fds;
   FD_ZERO(&read_fds);
-  FD_SET(compositor.tcp_listen_fd, &read_fds);
+  FD_SET(listen_fd, &read_fds);
   struct timeval timeout = {0, 0}; // Non-blocking check
   int ret =
-      select(compositor.tcp_listen_fd + 1, &read_fds, NULL, NULL, &timeout);
+      select(listen_fd + 1, &read_fds, NULL, NULL, &timeout);
 
   if (ret < 0) {
     // Select error
@@ -141,12 +89,12 @@ static int tcp_accept_timer_handler(void *data) {
   for (int i = 0; i < max_accept_per_tick; i++) {
     // Check again if socket is still readable
     FD_ZERO(&read_fds);
-    FD_SET(compositor.tcp_listen_fd, &read_fds);
+    FD_SET(listen_fd, &read_fds);
     timeout.tv_sec = 0;
     timeout.tv_usec = 0;
-    ret = select(compositor.tcp_listen_fd + 1, &read_fds, NULL, NULL, &timeout);
+    ret = select(listen_fd + 1, &read_fds, NULL, NULL, &timeout);
 
-    if (ret <= 0 || !FD_ISSET(compositor.tcp_listen_fd, &read_fds)) {
+    if (ret <= 0 || !FD_ISSET(listen_fd, &read_fds)) {
       // No more pending connections
       break;
     }
@@ -154,7 +102,7 @@ static int tcp_accept_timer_handler(void *data) {
     // Accept one connection
     struct sockaddr_in client_addr;
     socklen_t client_len = sizeof(client_addr);
-    int client_fd = accept(compositor.tcp_listen_fd,
+    int client_fd = accept(listen_fd,
                            (struct sockaddr *)&client_addr, &client_len);
 
     if (client_fd >= 0) {
@@ -162,17 +110,26 @@ static int tcp_accept_timer_handler(void *data) {
       if (flags >= 0) {
         fcntl(client_fd, F_SETFL, flags | O_NONBLOCK);
       }
-      BOOL allowMultiple =
-          [[WawonaPreferencesManager sharedManager] multipleClientsEnabled];
+      BOOL allowMultiple = WawonaSettings_GetMultipleClientsEnabled();
+#ifdef __APPLE__
       if (!allowMultiple && g_compositor_instance &&
           g_compositor_instance.connectedClientCount > 0) {
+#else
+      if (!allowMultiple && g_compositor_instance &&
+          g_compositor_instance->connectedClientCount > 0) {
+#endif
         log_printf("[COMPOSITOR] ",
                    "🚫 TCP client rejected: multiple clients disabled\n");
         close(client_fd);
         continue;
       }
+#ifdef __APPLE__
       struct wl_client *client =
           wl_client_create(compositor.display, client_fd);
+#else
+      struct wl_client *client =
+          wl_client_create(compositor->display, client_fd);
+#endif
       if (!client) {
         log_printf("[COMPOSITOR] ",
                    "⚠️ Failed to create Wayland client for TCP connection "
@@ -505,6 +462,7 @@ static void compositor_bind(struct wl_client *client, void *data,
                             uint32_t version, uint32_t id) {
   struct wl_compositor_impl *compositor = data;
   BOOL allowMultiple = NO;
+#ifdef __APPLE__
   @try {
     WawonaPreferencesManager *prefsManager = [WawonaPreferencesManager sharedManager];
     if (prefsManager) {
@@ -516,6 +474,11 @@ static void compositor_bind(struct wl_client *client, void *data,
   }
   if (!allowMultiple && g_compositor_instance &&
       g_compositor_instance.connectedClientCount > 0) {
+#else
+  allowMultiple = WawonaSettings_GetMultipleClientsEnabled();
+  if (!allowMultiple && g_compositor_instance &&
+      g_compositor_instance->connectedClientCount > 0) {
+#endif
     NSLog(
         @"🚫 Additional client connection rejected: multiple clients disabled");
     wl_client_destroy(client);
@@ -1216,6 +1179,7 @@ void macos_compositor_check_and_hide_window_if_needed(void) {
   // Since we can't directly access it, we'll use a callback mechanism
   // For now, we'll check if the window is shown and hide it
   // The actual surface count check will be done in client_destroy_listener
+#ifdef __APPLE__
   dispatch_async(dispatch_get_main_queue(), ^{
     if (g_compositor_instance.windowShown && g_compositor_instance.window) {
       NSLog(@"[WINDOW] All clients disconnected - hiding window");
@@ -1227,6 +1191,9 @@ void macos_compositor_check_and_hide_window_if_needed(void) {
       g_compositor_instance.windowShown = NO;
     }
   });
+#else
+  // Android specific implementation if needed
+#endif
 }
 
 @implementation WawonaCompositor
@@ -1264,27 +1231,45 @@ void macos_compositor_check_and_hide_window_if_needed(void) {
     if (window.rootViewController && window.rootViewController.view) {
         // Use existing root view controller's view
         containerView = window.rootViewController.view;
-        NSLog(@"✅ Using existing root view controller for compositor view");
+        // Ensure it fills the window properly
+        containerView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        // Force layout to ensure bounds are correct
+        [containerView setNeedsLayout];
+        [containerView layoutIfNeeded];
+        NSLog(@"✅ Using existing root view controller for compositor view (bounds=%@)",
+              NSStringFromCGRect(containerView.bounds));
     } else {
         // Create new root view controller (fallback)
         UIViewController *rootVC = [[UIViewController alloc] init];
-        containerView = [[UIView alloc] initWithFrame:window.bounds];
+        // Don't manually set frame - let UIKit handle it with proper autoresizing
+        containerView = rootVC.view;
         containerView.backgroundColor =
             [UIColor blackColor]; // Black background for unsafe areas
-        rootVC.view = containerView;
+        // Ensure the view properly fills the window using autoresizing masks
+        containerView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         window.rootViewController = rootVC;
-        NSLog(@"✅ Created new root view controller for compositor view");
+        // Force layout to ensure bounds are correct
+        [containerView setNeedsLayout];
+        [containerView layoutIfNeeded];
+        NSLog(@"✅ Created new root view controller for compositor view (bounds=%@)",
+              NSStringFromCGRect(containerView.bounds));
     }
 
     // Create CompositorView as a subview with flexible sizing (full screen by
     // default) Layout will be handled in CompositorView's layoutSubviews to
     // respect safe area setting
+    // Use window bounds instead of containerView.bounds since containerView might
+    // not be laid out yet (bounds could be CGRectZero or incorrect)
+    CGRect initialFrame = window.bounds;
     compositorView =
-        [[CompositorView alloc] initWithFrame:containerView.bounds];
+        [[CompositorView alloc] initWithFrame:initialFrame];
     compositorView.autoresizingMask =
         UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     compositorView.backgroundColor = [UIColor clearColor];
     [containerView addSubview:compositorView];
+    
+    NSLog(@"🔵 CompositorView initialized: window.bounds=%@, compositorView.frame=%@",
+          NSStringFromCGRect(window.bounds), NSStringFromCGRect(compositorView.frame));
 
     // Note: Safe area constraints are now handled dynamically in CompositorView
     // layoutSubviews
@@ -3362,6 +3347,7 @@ void macos_compositor_handle_client_disconnect(void) {
     return;
   }
 
+#ifdef __APPLE__
   dispatch_async(dispatch_get_main_queue(), ^{
     WawonaCompositor *compositor = g_compositor_instance;
 
@@ -3415,6 +3401,13 @@ void macos_compositor_handle_client_disconnect(void) {
 #endif
     }
   });
+#else
+  if (g_compositor_instance->connectedClientCount > 0) {
+    g_compositor_instance->connectedClientCount--;
+  }
+  log_printf("[FULLSCREEN] Client disconnected. Connected clients: %d\n",
+             g_compositor_instance->connectedClientCount);
+#endif
 }
 
 // C function to handle new client connection (cancel fullscreen exit timer)
@@ -3423,6 +3416,7 @@ void macos_compositor_handle_client_connect(void) {
     return;
   }
 
+#ifdef __APPLE__
   dispatch_async(dispatch_get_main_queue(), ^{
     WawonaCompositor *compositor = g_compositor_instance;
 
@@ -3439,6 +3433,11 @@ void macos_compositor_handle_client_connect(void) {
       NSLog(@"[FULLSCREEN] Cancelled fullscreen exit timer (client connected)");
     }
   });
+#else
+  g_compositor_instance->connectedClientCount++;
+  log_printf("[FULLSCREEN] Client connected. Connected clients: %d\n",
+             g_compositor_instance->connectedClientCount);
+#endif
 }
 
 // C function to update window title when no clients are connected
@@ -3447,6 +3446,7 @@ void macos_compositor_update_title_no_clients(void) {
     return;
   }
 
+#ifdef __APPLE__
   dispatch_async(dispatch_get_main_queue(), ^{
     WawonaCompositor *compositor = g_compositor_instance;
     if (compositor.window) {
@@ -3460,6 +3460,9 @@ void macos_compositor_update_title_no_clients(void) {
           @"[WINDOW] Updated titlebar title to: Wawona (no clients connected)");
     }
   });
+#else
+  log_printf("[WINDOW] Updated titlebar title to: Wawona (no clients connected)\n");
+#endif
 }
 
 // C function to get EGL buffer handler (for rendering EGL buffers)

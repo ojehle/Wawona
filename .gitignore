@@ -78,4 +78,6 @@ result-*
 
 # Android Emulator artifacts
 .android_home/
-*.qcow2
+.gradle-home/
+*.qcow2.gradle_home
+src/android/.gradle/

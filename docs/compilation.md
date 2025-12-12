@@ -85,3 +85,9 @@ By default, `nix build` creates a `result` symlink in the current directory cont
 ls -l result/bin/
 file result/bin/waypipe
 ```
+
+# updating dependencies
+
+Most of the dependencies we handle with nix. Such as libffi, libwayland, epoll-shim etc. 
+
+But for our Android build, `nix run .#update-android-deps` is available to update all gradle dependencies. I don't really know if this is the best way to do such a thing. but its there...

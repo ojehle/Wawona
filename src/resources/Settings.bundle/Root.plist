@@ -77,7 +77,7 @@
 			<key>Type</key>
 			<string>PSToggleSwitchSpecifier</string>
 			<key>Title</key>
-			<string>Render macOS Pointer</string>
+			<string>Render Software Pointer</string>
 			<key>Key</key>
 			<string>RenderMacOSPointer</string>
 			<key>DefaultValue</key>
