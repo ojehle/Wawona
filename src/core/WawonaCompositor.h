@@ -151,7 +151,7 @@ typedef struct WawonaCompositor WawonaCompositor;
 #include "wayland_color_management.h"
 #include "rendering_backend.h"
 #include "input_handler.h"
-#include "launcher/wayland_launcher.h"
+#include "launcher/WawonaAppScanner.h"
 #include "xdg_shell.h"
 #if !TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
 #include "egl_buffer_handler.h"
@@ -173,7 +173,7 @@ typedef struct WawonaCompositor WawonaCompositor;
 @property (nonatomic, strong) id<RenderingBackend> renderingBackend;  // Rendering backend (SurfaceRenderer or MetalRenderer)
 @property (nonatomic, assign) RenderingBackendType backendType;  // RENDERING_BACKEND_SURFACE or RENDERING_BACKEND_METAL
 @property (nonatomic, strong) InputHandler *inputHandler;
-@property (nonatomic, strong) WaylandLauncher *launcher;  // App launcher
+@property (nonatomic, strong) WawonaAppScanner *launcher;  // App scanner
 
 // Wayland protocol implementations
 @property (nonatomic, assign) struct wl_compositor_impl *compositor;

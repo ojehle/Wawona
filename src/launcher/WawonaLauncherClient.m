@@ -19,7 +19,7 @@
 #include <fcntl.h>
 #include <sys/select.h>
 #include <sys/mman.h> // For mmap
-#include "ios_launcher_client.h"
+#import "WawonaLauncherClient.h"
 #include "xdg-shell-client-protocol.h"
 
 // Internal: Set client_display on delegate using runtime

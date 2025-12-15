@@ -1,8 +1,8 @@
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 #import "apple_backend.h"
-#import "WawonaPreferences.h"
-#import "WawonaAboutPanel.h"
+#import "Settings/WawonaPreferences.h"
+#import "About/WawonaAboutPanel.h"
 #include <wayland-server-core.h>
 #include <signal.h>
 #include <stdlib.h>
@@ -15,17 +15,22 @@ static MacOSCompositor *g_compositor = NULL;
 // Signal handler for graceful shutdown
 static void signal_handler(int sig) {
     (void)sig;
-    NSLog(@"\n🛑 Received signal, shutting down gracefully...");
+    NSLog(@"\n🛑 Received signal %d, shutting down gracefully...", sig);
+    
+    // Use compositor's stop method which properly disconnects all clients
     if (g_compositor) {
         [g_compositor stop];
         g_compositor = nil;
     }
-    if (g_display) {
-        wl_display_destroy(g_display);
-        g_display = NULL;
-    }
-    exit(0);
+    
+    // Clear global display reference (compositor.stop already destroyed it)
+    g_display = NULL;
+    
+    // Don't call exit() immediately - let the app terminate naturally
+    // This prevents crash reports on iOS/macOS
+    // The signal will be handled by the system and the app will terminate gracefully
 }
+
 
 @interface WawonaAppDelegate : NSObject <UIApplicationDelegate>
 @property (nonatomic, strong) UIWindow *window;
@@ -63,6 +68,7 @@ static void signal_handler(int sig) {
         if (!created && ![fm fileExistsAtPath:runtimePath]) {
             NSLog(@"⚠️ Failed to create /tmp/wawona-ios: %@", error.localizedDescription);
             NSLog(@"   Falling back to app container tmp directory...");
+
             // Fall back to app's tmp directory (will be longer but should work)
             NSString *tmpDir = NSTemporaryDirectory();
             if (tmpDir) {
@@ -308,11 +314,15 @@ static void signal_handler(int sig) {
 - (void)applicationWillResignActive:(UIApplication *)application {
     (void)application;
     NSLog(@"⚠️ Application will resign active");
+    // Ensure settings are persisted
+    [[NSUserDefaults standardUserDefaults] synchronize];
 }
 
 - (void)applicationDidEnterBackground:(UIApplication *)application {
     (void)application;
     NSLog(@"⚠️ Application entered background");
+    // Ensure settings are persisted when app enters background
+    [[NSUserDefaults standardUserDefaults] synchronize];
 }
 
 - (void)applicationWillEnterForeground:(UIApplication *)application {
@@ -342,17 +352,24 @@ static void signal_handler(int sig) {
 
 - (void)applicationWillTerminate:(UIApplication *)application {
     (void)application;
-    NSLog(@"👋 Application will terminate");
+    NSLog(@"👋 Application will terminate - shutting down gracefully");
+    
+    // Ensure settings are persisted before termination
+    [[NSUserDefaults standardUserDefaults] synchronize];
+    
+    // Use compositor's stop method which properly disconnects all clients
+    // This ensures clients are notified and can clean up gracefully
     if (self.compositor) {
         [self.compositor stop];
         self.compositor = nil;
     }
-    if (self.display) {
-        wl_display_destroy(self.display);
-        self.display = NULL;
-    }
+    
+    // Clear references (compositor.stop already destroyed the display)
+    self.display = NULL;
     g_compositor = nil;
     g_display = NULL;
+    
+    NSLog(@"✅ Graceful shutdown complete");
 }
 
 @end

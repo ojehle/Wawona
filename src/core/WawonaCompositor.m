@@ -3,7 +3,7 @@
 #ifdef __APPLE__
 #import <CoreVideo/CoreVideo.h>
 #import <QuartzCore/QuartzCore.h>
-#import "WawonaPreferencesManager.h"
+#import "../ui/Settings/WawonaPreferencesManager.h"
 #if !TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
 #import <libproc.h>
 #endif

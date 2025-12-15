@@ -36,7 +36,7 @@
 			<key>Type</key>
 			<string>PSToggleSwitchSpecifier</string>
 			<key>Title</key>
-			<string>One Shot</string>
+			<string>One-shot</string>
 			<key>Key</key>
 			<string>WaypipeOneshot</string>
 			<key>DefaultValue</key>
@@ -76,7 +76,7 @@
 			<key>Type</key>
 			<string>PSToggleSwitchSpecifier</string>
 			<key>Title</key>
-			<string>XWayland Support</string>
+			<string>XWayland</string>
 			<key>Key</key>
 			<string>WaypipeXwls</string>
 			<key>DefaultValue</key>
@@ -93,12 +93,14 @@
 			<string></string>
 			<key>KeyboardType</key>
 			<string>Alphabet</string>
+			<key>Placeholder</key>
+			<string>e.g. Remote:</string>
 		</dict>
 		<dict>
 			<key>Type</key>
 			<string>PSTextFieldSpecifier</string>
 			<key>Title</key>
-			<string>Security Context</string>
+			<string>Sec Context</string>
 			<key>Key</key>
 			<string>WaypipeSecCtx</string>
 			<key>DefaultValue</key>

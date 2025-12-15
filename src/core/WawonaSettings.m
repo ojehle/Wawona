@@ -1,7 +1,7 @@
 #include "WawonaSettings.h"
 
 #ifdef __APPLE__
-#import "WawonaPreferencesManager.h"
+#import "../ui/Settings/WawonaPreferencesManager.h"
 
 bool WawonaSettings_GetUniversalClipboardEnabled(void) {
     return [[WawonaPreferencesManager sharedManager] universalClipboardEnabled];

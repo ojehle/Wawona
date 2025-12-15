@@ -155,6 +155,26 @@ in
           buildModule
           ;
       }
+    else if name == "libssh2" then
+      (import ../deps/libssh2/ios.nix) {
+        inherit
+          lib
+          pkgs
+          buildPackages
+          common
+          buildModule
+          ;
+      }
+    else if name == "mbedtls" then
+      (import ../deps/mbedtls/ios.nix) {
+        inherit
+          lib
+          pkgs
+          buildPackages
+          common
+          buildModule
+          ;
+      }
     else
       let
         src = if entry.source == "system" then null else fetchSource entry;

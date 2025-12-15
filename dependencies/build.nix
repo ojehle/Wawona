@@ -167,6 +167,26 @@ let
             ;
           buildModule = iosModuleSelf;
         }
+      else if name == "libssh2" then
+        (import ./deps/libssh2/ios.nix) {
+          inherit
+            lib
+            pkgs
+            buildPackages
+            common
+            ;
+          buildModule = iosModuleSelf;
+        }
+      else if name == "mbedtls" then
+        (import ./deps/mbedtls/ios.nix) {
+          inherit
+            lib
+            pkgs
+            buildPackages
+            common
+            ;
+          buildModule = iosModuleSelf;
+        }
       else
         (import ./platforms/ios.nix {
           inherit
@@ -263,6 +283,8 @@ let
             "spirv-tools" = iosModule.buildForIOS "spirv-tools" { };
             libclc = iosModule.buildForIOS "libclc" { };
             pixman = iosModule.buildForIOS "pixman" { };
+            mbedtls = iosModule.buildForIOS "mbedtls" { };
+            libssh2 = iosModule.buildForIOS "libssh2" { };
             test-toolchain = pkgs.callPackage ./utils/test-ios-toolchain.nix { };
             test-toolchain-cross = pkgs.callPackage ./utils/test-ios-toolchain-cross.nix { };
           }

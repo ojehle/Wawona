@@ -47,6 +47,8 @@
     <string>LaunchScreen</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon.png</string>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>Wawona needs access to your local network to connect to SSH servers and Waypipe hosts.</string>
 </dict>
 </plist>
 

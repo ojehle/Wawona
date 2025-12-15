@@ -13,8 +13,10 @@ extern NSString *const kWawonaPrefsNestedCompositorsSupport;
 extern NSString *const kWawonaPrefsUseMetal4ForNested; // Deprecated - removed
 extern NSString *const kWawonaPrefsRenderMacOSPointer;
 extern NSString *const kWawonaPrefsMultipleClients;
+extern NSString *const kWawonaPrefsEnableLauncher;
 extern NSString *const kWawonaPrefsSwapCmdAsCtrl; // Legacy - use SwapCmdWithAlt
 extern NSString *const kWawonaPrefsSwapCmdWithAlt; // New unified key
+extern NSString *const kWawonaPrefsTouchInputType;
 extern NSString *const kWawonaPrefsWaypipeRSSupport; // Deprecated - always enabled
 extern NSString *const kWawonaPrefsEnableTCPListener; // Deprecated - always enabled
 extern NSString *const kWawonaPrefsTCPListenerPort;
@@ -38,6 +40,10 @@ extern NSString *const kWawonaPrefsWaypipeSSHEnabled;
 extern NSString *const kWawonaPrefsWaypipeSSHHost;
 extern NSString *const kWawonaPrefsWaypipeSSHUser;
 extern NSString *const kWawonaPrefsWaypipeSSHBinary;
+extern NSString *const kWawonaPrefsWaypipeSSHAuthMethod;
+extern NSString *const kWawonaPrefsWaypipeSSHKeyPath;
+extern NSString *const kWawonaPrefsWaypipeSSHKeyPassphrase;
+extern NSString *const kWawonaPrefsWaypipeSSHPassword;
 extern NSString *const kWawonaPrefsWaypipeRemoteCommand;
 extern NSString *const kWawonaPrefsWaypipeCustomScript;
 extern NSString *const kWawonaPrefsWaypipeDebug;
@@ -89,10 +95,15 @@ extern NSString *const kWawonaPrefsWaypipeSecCtx;
 - (void)setSwapCmdAsCtrl:(BOOL)enabled;
 - (BOOL)swapCmdWithAlt; // New unified method
 - (void)setSwapCmdWithAlt:(BOOL)enabled;
+- (NSString *)touchInputType;
+- (void)setTouchInputType:(NSString *)type;
 
 // Client Management
 - (BOOL)multipleClientsEnabled;
 - (void)setMultipleClientsEnabled:(BOOL)enabled;
+
+- (BOOL)enableLauncher;
+- (void)setEnableLauncher:(BOOL)enabled;
 
 // Waypipe
 - (BOOL)waypipeRSSupportEnabled;
@@ -147,6 +158,14 @@ extern NSString *const kWawonaPrefsWaypipeSecCtx;
 - (void)setWaypipeSSHUser:(NSString *)user;
 - (NSString *)waypipeSSHBinary;
 - (void)setWaypipeSSHBinary:(NSString *)binary;
+- (NSInteger)waypipeSSHAuthMethod; // 0 = password, 1 = public key
+- (void)setWaypipeSSHAuthMethod:(NSInteger)method;
+- (NSString *)waypipeSSHKeyPath;
+- (void)setWaypipeSSHKeyPath:(NSString *)keyPath;
+- (NSString *)waypipeSSHKeyPassphrase;
+- (void)setWaypipeSSHKeyPassphrase:(NSString *)passphrase;
+- (NSString *)waypipeSSHPassword;
+- (void)setWaypipeSSHPassword:(NSString *)password;
 - (NSString *)waypipeRemoteCommand;
 - (void)setWaypipeRemoteCommand:(NSString *)command;
 - (NSString *)waypipeCustomScript;

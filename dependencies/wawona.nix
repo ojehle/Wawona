@@ -28,6 +28,92 @@ let
   projectVersionMinor = if versionMatch != null then lib.elemAt versionMatch 1 else "0";
   projectVersionPatch = if versionMatch != null then lib.elemAt versionMatch 2 else "1";
 
+  iosInfoPlist = pkgs.writeText "Info.plist" ''
+    <?xml version="1.0" encoding="UTF-8"?>
+    <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+    <plist version="1.0">
+    <dict>
+        <key>CFBundleDevelopmentRegion</key>
+        <string>en</string>
+        <key>CFBundleExecutable</key>
+        <string>Wawona</string>
+        <key>CFBundleIdentifier</key>
+        <string>com.aspauldingcode.Wawona</string>
+        <key>CFBundleInfoDictionaryVersion</key>
+        <string>6.0</string>
+        <key>CFBundleName</key>
+        <string>Wawona</string>
+        <key>CFBundlePackageType</key>
+        <string>APPL</string>
+        <key>CFBundleShortVersionString</key>
+        <string>${projectVersion}</string>
+        <key>CFBundleVersion</key>
+        <string>${projectVersionPatch}</string>
+        <key>NSHumanReadableCopyright</key>
+        <string>Copyright © 2025 Alex Spaulding. All rights reserved.</string>
+        <key>MinimumOSVersion</key>
+        <string>15.0</string>
+        <key>UIDeviceFamily</key>
+        <array>
+            <integer>1</integer>
+            <integer>2</integer>
+        </array>
+        <key>UISupportedInterfaceOrientations</key>
+        <array>
+            <string>UIInterfaceOrientationPortrait</string>
+            <string>UIInterfaceOrientationLandscapeLeft</string>
+            <string>UIInterfaceOrientationLandscapeRight</string>
+            <string>UIInterfaceOrientationPortraitUpsideDown</string>
+        </array>
+        <key>UISupportedInterfaceOrientations~ipad</key>
+        <array>
+            <string>UIInterfaceOrientationPortrait</string>
+            <string>UIInterfaceOrientationPortraitUpsideDown</string>
+            <string>UIInterfaceOrientationLandscapeLeft</string>
+            <string>UIInterfaceOrientationLandscapeRight</string>
+        </array>
+        <key>UIRequiresFullScreen</key>
+        <false/>
+        <key>UILaunchScreen</key>
+        <dict/>
+        <key>CFBundleIcons</key>
+        <dict>
+            <key>CFBundlePrimaryIcon</key>
+            <dict>
+                <key>CFBundleIconFiles</key>
+                <array>
+                    <string>AppIcon</string>
+                </array>
+                <key>CFBundleIconName</key>
+                <string>AppIcon</string>
+            </dict>
+        </dict>
+        <key>LSRequiresIPhoneOS</key>
+        <true/>
+        <key>UIRequiredDeviceCapabilities</key>
+        <array>
+            <string>armv7</string>
+        </array>
+        <key>UIApplicationSupportsIndirectInputEvents</key>
+        <true/>
+        <key>UIApplicationSceneManifest</key>
+        <dict>
+            <key>UIApplicationSupportsMultipleScenes</key>
+        <false/>
+    </dict>
+        <key>NSLocalNetworkUsageDescription</key>
+        <string>Wawona needs access to your local network to connect to SSH hosts.</string>
+        <key>NSAppTransportSecurity</key>
+        <dict>
+            <key>NSAllowsArbitraryLoads</key>
+            <true/>
+            <key>NSAllowsLocalNetworking</key>
+            <true/>
+        </dict>
+    </dict>
+    </plist>
+  '';
+
   # Common dependencies
   commonDeps = [
     "libwayland"
@@ -57,6 +143,8 @@ let
     "zlib"
     "pixman"
     "xkbcommon"
+    "libssh2"
+    "mbedtls"
   ];
   androidDeps = commonDeps ++ [
     "swiftshader"
@@ -206,22 +294,33 @@ let
     "src/input/cursor_shape_bridge.m"
 
     # UI components
-    "src/ui/WawonaUIHelpers.m"
-    "src/ui/WawonaUIHelpers.h"
-    "src/ui/WawonaPreferences.m"
-    "src/ui/WawonaPreferences.h"
-    "src/ui/WawonaPreferencesManager.m"
-    "src/ui/WawonaPreferencesManager.h"
-    "src/ui/WawonaAboutPanel.m"
-    "src/ui/WawonaAboutPanel.h"
+    "src/ui/Helpers/WawonaUIHelpers.m"
+    "src/ui/Helpers/WawonaUIHelpers.h"
+    "src/ui/Settings/WawonaPreferences.m"
+    "src/ui/Settings/WawonaPreferences.h"
+    "src/ui/Settings/WawonaPreferencesManager.m"
+    "src/ui/Settings/WawonaPreferencesManager.h"
+    "src/ui/About/WawonaAboutPanel.m"
+    "src/ui/About/WawonaAboutPanel.h"
+    "src/ui/Settings/WawonaSettingsDefines.h"
+    "src/ui/Settings/WawonaSettingsModel.m"
+    "src/ui/Settings/WawonaSettingsModel.h"
+    "src/ui/Settings/WawonaWaypipeRunner.m"
+    "src/ui/Settings/WawonaWaypipeRunner.h"
+    "src/ui/Settings/WawonaSSHClient.m"
+    "src/ui/Settings/WawonaSSHClient.h"
+    
+    # Launcher
+    "src/launcher/WawonaAppScanner.m"
+    "src/launcher/WawonaAppScanner.h"
 
     # Stubs
     "src/stubs/egl_buffer_handler.h"
   ];
 
   iosSources = (lib.filter (f: f != "src/core/WawonaSettings.c") commonSources) ++ [
-    "src/ui/ios_launcher_client.m"
-    "src/ui/ios_launcher_client.h"
+    "src/launcher/WawonaLauncherClient.m"
+    "src/launcher/WawonaLauncherClient.h"
     "src/protocols/color-management-v1-protocol.c"
   ];
 
@@ -728,7 +827,7 @@ in
          -Isrc/compat/macos/stubs/libinput-macos \
          -Isrc -Isrc/core -Isrc/compositor_implementations \
          -Isrc/rendering -Isrc/input -Isrc/ui \
-         -Isrc/logging -Isrc/stubs -Isrc/protocols \
+         -Isrc/logging -Isrc/stubs -Isrc/protocols -Isrc/launcher \
          -Imacos-dependencies/include \
          -fobjc-arc -fPIC \
          ${lib.concatStringsSep " " commonCFlags} \
@@ -739,7 +838,7 @@ in
       $CC -c src/rendering/metal_dmabuf.m \
          -Isrc -Isrc/core -Isrc/compositor_implementations \
          -Isrc/rendering -Isrc/input -Isrc/ui \
-         -Isrc/logging -Isrc/stubs -Isrc/protocols \
+         -Isrc/logging -Isrc/stubs -Isrc/protocols -Isrc/launcher \
          -Imacos-dependencies/include \
          -fobjc-arc -fPIC \
          ${lib.concatStringsSep " " commonObjCFlags} \
@@ -759,7 +858,7 @@ in
             $CC -c "$src_file" \
                -Isrc -Isrc/core -Isrc/compositor_implementations \
                -Isrc/rendering -Isrc/input -Isrc/ui \
-               -Isrc/logging -Isrc/stubs -Isrc/protocols \
+               -Isrc/logging -Isrc/stubs -Isrc/protocols -Isrc/launcher \
                -Imacos-dependencies/include \
                -fobjc-arc -fPIC \
                ${lib.concatStringsSep " " commonObjCFlags} \
@@ -770,7 +869,7 @@ in
             $CC -c "$src_file" \
                -Isrc -Isrc/core -Isrc/compositor_implementations \
                -Isrc/rendering -Isrc/input -Isrc/ui \
-               -Isrc/logging -Isrc/stubs -Isrc/protocols \
+               -Isrc/logging -Isrc/stubs -Isrc/protocols -Isrc/launcher \
                -Imacos-dependencies/include \
                -fPIC \
                ${lib.concatStringsSep " " commonCFlags} \
@@ -805,7 +904,7 @@ in
            -framework Cocoa -framework QuartzCore -framework CoreVideo \
            -framework CoreMedia -framework CoreGraphics -framework ColorSync \
            -framework Metal -framework MetalKit -framework IOSurface \
-           -framework VideoToolbox -framework AVFoundation \
+           -framework VideoToolbox -framework AVFoundation -framework Network \
            $(pkg-config --libs wayland-server wayland-client pixman-1) \
            $XKBCOMMON_LIBS \
            $VULKAN_LIB \
@@ -824,7 +923,7 @@ in
              -framework Cocoa -framework QuartzCore -framework CoreVideo \
              -framework CoreMedia -framework CoreGraphics -framework ColorSync \
              -framework Metal -framework MetalKit -framework IOSurface \
-             -framework VideoToolbox -framework AVFoundation \
+             -framework VideoToolbox -framework AVFoundation -framework Network \
              $(pkg-config --libs wayland-server wayland-client pixman-1) \
              $XKBCOMMON_LIBS \
              -fobjc-arc -flto -O3 \
@@ -840,7 +939,7 @@ in
            -framework Cocoa -framework QuartzCore -framework CoreVideo \
            -framework CoreMedia -framework CoreGraphics -framework ColorSync \
            -framework Metal -framework MetalKit -framework IOSurface \
-           -framework VideoToolbox -framework AVFoundation \
+           -framework VideoToolbox -framework AVFoundation -framework Network \
            $(pkg-config --libs wayland-server wayland-client pixman-1) \
            $XKBCOMMON_LIBS \
            -fobjc-arc -flto -O3 \
@@ -868,7 +967,7 @@ in
             fi
             
             # Generate Info.plist
-            cat > $out/Applications/Wawona.app/Contents/Info.plist <<EOF
+            cat > $out/Applications/Wawona.app/Contents/Info.plist <<PLIST_EOF
       <?xml version="1.0" encoding="UTF-8"?>
       <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
       <plist version="1.0">
@@ -905,9 +1004,18 @@ in
           </dict>
           <key>CFBundleIconFile</key>
           <string>AppIcon.icns</string>
+          <key>NSLocalNetworkUsageDescription</key>
+          <string>Wawona needs access to your local network to connect to SSH hosts.</string>
+          <key>NSAppTransportSecurity</key>
+          <dict>
+              <key>NSAllowsArbitraryLoads</key>
+              <true/>
+              <key>NSAllowsLocalNetworking</key>
+              <true/>
+          </dict>
       </dict>
       </plist>
-      EOF
+      PLIST_EOF
             
             # Copy Assets.xcassets (asset catalog) for app icon
             # Note: We now generate icons using a shared logic and compile them
@@ -1143,11 +1251,21 @@ in
           obj_file="''${obj_file//src_/}"
           
           if [[ "$src_file" == *.m ]]; then
+            # Find libssh2 include path
+            LIBSSH2_INC=""
+            for dep in $buildInputs; do
+              if [ -d "$dep/include" ] && [ -f "$dep/include/libssh2.h" ]; then
+                LIBSSH2_INC="-I$dep/include"
+                break
+              fi
+            done
+            
             $CC -c "$src_file" \
                -Isrc -Isrc/core -Isrc/compositor_implementations \
                -Isrc/rendering -Isrc/input -Isrc/ui \
                -Isrc/logging -Isrc/stubs -Isrc/protocols \
                -Iios-dependencies/include \
+               $LIBSSH2_INC \
                -fobjc-arc -fPIC \
                ${lib.concatStringsSep " " commonObjCFlags} \
                ${lib.concatStringsSep " " releaseObjCFlags} \
@@ -1195,6 +1313,69 @@ in
       
       echo "Linking with xkbcommon: $XKBCOMMON_LIBS"
       
+      # Find libssh2 library
+      LIBSSH2_LIBS=""
+      for dep in $buildInputs; do
+        if [ -f "$dep/lib/libssh2.a" ]; then
+          LIBSSH2_LIBS="-L$dep/lib -lssh2"
+          echo "Found libssh2 static library: $dep/lib/libssh2.a"
+          break
+        elif [ -f "$dep/lib/libssh2.dylib" ]; then
+          LIBSSH2_LIBS="-L$dep/lib -lssh2"
+          echo "Found libssh2 dynamic library: $dep/lib/libssh2.dylib"
+          break
+        fi
+      done
+      
+      # Fallback to pkg-config or ios-dependencies
+      if [ -z "$LIBSSH2_LIBS" ]; then
+        LIBSSH2_LIBS=$(pkg-config --libs libssh2 2>/dev/null || echo "-Lios-dependencies/lib -lssh2")
+      fi
+      
+      echo "Linking with libssh2: $LIBSSH2_LIBS"
+      
+      # Find mbedtls library (required by libssh2)
+      MBEDTLS_LIBS=""
+      for dep in $buildInputs; do
+        if [ -f "$dep/lib/libmbedtls.a" ]; then
+          MBEDTLS_LIBS="-L$dep/lib -lmbedtls -lmbedx509 -lmbedcrypto"
+          echo "Found mbedtls static library: $dep/lib/libmbedtls.a"
+          break
+        elif [ -f "$dep/lib/libmbedtls.dylib" ]; then
+          MBEDTLS_LIBS="-L$dep/lib -lmbedtls -lmbedx509 -lmbedcrypto"
+          echo "Found mbedtls dynamic library: $dep/lib/libmbedtls.dylib"
+          break
+        fi
+      done
+      
+      # Fallback to pkg-config or ios-dependencies
+      if [ -z "$MBEDTLS_LIBS" ]; then
+        MBEDTLS_LIBS=$(pkg-config --libs mbedtls 2>/dev/null || echo "-Lios-dependencies/lib -lmbedtls -lmbedx509 -lmbedcrypto")
+      fi
+      
+      echo "Linking with mbedtls: $MBEDTLS_LIBS"
+      
+      # Find zlib library (required by libssh2 for compression)
+      ZLIB_LIBS=""
+      for dep in $buildInputs; do
+        if [ -f "$dep/lib/libz.a" ]; then
+          ZLIB_LIBS="-L$dep/lib -lz"
+          echo "Found zlib static library: $dep/lib/libz.a"
+          break
+        elif [ -f "$dep/lib/libz.dylib" ]; then
+          ZLIB_LIBS="-L$dep/lib -lz"
+          echo "Found zlib dynamic library: $dep/lib/libz.dylib"
+          break
+        fi
+      done
+      
+      # Fallback to pkg-config or ios-dependencies
+      if [ -z "$ZLIB_LIBS" ]; then
+        ZLIB_LIBS=$(pkg-config --libs zlib 2>/dev/null || echo "-Lios-dependencies/lib -lz")
+      fi
+      
+      echo "Linking with zlib: $ZLIB_LIBS"
+      
       # Link executable
       $CC $OBJ_FILES libgbm.a \
          -Lios-dependencies/lib \
@@ -1202,8 +1383,12 @@ in
          -framework CoreVideo -framework CoreMedia -framework CoreGraphics \
          -framework Metal -framework MetalKit -framework IOSurface \
          -framework VideoToolbox -framework AVFoundation \
+         -framework Security -framework Network \
          $(pkg-config --libs wayland-server wayland-client pixman-1) \
          $XKBCOMMON_LIBS \
+         $LIBSSH2_LIBS \
+         $MBEDTLS_LIBS \
+         $ZLIB_LIBS \
          -fobjc-arc -flto -O3 -arch $SIMULATOR_ARCH -isysroot "$SDKROOT" -mios-simulator-version-min=15.0 \
          -Wl,-rpath,@executable_path/Frameworks \
          -o Wawona
@@ -1212,106 +1397,42 @@ in
     '';
 
     installPhase = ''
+            set -e
+            echo "DEBUG: Starting installPhase"
             runHook preInstall
             
             # Create app bundle structure
+            echo "DEBUG: Creating app bundle structure"
             mkdir -p $out/Applications/Wawona.app
             
             # Copy executable
+            echo "DEBUG: Copying executable"
             cp Wawona $out/Applications/Wawona.app/
             
             # Copy Metal shader library
             if [ -f metal_shaders.metallib ]; then
+              echo "DEBUG: Copying Metal shaders"
               cp metal_shaders.metallib $out/Applications/Wawona.app/
             fi
             
             # Generate Info.plist
-            cat > $out/Applications/Wawona.app/Info.plist <<EOF
-      <?xml version="1.0" encoding="UTF-8"?>
-      <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-      <plist version="1.0">
-      <dict>
-          <key>CFBundleDevelopmentRegion</key>
-          <string>en</string>
-          <key>CFBundleExecutable</key>
-          <string>Wawona</string>
-          <key>CFBundleIdentifier</key>
-          <string>com.aspauldingcode.Wawona</string>
-          <key>CFBundleInfoDictionaryVersion</key>
-          <string>6.0</string>
-          <key>CFBundleName</key>
-          <string>Wawona</string>
-          <key>CFBundlePackageType</key>
-          <string>APPL</string>
-          <key>CFBundleShortVersionString</key>
-          <string>${projectVersion}</string>
-          <key>CFBundleVersion</key>
-          <string>${projectVersionPatch}</string>
-          <key>NSHumanReadableCopyright</key>
-          <string>Copyright © 2025 Alex Spaulding. All rights reserved.</string>
-          <key>MinimumOSVersion</key>
-          <string>15.0</string>
-          <key>UIDeviceFamily</key>
-          <array>
-              <integer>1</integer>
-              <integer>2</integer>
-          </array>
-          <key>UISupportedInterfaceOrientations</key>
-          <array>
-              <string>UIInterfaceOrientationPortrait</string>
-              <string>UIInterfaceOrientationLandscapeLeft</string>
-              <string>UIInterfaceOrientationLandscapeRight</string>
-              <string>UIInterfaceOrientationPortraitUpsideDown</string>
-          </array>
-          <key>UISupportedInterfaceOrientations~ipad</key>
-          <array>
-              <string>UIInterfaceOrientationPortrait</string>
-              <string>UIInterfaceOrientationPortraitUpsideDown</string>
-              <string>UIInterfaceOrientationLandscapeLeft</string>
-              <string>UIInterfaceOrientationLandscapeRight</string>
-          </array>
-          <key>UIRequiresFullScreen</key>
-          <false/>
-          <key>UILaunchScreen</key>
-          <dict/>
-          <key>CFBundleIcons</key>
-          <dict>
-              <key>CFBundlePrimaryIcon</key>
-              <dict>
-                  <key>CFBundleIconFiles</key>
-                  <array>
-                      <string>AppIcon</string>
-                  </array>
-                  <key>CFBundleIconName</key>
-                  <string>AppIcon</string>
-              </dict>
-          </dict>
-          <key>LSRequiresIPhoneOS</key>
-          <true/>
-          <key>UIRequiredDeviceCapabilities</key>
-          <array>
-              <string>armv7</string>
-          </array>
-          <key>UIApplicationSupportsIndirectInputEvents</key>
-          <true/>
-          <key>UIApplicationSceneManifest</key>
-          <dict>
-              <key>UIApplicationSupportsMultipleScenes</key>
-              <false/>
-          </dict>
-      </dict>
-      </plist>
-      EOF
+            echo "DEBUG: Generating Info.plist"
+            cp ${iosInfoPlist} $out/Applications/Wawona.app/Info.plist
+            chmod 644 $out/Applications/Wawona.app/Info.plist
             
             # Generate icons using shared logic
+            echo "DEBUG: Generating icons"
             ${generateIcons "ios"}
+            echo "DEBUG: Icons generated"
             
             # Copy Settings.bundle if it exists
             if [ -d $src/src/resources/Settings.bundle ]; then
+              echo "DEBUG: Copying Settings.bundle"
               cp -r $src/src/resources/Settings.bundle $out/Applications/Wawona.app/
             fi
             
             # Copy dynamic libraries to Frameworks
+            echo "DEBUG: Processing Frameworks"
             mkdir -p $out/Applications/Wawona.app/Frameworks
             if [ -d ios-dependencies/lib ]; then
               # Copy dylibs
@@ -1349,6 +1470,7 @@ in
             
             # Copy Waypipe binary into app bundle
             # Find waypipe in buildInputs
+            echo "DEBUG: Looking for waypipe"
             WAYPIPE_BIN=""
             for dep in $buildInputs; do
               if [ -f "$dep/bin/waypipe" ]; then
@@ -1361,6 +1483,7 @@ in
             if [ -n "$WAYPIPE_BIN" ] && [ -f "$WAYPIPE_BIN" ]; then
               # Copy to multiple locations for maximum compatibility
               # 1. In bin/ subdirectory (preferred location)
+              echo "DEBUG: Copying waypipe to app bundle"
               mkdir -p $out/Applications/Wawona.app/bin
               cp "$WAYPIPE_BIN" $out/Applications/Wawona.app/bin/waypipe
               chmod +x $out/Applications/Wawona.app/bin/waypipe
@@ -1380,15 +1503,13 @@ in
               echo "Searched in: $buildInputs"
             fi
             
-            runHook postInstall
-    '';
-
-    postInstall = ''
             # Create symlink for convenience
+            echo "DEBUG: Creating bin symlink"
             mkdir -p $out/bin
             ln -s $out/Applications/Wawona.app/Wawona $out/bin/Wawona
             
             # Create iOS simulator launcher script
+            echo "DEBUG: Creating simulator launcher script"
             cat > $out/bin/wawona-ios-simulator <<'EOF'
       #!/usr/bin/env bash
       set -e
@@ -1482,6 +1603,8 @@ in
       # Ad-hoc sign the app bundle for Simulator (required for Apple Silicon)
       if command -v codesign >/dev/null 2>&1; then
         # Create minimal entitlements for Simulator
+        # Note: keychain-access-groups removed - iOS Simulator may not require it
+        # If Keychain access fails, we'll handle it gracefully in code
         cat > "$TEMP_APP_DIR/entitlements.plist" <<ENTITLEMENTS
       <?xml version="1.0" encoding="UTF-8"?>
       <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -1531,7 +1654,14 @@ in
       xcrun simctl spawn "$DEVICE_ID" log stream --predicate 'processImagePath contains "Wawona" OR processImagePath endswith "Wawona"' --level debug --style compact
       EOF
             chmod +x $out/bin/wawona-ios-simulator
+            echo "DEBUG: installPhase finished"
     '';
+
+    meta = {
+      mainProgram = "wawona-ios-simulator";
+      description = "Wawona iOS App";
+      platforms = pkgs.lib.platforms.darwin;
+    };
   };
 
   android = pkgs.stdenv.mkDerivation rec {

@@ -134,6 +134,8 @@
         "libffi-ios" = iosDeps.libffi;
         "libxml2-ios" = iosDeps.libxml2;
         "epoll-shim-ios" = iosDeps."epoll-shim";
+        "mbedtls-ios" = iosDeps.mbedtls;
+        "libssh2-ios" = iosDeps.libssh2;
 
         # macOS dependencies
         waypipe-macos = macosDeps.waypipe;

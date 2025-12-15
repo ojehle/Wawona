@@ -13,8 +13,10 @@ NSString *const kWawonaPrefsNestedCompositorsSupport =
 NSString *const kWawonaPrefsUseMetal4ForNested = @"UseMetal4ForNested"; // Deprecated
 NSString *const kWawonaPrefsRenderMacOSPointer = @"RenderMacOSPointer";
 NSString *const kWawonaPrefsMultipleClients = @"MultipleClients";
+NSString *const kWawonaPrefsEnableLauncher = @"EnableLauncher";
 NSString *const kWawonaPrefsSwapCmdAsCtrl = @"SwapCmdAsCtrl"; // Legacy
 NSString *const kWawonaPrefsSwapCmdWithAlt = @"SwapCmdWithAlt"; // New unified key
+NSString *const kWawonaPrefsTouchInputType = @"TouchInputType";
 NSString *const kWawonaPrefsWaypipeRSSupport = @"WaypipeRSSupport"; // Deprecated - always enabled
 NSString *const kWawonaPrefsEnableTCPListener = @"EnableTCPListener"; // Deprecated - always enabled
 NSString *const kWawonaPrefsTCPListenerPort = @"TCPListenerPort";
@@ -38,6 +40,10 @@ NSString *const kWawonaPrefsWaypipeSSHEnabled = @"WaypipeSSHEnabled";
 NSString *const kWawonaPrefsWaypipeSSHHost = @"WaypipeSSHHost";
 NSString *const kWawonaPrefsWaypipeSSHUser = @"WaypipeSSHUser";
 NSString *const kWawonaPrefsWaypipeSSHBinary = @"WaypipeSSHBinary";
+NSString *const kWawonaPrefsWaypipeSSHAuthMethod = @"WaypipeSSHAuthMethod";
+NSString *const kWawonaPrefsWaypipeSSHKeyPath = @"WaypipeSSHKeyPath";
+NSString *const kWawonaPrefsWaypipeSSHKeyPassphrase = @"WaypipeSSHKeyPassphrase";
+NSString *const kWawonaPrefsWaypipeSSHPassword = @"WaypipeSSHPassword";
 NSString *const kWawonaPrefsWaypipeRemoteCommand = @"WaypipeRemoteCommand";
 NSString *const kWawonaPrefsWaypipeCustomScript = @"WaypipeCustomScript";
 NSString *const kWawonaPrefsWaypipeDebug = @"WaypipeDebug";
@@ -101,6 +107,9 @@ NSString *const kWawonaPrefsWaypipeSecCtx = @"WaypipeSecCtx";
 #else
     [defaults setBool:YES forKey:kWawonaPrefsMultipleClients]; // Enabled on macOS
 #endif
+  }
+  if (![defaults objectForKey:kWawonaPrefsEnableLauncher]) {
+    [defaults setBool:NO forKey:kWawonaPrefsEnableLauncher];
   }
   if (![defaults objectForKey:kWawonaPrefsSwapCmdAsCtrl]) {
     [defaults setBool:NO forKey:kWawonaPrefsSwapCmdAsCtrl];
@@ -177,6 +186,12 @@ NSString *const kWawonaPrefsWaypipeSecCtx = @"WaypipeSecCtx";
   if (![defaults objectForKey:kWawonaPrefsWaypipeSSHBinary]) {
     [defaults setObject:@"ssh" forKey:kWawonaPrefsWaypipeSSHBinary];
   }
+  if (![defaults objectForKey:kWawonaPrefsWaypipeSSHAuthMethod]) {
+    [defaults setInteger:0 forKey:kWawonaPrefsWaypipeSSHAuthMethod]; // Default to password
+  }
+  if (![defaults objectForKey:kWawonaPrefsWaypipeSSHKeyPath]) {
+    [defaults setObject:@"" forKey:kWawonaPrefsWaypipeSSHKeyPath];
+  }
   if (![defaults objectForKey:kWawonaPrefsWaypipeRemoteCommand]) {
     [defaults setObject:@"" forKey:kWawonaPrefsWaypipeRemoteCommand];
   }
@@ -233,10 +248,13 @@ NSString *const kWawonaPrefsWaypipeSecCtx = @"WaypipeSecCtx";
     [defaults setBool:YES forKey:kWawonaPrefsEnableVulkanDrivers];
   }
   if (![defaults objectForKey:kWawonaPrefsEnableEGLDrivers]) {
-    [defaults setBool:YES forKey:kWawonaPrefsEnableEGLDrivers];
+    [defaults setBool:NO forKey:kWawonaPrefsEnableEGLDrivers];
   }
   if (![defaults objectForKey:kWawonaPrefsEnableDmabuf]) {
     [defaults setBool:YES forKey:kWawonaPrefsEnableDmabuf];
+  }
+  if (![defaults objectForKey:kWawonaPrefsTouchInputType]) {
+    [defaults setObject:@"Multi-Touch" forKey:kWawonaPrefsTouchInputType];
   }
 
   [defaults synchronize];
@@ -377,6 +395,17 @@ NSString *const kWawonaPrefsWaypipeSecCtx = @"WaypipeSecCtx";
 }
 
 // Waypipe
+- (BOOL)enableLauncher {
+  return [[NSUserDefaults standardUserDefaults]
+      boolForKey:kWawonaPrefsEnableLauncher];
+}
+
+- (void)setEnableLauncher:(BOOL)enabled {
+  [[NSUserDefaults standardUserDefaults] setBool:enabled
+                                          forKey:kWawonaPrefsEnableLauncher];
+  [[NSUserDefaults standardUserDefaults] synchronize];
+}
+
 - (BOOL)waypipeRSSupportEnabled {
   return [[NSUserDefaults standardUserDefaults]
       boolForKey:kWawonaPrefsWaypipeRSSupport];
@@ -560,21 +589,47 @@ NSString *const kWawonaPrefsWaypipeSecCtx = @"WaypipeSecCtx";
 
 - (void)setSwapCmdWithAlt:(BOOL)enabled {
   [[NSUserDefaults standardUserDefaults] setBool:enabled
-                                          forKey:kWawonaPrefsSwapCmdWithAlt];
+                                           forKey:kWawonaPrefsSwapCmdWithAlt];
+  [[NSUserDefaults standardUserDefaults] synchronize];
+}
+
+- (NSString *)touchInputType {
+  NSString *value = [[NSUserDefaults standardUserDefaults]
+      stringForKey:kWawonaPrefsTouchInputType];
+  return value ? value : @"Multi-Touch";
+}
+
+- (void)setTouchInputType:(NSString *)type {
+  if (type) {
+    [[NSUserDefaults standardUserDefaults] setObject:type
+                                               forKey:kWawonaPrefsTouchInputType];
+  } else {
+    [[NSUserDefaults standardUserDefaults] removeObjectForKey:kWawonaPrefsTouchInputType];
+  }
   [[NSUserDefaults standardUserDefaults] synchronize];
 }
 
 // Waypipe Configuration Methods
 - (NSString *)waypipeDisplay {
-  NSString *value = [[NSUserDefaults standardUserDefaults]
-      stringForKey:kWawonaPrefsWaypipeDisplay];
-  return value ? value : @"wayland-0";
+  // Automatically compute from WaylandDisplayNumber to keep them in sync
+  NSInteger displayNumber = [self waylandDisplayNumber];
+  return [NSString stringWithFormat:@"wayland-%ld", (long)displayNumber];
 }
 
 - (void)setWaypipeDisplay:(NSString *)display {
-  [[NSUserDefaults standardUserDefaults] setObject:display
-                                             forKey:kWawonaPrefsWaypipeDisplay];
-  [[NSUserDefaults standardUserDefaults] synchronize];
+  // Parse the display string to extract the number and update WaylandDisplayNumber
+  // Format: "wayland-{number}"
+  if (display && display.length > 0) {
+    NSInteger number = 0;
+    if ([display hasPrefix:@"wayland-"]) {
+      NSString *numberStr = [display substringFromIndex:8]; // "wayland-".length = 8
+      number = [numberStr integerValue];
+    } else {
+      // Try to parse as just a number
+      number = [display integerValue];
+    }
+    [self setWaylandDisplayNumber:number];
+  }
 }
 
 - (NSString *)waypipeSocket {
@@ -726,6 +781,139 @@ NSString *const kWawonaPrefsWaypipeSecCtx = @"WaypipeSecCtx";
   [[NSUserDefaults standardUserDefaults] setObject:binary
                                              forKey:kWawonaPrefsWaypipeSSHBinary];
   [[NSUserDefaults standardUserDefaults] synchronize];
+}
+
+- (NSInteger)waypipeSSHAuthMethod {
+  NSInteger method = [[NSUserDefaults standardUserDefaults] integerForKey:kWawonaPrefsWaypipeSSHAuthMethod];
+  return method; // 0 = password (default), 1 = public key
+}
+
+- (void)setWaypipeSSHAuthMethod:(NSInteger)method {
+  [[NSUserDefaults standardUserDefaults] setInteger:method forKey:kWawonaPrefsWaypipeSSHAuthMethod];
+  [[NSUserDefaults standardUserDefaults] synchronize];
+}
+
+- (NSString *)waypipeSSHKeyPath {
+  return [[NSUserDefaults standardUserDefaults]
+      stringForKey:kWawonaPrefsWaypipeSSHKeyPath] ?: @"";
+}
+
+- (void)setWaypipeSSHKeyPath:(NSString *)keyPath {
+  [[NSUserDefaults standardUserDefaults] setObject:keyPath
+                                             forKey:kWawonaPrefsWaypipeSSHKeyPath];
+  [[NSUserDefaults standardUserDefaults] synchronize];
+}
+
+- (NSString *)waypipeSSHKeyPassphrase {
+  // Store in Keychain for security
+  NSString *service = @"com.wawona.ssh";
+  NSString *account = @"ssh_key_passphrase";
+  
+  NSDictionary *query = @{
+    (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+    (__bridge id)kSecAttrService: service,
+    (__bridge id)kSecAttrAccount: account,
+    (__bridge id)kSecReturnData: @YES
+  };
+  
+  CFTypeRef result = NULL;
+  OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
+  
+  if (status == errSecSuccess && result) {
+    NSData *data = (__bridge_transfer NSData *)result;
+    return [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+  }
+  
+  return @"";
+}
+
+- (void)setWaypipeSSHKeyPassphrase:(NSString *)passphrase {
+  // Store in Keychain for security
+  NSString *service = @"com.wawona.ssh";
+  NSString *account = @"ssh_key_passphrase";
+  
+  // Delete existing item
+  NSDictionary *deleteQuery = @{
+    (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+    (__bridge id)kSecAttrService: service,
+    (__bridge id)kSecAttrAccount: account
+  };
+  SecItemDelete((__bridge CFDictionaryRef)deleteQuery);
+  
+  if (passphrase && passphrase.length > 0) {
+    NSData *data = [passphrase dataUsingEncoding:NSUTF8StringEncoding];
+    NSDictionary *addQuery = @{
+      (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+      (__bridge id)kSecAttrService: service,
+      (__bridge id)kSecAttrAccount: account,
+      (__bridge id)kSecValueData: data
+    };
+    SecItemAdd((__bridge CFDictionaryRef)addQuery, NULL);
+  }
+}
+
+- (NSString *)waypipeSSHPassword {
+  // Try Keychain first (more secure)
+  NSString *service = @"com.wawona.ssh";
+  NSString *account = @"ssh_password";
+  
+  NSDictionary *query = @{
+    (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+    (__bridge id)kSecAttrService: service,
+    (__bridge id)kSecAttrAccount: account,
+    (__bridge id)kSecReturnData: @YES
+  };
+  
+  CFTypeRef result = NULL;
+  OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
+  
+  if (status == errSecSuccess && result) {
+    NSData *data = (__bridge_transfer NSData *)result;
+    return [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+  }
+  
+  // Fallback to NSUserDefaults if Keychain fails (e.g., missing entitlements in Simulator)
+  if (status == errSecMissingEntitlement || status == -34018) {
+    NSString *fallback = [[NSUserDefaults standardUserDefaults] stringForKey:kWawonaPrefsWaypipeSSHPassword];
+    return fallback ?: @"";
+  }
+  
+  return @"";
+}
+
+- (void)setWaypipeSSHPassword:(NSString *)password {
+  // Try Keychain first (more secure)
+  NSString *service = @"com.wawona.ssh";
+  NSString *account = @"ssh_password";
+  
+  // Delete existing item
+  NSDictionary *deleteQuery = @{
+    (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+    (__bridge id)kSecAttrService: service,
+    (__bridge id)kSecAttrAccount: account
+  };
+  OSStatus deleteStatus = SecItemDelete((__bridge CFDictionaryRef)deleteQuery);
+  
+  if (password && password.length > 0) {
+    NSData *data = [password dataUsingEncoding:NSUTF8StringEncoding];
+    NSDictionary *addQuery = @{
+      (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+      (__bridge id)kSecAttrService: service,
+      (__bridge id)kSecAttrAccount: account,
+      (__bridge id)kSecValueData: data
+    };
+    OSStatus addStatus = SecItemAdd((__bridge CFDictionaryRef)addQuery, NULL);
+    
+    // Fallback to NSUserDefaults if Keychain fails (e.g., missing entitlements in Simulator)
+    if (addStatus == errSecMissingEntitlement || addStatus == -34018) {
+      [[NSUserDefaults standardUserDefaults] setObject:password forKey:kWawonaPrefsWaypipeSSHPassword];
+      [[NSUserDefaults standardUserDefaults] synchronize];
+    }
+  } else {
+    // Also clear from NSUserDefaults fallback
+    [[NSUserDefaults standardUserDefaults] removeObjectForKey:kWawonaPrefsWaypipeSSHPassword];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+  }
 }
 
 - (NSString *)waypipeRemoteCommand {

@@ -6,10 +6,10 @@
 #endif
 #import <QuartzCore/QuartzCore.h>
 #import "WawonaCompositor.h"
-#import "WawonaPreferences.h"
-#import "WawonaPreferencesManager.h"
-#import "WawonaUIHelpers.h"
-#import "WawonaAboutPanel.h"
+#import "../ui/Settings/WawonaPreferences.h"
+#import "../ui/Settings/WawonaPreferencesManager.h"
+#import "../ui/Helpers/WawonaUIHelpers.h"
+#import "../ui/About/WawonaAboutPanel.h"
 #import "logging.h"
 #include <wayland-server-core.h>
 #include <signal.h>
@@ -31,19 +31,28 @@ static WawonaCompositor *g_compositor = NULL;
 // Signal handler for graceful shutdown
 static void signal_handler(int sig) {
     (void)sig;
-    NSLog(@"\n🛑 Received signal, shutting down gracefully...");
+    NSLog(@"\n🛑 Received signal %d, shutting down gracefully...", sig);
+    
+    // Use compositor's stop method which properly disconnects all clients
+    // This ensures clients are notified and can clean up gracefully
     if (g_compositor) {
         [g_compositor stop];
         g_compositor = nil;
     }
-    if (g_display) {
-        wl_display_destroy(g_display);
-        g_display = NULL;
-    }
+    
+    // Clear global display reference (compositor.stop already destroyed it)
+    g_display = NULL;
+    
 #if TARGET_OS_IPHONE || TARGET_OS_SIMULATOR
-    exit(0);
+    // On iOS, don't call exit() immediately - let the app terminate naturally
+    // This prevents crash reports. The signal will be handled by the system.
+    // For SIGTERM, we'll let the app delegate handle termination.
 #else
-    [NSApp terminate:nil];
+    // On macOS CLI, terminate the app gracefully
+    // Give a small delay to ensure cleanup completes
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [NSApp terminate:nil];
+    });
 #endif
 }
 
@@ -53,7 +62,7 @@ static void signal_handler(int sig) {
 // iOS Implementation
 //
 
-#import "ios_launcher_client.h"
+#import "../launcher/WawonaLauncherClient.h"
 
 @interface WawonaAppDelegate : NSObject <UIApplicationDelegate>
 @property (nonatomic, strong) UIWindow *window;
@@ -373,19 +382,19 @@ static void signal_handler(int sig) {
     
     NSLog(@"🚀 Compositor running!");
     
-    // Launch launcher client app only if multiple clients are allowed
-    BOOL multipleClientsEnabled = NO;
+    // Launch launcher client app only if enabled
+    BOOL enableLauncher = NO;
     @try {
         WawonaPreferencesManager *prefsManager = [WawonaPreferencesManager sharedManager];
         if (prefsManager) {
-            multipleClientsEnabled = [prefsManager multipleClientsEnabled];
+            enableLauncher = [prefsManager enableLauncher];
         }
     } @catch (NSException *exception) {
-        NSLog(@"⚠️ Failed to read multipleClientsEnabled preference, defaulting to NO: %@", exception);
-        multipleClientsEnabled = NO;
+        NSLog(@"⚠️ Failed to read enableLauncher preference, defaulting to NO: %@", exception);
+        enableLauncher = NO;
     }
     
-    if (multipleClientsEnabled) {
+    if (enableLauncher) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             int sv[2];
             if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) < 0) {
@@ -475,18 +484,39 @@ static void signal_handler(int sig) {
 }
 
 
+- (void)applicationWillResignActive:(UIApplication *)application {
+    // Ensure settings are persisted when app goes to background
+    [[NSUserDefaults standardUserDefaults] synchronize];
+}
+
+- (void)applicationDidEnterBackground:(UIApplication *)application {
+    // Ensure settings are persisted when app enters background
+    [[NSUserDefaults standardUserDefaults] synchronize];
+}
+
 - (void)applicationWillTerminate:(UIApplication *)application {
+    (void)application;
+    NSLog(@"👋 Application will terminate - shutting down gracefully");
+    
+    // Ensure settings are persisted before termination
+    [[NSUserDefaults standardUserDefaults] synchronize];
+    
     // Disconnect launcher client if still connected
     disconnectLauncherClient(self);
     
+    // Use compositor's stop method which properly disconnects all clients
+    // This ensures clients are notified and can clean up gracefully
     if (self.compositor) {
         [self.compositor stop];
         self.compositor = nil;
     }
-    if (self.display) {
-        wl_display_destroy(self.display);
-        self.display = NULL;
-    }
+    
+    // Clear references (compositor.stop already destroyed the display)
+    self.display = NULL;
+    g_compositor = nil;
+    g_display = NULL;
+    
+    NSLog(@"✅ Graceful shutdown complete");
 }
 
 @end
@@ -651,9 +681,11 @@ int main(int argc, char *argv[]) {
         
         [NSApp run];
 
+        // Cleanup after event loop exits
+        // Use compositor's stop method which properly disconnects all clients
         [compositor stop];
         g_compositor = nil;
-        wl_display_destroy(display);
+        // compositor.stop already destroyed the display, just clear the reference
         g_display = NULL;
     }
     return 0;
