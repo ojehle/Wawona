@@ -743,6 +743,13 @@ static uint32_t getWaylandTime(void) {
     }
     
     uint32_t serial = wl_seat_get_serial(_seat);
+    
+    // Defensive checks to prevent crash
+    if (!_seat || !_seat->keyboard_resource) {
+        NSLog(@"[INPUT] ⚠️ Skipping keyboard key: invalid seat or keyboard resource");
+        return;
+    }
+    
     NSLog(@"[INPUT] Sending keyboard key: keyCode=%u, state=%u, serial=%u", linuxKeyCode, state, serial);
     wl_seat_send_keyboard_key(_seat, serial, time, linuxKeyCode, state);
     
