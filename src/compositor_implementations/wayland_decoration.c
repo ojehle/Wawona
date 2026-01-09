@@ -234,6 +234,11 @@ static void decoration_manager_get_toplevel_decoration(
   }
 
   zxdg_toplevel_decoration_v1_send_configure(decoration_resource, initial_mode);
+  if (xdg_toplevel && xdg_toplevel->xdg_surface &&
+      xdg_toplevel->xdg_surface->resource) {
+    xdg_surface_send_configure(xdg_toplevel->xdg_surface->resource,
+                               ++xdg_toplevel->xdg_surface->configure_serial);
+  }
 
   log_printf("DECORATION",
              "Created toplevel decoration for toplevel %p, initial mode: %s "
@@ -379,6 +384,12 @@ void wl_decoration_send_configure(struct xdg_toplevel_impl *toplevel) {
 
   // Send the configure event for the decoration
   zxdg_toplevel_decoration_v1_send_configure(decoration->resource, final_mode);
+
+  // Notify the client that the decoration mode is part of a configure cycle
+  if (toplevel->xdg_surface && toplevel->xdg_surface->resource) {
+    xdg_surface_send_configure(toplevel->xdg_surface->resource,
+                               ++toplevel->xdg_surface->configure_serial);
+  }
 
   log_printf("DECORATION",
              "Sent decoration configure with mode %s for toplevel %p\n",

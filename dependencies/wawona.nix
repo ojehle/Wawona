@@ -196,6 +196,34 @@ let
     "src/core/main.m"
     "src/core/WawonaCompositor.m"
     "src/core/WawonaCompositor.h"
+    "src/core/WawonaCompositorView_macos.m"
+    "src/core/WawonaCompositorView_macos.h"
+    "src/core/WawonaCompositorView_ios.m"
+    "src/core/WawonaCompositorView_ios.h"
+    "src/core/WawonaCompositor_macos.m"
+    "src/core/WawonaCompositor_macos.h"
+    "src/core/WawonaFrameCallbackManager.m"
+    "src/core/WawonaFrameCallbackManager.h"
+    "src/core/WawonaProtocolSetup.m"
+    "src/core/WawonaProtocolSetup.h"
+    "src/core/WawonaClientManager.m"
+    "src/core/WawonaClientManager.h"
+    "src/core/WawonaEventLoopManager.m"
+    "src/core/WawonaEventLoopManager.h"
+    "src/core/WawonaWindowLifecycle_macos.m"
+    "src/core/WawonaWindowLifecycle_macos.h"
+    "src/core/WawonaDisplayLinkManager.m"
+    "src/core/WawonaDisplayLinkManager.h"
+    "src/core/WawonaBackendManager.m"
+    "src/core/WawonaBackendManager.h"
+    "src/core/WawonaWindowManager.m"
+    "src/core/WawonaWindowManager.h"
+    "src/core/WawonaRenderManager.m"
+    "src/core/WawonaRenderManager.h"
+    "src/core/WawonaStartupManager.m"
+    "src/core/WawonaStartupManager.h"
+    "src/core/WawonaShutdownManager.m"
+    "src/core/WawonaShutdownManager.h"
     "src/core/WawonaSettings.h"
     "src/core/WawonaSettings.m"
     # "src/core/WawonaKernel.h" - Removed (using HIAHKernel library)
@@ -289,17 +317,15 @@ let
     "src/protocols/color-management-v1-protocol.h"
     "src/protocols/tablet-stub.c"
 
-    # Rendering
-    "src/rendering/surface_renderer.m"
-    "src/rendering/surface_renderer.h"
-    "src/rendering/metal_renderer.m"
-    "src/rendering/metal_renderer.h"
-    "src/rendering/metal_dmabuf.m"
-    "src/rendering/metal_dmabuf.h"
-    "src/rendering/metal_waypipe.m"
-    "src/rendering/metal_waypipe.h"
-    "src/rendering/rendering_backend.m"
-    "src/rendering/rendering_backend.h"
+    # Rendering (Core Utilities)
+    "src/core/metal_dmabuf.m"
+    "src/core/metal_dmabuf.h"
+    "src/core/metal_waypipe.m"
+    "src/core/metal_waypipe.h"
+    "src/core/RenderingBackend.m"
+    "src/core/RenderingBackend.h"
+    "src/core/WawonaSurfaceManager.m"
+    "src/core/WawonaSurfaceManager.h"
 
     # Input handling
     "src/input/input_handler.m"
@@ -350,8 +376,9 @@ let
 
   # macOS sources - include Vulkan renderer using KosmicKrisp as libvulkan
   macosSources = commonSources ++ [
-    "src/rendering/vulkan_renderer.m"
-    "src/rendering/vulkan_renderer.h"
+    "src/rendering/renderer_macos.m"
+    "src/rendering/renderer_macos.h"
+    "src/rendering/renderer_macos_helpers.m"
   ];
 
   # Android sources - only C files, no Objective-C (no Apple frameworks)
@@ -372,7 +399,8 @@ let
     ++ [
       "src/stubs/egl_buffer_handler.c" # Android has its own EGL implementation
       "src/android/android_jni.c" # Android JNI bridge
-      "src/rendering/android_dmabuf.c" # Android implementation of dmabuf stubs
+      "src/rendering/renderer_android.c"
+      "src/rendering/renderer_android.h"
     ];
 
   # Helper to filter source files that exist
@@ -705,9 +733,6 @@ in
             substituteInPlace src/compat/macos/stubs/libinput-macos/gbm-wrapper.c \
               --replace-fail '#include "../../../../metal_dmabuf.h"' '#include "metal_dmabuf.h"'
             
-            # Fix ARC bridging issues in metal_renderer.m
-            substituteInPlace src/rendering/metal_renderer.m \
-              --replace-fail '(void *)metalSurface' '(__bridge void *)metalSurface'
             
             # VulkanRenderer is now enabled for macOS using KosmicKrisp ICD
             
@@ -787,10 +812,9 @@ in
 
       # Compile Metal shaders
       if command -v metal >/dev/null 2>&1; then
-        metal -c src/rendering/metal_shaders.metal -o metal_shaders.air || true
-        if [ -f metal_shaders.air ] && command -v metallib >/dev/null 2>&1; then
-          metallib metal_shaders.air -o metal_shaders.metallib || true
-        fi
+        # Metal shaders are now embedded in renderer_macos.m, but if we add external shaders later:
+        # metal -c src/rendering/metal_shaders.metal -o metal_shaders.air || true
+        true
       fi
     '';
 
@@ -852,7 +876,7 @@ in
          src/compat/macos/stubs/libinput-macos/gbm-wrapper.c \
          -o gbm-wrapper.o
 
-      $CC -c src/rendering/metal_dmabuf.m \
+      $CC -c src/core/metal_dmabuf.m \
          -Isrc -Isrc/core -Isrc/compositor_implementations \
          -Isrc/rendering -Isrc/input -Isrc/ui \
          -Isrc/logging -Isrc/stubs -Isrc/protocols -Isrc/launcher \
@@ -1134,20 +1158,6 @@ in
             substituteInPlace src/compat/macos/stubs/libinput-macos/gbm-wrapper.c \
               --replace-fail '#include "../../../../metal_dmabuf.h"' '#include "metal_dmabuf.h"'
             
-            # Fix ARC bridging issues in metal_renderer.m
-            substituteInPlace src/rendering/metal_renderer.m \
-              --replace-fail '(void *)metalSurface' '(__bridge void *)metalSurface'
-            
-            # Make VulkanRenderer references conditional in metal_renderer.m for iOS
-            sed -i 's|^[[:space:]]*_vulkanRenderer =|// _vulkanRenderer =|g' src/rendering/metal_renderer.m
-            sed -i 's|if (_vulkanRenderer)|if (0 /* _vulkanRenderer disabled for iOS */)|g' src/rendering/metal_renderer.m
-            sed -i 's|self\.vulkanRenderer|nil /* self.vulkanRenderer disabled for iOS */|g' src/rendering/metal_renderer.m
-            sed -i 's|(VulkanRenderer \*)|(id /* VulkanRenderer disabled for iOS */)|g' src/rendering/metal_renderer.m
-            
-            # Make VulkanRenderer property conditional in metal_renderer.h
-            substituteInPlace src/rendering/metal_renderer.h \
-              --replace-fail '@class VulkanRenderer;' '// @class VulkanRenderer; // Disabled for iOS' \
-              --replace-fail '@property (nonatomic, strong) VulkanRenderer *vulkanRenderer;' '// @property (nonatomic, strong) VulkanRenderer *vulkanRenderer; // Disabled for iOS'
             
             # Create iOS-compatible egl_buffer_handler.h stub
             # iOS doesn't use EGL, so we need to stub it out

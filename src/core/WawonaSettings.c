@@ -97,7 +97,8 @@ bool WawonaSettings_GetVulkanDriversEnabled(void) {
 }
 
 bool WawonaSettings_GetEGLDriversEnabled(void) {
-    return g_config.eglDrivers;
+    // EGL disabled - Vulkan only mode
+    return false;
 }
 
 // Dmabuf Support

@@ -120,7 +120,32 @@
         # We override any existing value to ensure predictable socket location
         export XDG_RUNTIME_DIR="/tmp/wawona-$(id -u)"
         
-        exec "${wawonaBuildModule.macos}/bin/Wawona" "$@"
+        # Initialize crash logging
+        echo "$(date): Starting Wawona with auto-crash logging" > macos-crash.log
+        echo "PID: $$" >> macos-crash.log
+        echo "Command: $*" >> macos-crash.log
+        echo "---" >> macos-crash.log
+        
+        # Clear previous log files (truncate instead of append)
+        > macos-output.log
+        > macos-output.err
+        
+        # Run with crash detection and logging
+        # .log gets all output (stdout + stderr), .err gets only errors
+        if ! "${wawonaBuildModule.macos}/bin/Wawona" "$@" > >(tee macos-output.log) 2> >(tee macos-output.log >> macos-output.err); then
+          EXIT_CODE=$?
+          echo "$(date): Wawona crashed with exit code $EXIT_CODE" >> macos-crash.log
+          echo "Exit code: $EXIT_CODE" >> macos-crash.log
+          echo "--- Crash detected ---" >> macos-crash.log
+          
+          # Try to get any available crash reports from system
+          if command -v log >/dev/null 2>&1; then
+            echo "System log entries around crash time:" >> macos-crash.log
+            log show --predicate 'process == "Wawona"' --last 1m --style compact >> macos-crash.log 2>/dev/null || true
+          fi
+          
+          exit $EXIT_CODE
+        fi
       '';
       
       wawonaKernelIosWrapper = pkgs.writeShellScriptBin "wawona-kernel-ios" ''

@@ -30,6 +30,12 @@ struct wl_surface_impl;
 @property(nonatomic, weak) NSWindow *window;
 @property(nonatomic, weak)
     id compositor; // Reference to MacOSCompositor to trigger redraws
+@property(nonatomic, strong) NSEvent *lastMouseDownEvent;
+
+// Resize state
+@property(nonatomic, assign) BOOL isResizing;
+@property(nonatomic, assign) uint32_t resizeEdges;
+@property(nonatomic, assign) struct xdg_toplevel_impl *resizingToplevel;
 
 - (instancetype)initWithSeat:(struct wl_seat_impl *)seat
                       window:(NSWindow *)window

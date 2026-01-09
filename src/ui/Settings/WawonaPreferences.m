@@ -183,8 +183,6 @@
   graphics.items = @[
     ITEM(@"Enable Vulkan Drivers", @"VulkanDriversEnabled", WSettingSwitch,
          @YES, @"Experimental Vulkan support."),
-    ITEM(@"Enable EGL Drivers", @"EglDriversEnabled", WSettingSwitch, @NO,
-         @"EGL hardware acceleration."),
     ITEM(@"Enable DMABUF", @"DmabufEnabled", WSettingSwitch, @YES,
          @"Zero-copy texture sharing.")
   ];

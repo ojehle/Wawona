@@ -63,7 +63,8 @@ bool WawonaSettings_GetVulkanDriversEnabled(void) {
 }
 
 bool WawonaSettings_GetEGLDriversEnabled(void) {
-    return [[WawonaPreferencesManager sharedManager] eglDriversEnabled];
+    // EGL disabled - Vulkan only mode
+    return false;
 }
 
 bool WawonaSettings_GetDmabufEnabled(void) {

@@ -104,14 +104,31 @@ IOSurfaceRef metal_dmabuf_create_iosurface_from_data(void *data, uint32_t width,
     if (!iosurface) return NULL;
     
     // Lock and copy data
-    IOSurfaceLock(iosurface, 0, NULL);
+    if (IOSurfaceLock(iosurface, 0, NULL) != kIOReturnSuccess) {
+        NSLog(@"❌ Failed to lock IOSurface");
+        CFRelease(iosurface);
+        return NULL;
+    }
+    
     void *surfaceBase = IOSurfaceGetBaseAddress(iosurface);
+    if (!surfaceBase) {
+        NSLog(@"❌ IOSurface base address is NULL");
+        IOSurfaceUnlock(iosurface, 0, NULL);
+        CFRelease(iosurface);
+        return NULL;
+    }
+    
     size_t surfaceStride = IOSurfaceGetBytesPerRow(iosurface);
     
     // Always handle stride differences (source stride may differ from aligned stride)
     uint8_t *src = (uint8_t *)data;
     uint8_t *dst = (uint8_t *)surfaceBase;
-    uint32_t copyWidth = (stride < surfaceStride) ? stride : surfaceStride;
+    uint32_t copyWidth = (stride < surfaceStride) ? stride : (uint32_t)surfaceStride;
+    
+    // Safety check for buffer bounds
+    // We assume src has at least height * stride bytes
+    // We assume dst has at least height * surfaceStride bytes
+    
     for (uint32_t y = 0; y < height; y++) {
         memcpy(dst, src, copyWidth);
         // Zero out padding if stride was extended

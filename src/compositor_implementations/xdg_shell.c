@@ -2,6 +2,7 @@
 #include "../core/WawonaCompositor.h"
 #include "../core/WawonaSettings.h"
 #include "../protocols/xdg-decoration-protocol.h"
+#include "../protocols/xdg-shell-protocol.h"
 #include "wayland_decoration.h"
 #include <arpa/inet.h>
 #include <stdio.h>
@@ -191,6 +192,10 @@ static void xdg_toplevel_set_min_size(struct wl_client *client,
   // any size Log for debugging
   log_printf("XDG", "set_min_size: %dx%d (0x0 means no restriction)\n", width,
              height);
+  struct xdg_toplevel_impl *toplevel = wl_resource_get_user_data(resource);
+  if (toplevel) {
+    macos_toplevel_set_min_size(toplevel, width, height);
+  }
 }
 
 static void xdg_toplevel_set_max_size(struct wl_client *client,
@@ -201,6 +206,10 @@ static void xdg_toplevel_set_max_size(struct wl_client *client,
   // any size Log for debugging
   log_printf("XDG", "set_max_size: %dx%d (0x0 means no restriction)\n", width,
              height);
+  struct xdg_toplevel_impl *toplevel = wl_resource_get_user_data(resource);
+  if (toplevel) {
+    macos_toplevel_set_max_size(toplevel, width, height);
+  }
 }
 
 static void xdg_toplevel_set_maximized(struct wl_client *client,
@@ -244,8 +253,19 @@ static void xdg_toplevel_unset_fullscreen(struct wl_client *client,
 static void xdg_toplevel_destroy(struct wl_client *client,
                                  struct wl_resource *resource) {
   (void)client;
-  (void)resource;
-  // Stub - not implemented
+  struct xdg_toplevel_impl *toplevel = wl_resource_get_user_data(resource);
+  if (toplevel) {
+    // Send close event to client before destroying
+    wl_resource_post_event(resource, XDG_TOPLEVEL_CLOSE);
+    wl_display_flush_clients(wl_client_get_display(client));
+
+    // Close the macOS window
+    macos_toplevel_close(toplevel);
+
+    // Clean up the toplevel
+    wl_resource_set_user_data(resource, NULL);
+    toplevel->resource = NULL;
+  }
 }
 
 static void xdg_surface_get_toplevel(struct wl_client *client,
@@ -259,8 +279,8 @@ static void xdg_surface_get_toplevel(struct wl_client *client,
   uint32_t *activated;
   uint32_t *maximized;
   uint32_t *fullscreen;
-  int32_t cfg_width = 1024;
-  int32_t cfg_height = 768;
+  int32_t cfg_width = 0;
+  int32_t cfg_height = 0;
 
   log_printf("XDG", "xdg_surface_get_toplevel called for resource %p\n",
              resource);
@@ -288,8 +308,11 @@ static void xdg_surface_get_toplevel(struct wl_client *client,
   toplevel->xdg_surface = xdg_surface;
   toplevel->decoration_data = NULL;
 
-  // Initialize decoration mode based on compositor settings
-  // 1 = CLIENT_SIDE (CSD), 2 = SERVER_SIDE (SSD)
+  // Determine decoration mode based on Force SSD setting.
+  // If Force SSD is OFF, we default to CLIENT_SIDE (CSD). If a client
+  // doesn't choose, or doesn't support the decoration protocol, they
+  // will stay in CSD mode and we won't draw a native titlebar.
+  // If Force SSD is ON, we default to SERVER_SIDE (SSD).
   bool force_ssd = WawonaSettings_GetForceServerSideDecorations();
   toplevel->decoration_mode =
       force_ssd ? ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE
@@ -319,28 +342,12 @@ static void xdg_surface_get_toplevel(struct wl_client *client,
   }
 
   wl_array_init(&states);
-  // Add activated state
+  // Add activated state if this is the first window or if it should be focused
   activated = wl_array_add(&states, sizeof(uint32_t));
   if (activated)
     *activated = XDG_TOPLEVEL_STATE_ACTIVATED;
 
-  // Add maximized/fullscreen for initial state too
-  maximized = wl_array_add(&states, sizeof(uint32_t));
-  if (maximized)
-    *maximized = XDG_TOPLEVEL_STATE_MAXIMIZED;
-
-  fullscreen = wl_array_add(&states, sizeof(uint32_t));
-  if (fullscreen)
-    *fullscreen = XDG_TOPLEVEL_STATE_FULLSCREEN;
-
-  // Choose a non-zero initial size to ensure clients render promptly
-  // Prefer the wm_base's output size if known; otherwise fall back to 1024x768
-  if (xdg_surface && xdg_surface->wm_base) {
-    if (xdg_surface->wm_base->output_width > 0)
-      cfg_width = xdg_surface->wm_base->output_width;
-    if (xdg_surface->wm_base->output_height > 0)
-      cfg_height = xdg_surface->wm_base->output_height;
-  }
+  // Initial size 0,0 signals to the client to set its own size (ideal for CSD)
   log_printf("XDG", "Sending initial configure to toplevel %p (size: %dx%d)\n",
              toplevel_resource, cfg_width, cfg_height);
   toplevel->width = cfg_width;
@@ -532,6 +539,9 @@ void xdg_wm_base_send_configure_to_all_toplevels(
       int32_t cfg_h;
       struct wl_client *client;
 
+      // Initialize the states array before use
+      wl_array_init(&states);
+
       // SAFETY: Validate the surface resource is still valid before sending
       if (!surface->resource) {
         surface = next_surface;
@@ -562,6 +572,12 @@ void xdg_wm_base_send_configure_to_all_toplevels(
       // Only send if it's a toplevel (check interface or implementation)
       // For simplicity, assume role is toplevel if set (we only support
       // toplevel now)
+
+      // Populate the states array
+      // Add activated state if this is the first window or if it should be focused
+      activated = wl_array_add(&states, sizeof(uint32_t));
+      if (activated)
+        *activated = XDG_TOPLEVEL_STATE_ACTIVATED;
 
       // Check if the toplevel resource is still valid
       if (!wl_resource_get_user_data(toplevel_resource)) {
@@ -599,32 +615,94 @@ void xdg_wm_base_send_configure_to_all_toplevels(
                    toplevel_version, wm_base_version);
       }
 
-      // Send configure with a concrete size hint to ensure clients render
-      // Use provided width/height if non-zero; else fallback to wm_base stored
-      // size; else 1024x768
-      wl_array_init(&states);
-      activated = wl_array_add(&states, sizeof(uint32_t));
-      if (activated)
-        *activated = XDG_TOPLEVEL_STATE_ACTIVATED;
+      // Determine suggested size
+      cfg_w = width;
+      cfg_h = height;
 
-      cfg_w = width > 0
-                  ? width
-                  : (wm_base->output_width > 0 ? wm_base->output_width : 1024);
-      cfg_h = height > 0
-                  ? height
-                  : (wm_base->output_height > 0 ? wm_base->output_height : 768);
-      log_printf("XDG", "Sending configure %dx%d to toplevel %p\n", cfg_w,
-                 cfg_h, toplevel_resource);
-      toplevel->width = cfg_w;
-      toplevel->height = cfg_h;
+      if (toplevel->decoration_mode == 1) { // CLIENT_SIDE
+        // For CSD, we only suggest a size if it's explicitly non-zero
+        // (maximized, fullscreen, or user dragging). Otherwise, we MUST send
+        // 0x0.
+        if (width == 0 && height == 0) {
+          cfg_w = 0;
+          cfg_h = 0;
+        }
+      } else { // SERVER_SIDE
+        // For SSD, we suggested the provided size or fallback to toplevel's
+        // current size
+        if (cfg_w == 0)
+          cfg_w = toplevel->width > 0 ? toplevel->width : 1024;
+        if (cfg_h == 0)
+          cfg_h = toplevel->height > 0 ? toplevel->height : 768;
+      }
+
+      log_printf("XDG", "Sending configure %dx%d to toplevel %p (Mode: %u)\n",
+                 cfg_w, cfg_h, toplevel_resource, toplevel->decoration_mode);
+
+      if (cfg_w > 0 && cfg_h > 0) {
+        toplevel->width = cfg_w;
+        toplevel->height = cfg_h;
+      }
+
+      log_printf("XDG", "About to call xdg_toplevel_send_configure(%p, %d, %d, %p)\n",
+                 toplevel_resource, cfg_w, cfg_h, &states);
+      fflush(stdout);
+
+      // Validate toplevel_resource before calling
+      if (!toplevel_resource) {
+        log_printf("XDG", "ERROR: toplevel_resource is NULL!\n");
+        fflush(stdout);
+        wl_array_release(&states);
+        continue;
+      }
+      
+      // Validate resource address
+      uintptr_t resource_addr = (uintptr_t)toplevel_resource;
+      if (resource_addr < 0x1000 || resource_addr > 0x7FFFFFFFFFFFF000) {
+        log_printf("XDG", "ERROR: Invalid toplevel_resource address %p!\n", toplevel_resource);
+        fflush(stdout);
+        wl_array_release(&states);
+        continue;
+      }
+
+      // Validate states array
+      uintptr_t states_addr = (uintptr_t)&states;
+      if (states_addr < 0x1000 || states_addr > 0x7FFFFFFFFFFFF000) {
+        log_printf("XDG", "ERROR: Invalid states array address %p!\n", &states);
+        fflush(stdout);
+        wl_array_release(&states);
+        continue;
+      }
+
       xdg_toplevel_send_configure(toplevel_resource, cfg_w, cfg_h, &states);
+      
+      log_printf("XDG", "xdg_toplevel_send_configure completed\n");
+      fflush(stdout);
+      log_printf("XDG", "About to call wl_array_release(%p)\n", &states);
+      fflush(stdout);
+      
       wl_array_release(&states);
+      
+      log_printf("XDG", "wl_array_release completed\n");
+      fflush(stdout);
 
       // Also send decoration configure if attached
+      log_printf("XDG", "About to call wl_decoration_send_configure(%p)\n", toplevel);
+      fflush(stdout);
+      
       wl_decoration_send_configure(toplevel);
+      
+      log_printf("XDG", "wl_decoration_send_configure completed\n");
+      fflush(stdout);
 
+      log_printf("XDG", "About to call xdg_surface_send_configure(%p, %u)\n", surface->resource, surface->configure_serial + 1);
+      fflush(stdout);
+      
       xdg_surface_send_configure(surface->resource,
                                  ++surface->configure_serial);
+                                 
+      log_printf("XDG", "xdg_surface_send_configure completed\n");
+      fflush(stdout);
     }
     surface = next_surface;
   }
@@ -680,6 +758,9 @@ struct wl_client *nested_compositor_client_from_xdg_shell(void) {
 static void xdg_toplevel_destroy_resource(struct wl_resource *resource) {
   struct xdg_toplevel_impl *toplevel = wl_resource_get_user_data(resource);
   if (toplevel) {
+    // Notify compositor to remove from window map before freeing
+    macos_unregister_toplevel(toplevel);
+
     // Clear the native window reference to prevent use-after-free
     toplevel->native_window = NULL;
 

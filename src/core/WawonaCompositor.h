@@ -43,8 +43,14 @@ void macos_toplevel_unset_maximized(struct xdg_toplevel_impl *toplevel);
 void macos_toplevel_close(struct xdg_toplevel_impl *toplevel);
 void macos_start_toplevel_resize(struct xdg_toplevel_impl *toplevel,
                                  uint32_t edges);
+void macos_start_toplevel_move(struct xdg_toplevel_impl *toplevel);
 void macos_toplevel_set_fullscreen(struct xdg_toplevel_impl *toplevel);
 void macos_toplevel_unset_fullscreen(struct xdg_toplevel_impl *toplevel);
+void macos_toplevel_set_min_size(struct xdg_toplevel_impl *toplevel,
+                                 int32_t width, int32_t height);
+void macos_toplevel_set_max_size(struct xdg_toplevel_impl *toplevel,
+                                 int32_t width, int32_t height);
+void macos_unregister_toplevel(struct xdg_toplevel_impl *toplevel);
 
 // C function to flush clients and trigger immediate frame callback
 void wl_compositor_flush_and_trigger_frame(void);
@@ -55,6 +61,13 @@ void macos_create_window_for_toplevel(struct xdg_toplevel_impl *toplevel);
 #ifdef __OBJC__
 @class WawonaCompositor;
 @class CompositorView;
+@class WawonaEventLoopManager;
+@class WawonaClientManager;
+@class WawonaProtocolSetup;
+@class WawonaWindowManager;
+@class WawonaRenderManager;
+@class WawonaStartupManager;
+@class WawonaShutdownManager;
 #else
 typedef struct WawonaCompositor WawonaCompositor;
 #endif
@@ -69,7 +82,7 @@ extern WawonaCompositor *g_wl_compositor_instance;
 #include "../input/input_handler.h"
 #include "../input/wayland_seat.h"
 #include "launcher/WawonaAppScanner.h"
-#include "rendering_backend.h"
+#include "RenderingBackend.h"
 #include "wayland_color_management.h"
 #include "wayland_data_device_manager.h"
 #include "wayland_decoration.h"
@@ -78,9 +91,6 @@ extern WawonaCompositor *g_wl_compositor_instance;
 #include "wayland_shm.h"
 #include "wayland_subcompositor.h"
 #include "xdg_shell.h"
-#if !TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
-#include "egl_buffer_handler.h"
-#endif
 
 // macOS Wayland Compositor Backend
 // This is a from-scratch implementation - no WLRoots
@@ -94,6 +104,13 @@ extern WawonaCompositor *g_wl_compositor_instance;
 #endif
 @property(nonatomic, assign) struct wl_display *display;
 @property(nonatomic, assign) struct wl_event_loop *eventLoop;
+@property(nonatomic, strong) NSThread *eventThread;
+
+// Dispatch a block to be executed on the Wayland event thread
+- (void)dispatchToEventThread:(void (^)(void))block;
+
+// fixCSDWindowResizing: is declared in WawonaCompositor_macos.h (macOS-specific)
+
 @property(nonatomic, assign)
     int tcp_listen_fd; // TCP listening socket (for manual accept)
 @property(nonatomic, strong) id<RenderingBackend>
@@ -117,9 +134,6 @@ extern WawonaCompositor *g_wl_compositor_instance;
 @property(nonatomic, assign) struct wp_color_manager_impl *color_manager;
 @property(nonatomic, assign)
     struct wl_text_input_manager_impl *text_input_manager;
-#if !TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
-@property(nonatomic, assign) struct egl_buffer_handler *egl_buffer_handler;
-#endif
 
 // Event loop integration
 #if TARGET_OS_IPHONE || TARGET_OS_SIMULATOR
@@ -127,8 +141,12 @@ extern WawonaCompositor *g_wl_compositor_instance;
 #else
 @property(nonatomic, assign) CVDisplayLinkRef displayLink;
 #endif
-@property(nonatomic, strong) NSThread *eventThread;
 @property(nonatomic, assign) BOOL shouldStopEventThread;
+@property(nonatomic, strong) WawonaEventLoopManager *eventLoopManager;
+@property(nonatomic, strong) WawonaWindowManager *windowManager;
+@property(nonatomic, strong) WawonaRenderManager *renderManager;
+@property(nonatomic, strong) WawonaStartupManager *startupManager;
+@property(nonatomic, strong) WawonaShutdownManager *shutdownManager;
 @property(nonatomic, assign) struct wl_event_source *frame_callback_source;
 @property(nonatomic, assign) int32_t pending_resize_width;
 @property(nonatomic, assign) int32_t pending_resize_height;
@@ -149,6 +167,9 @@ extern WawonaCompositor *g_wl_compositor_instance;
 @property(nonatomic, strong) CompositorView *mainCompositorView;
 @property(nonatomic, strong)
     NSRecursiveLock *mapLock; // Lock for windowToToplevelMap
+@property(nonatomic, assign) BOOL isLiveResizing;
+@property(nonatomic, assign) NSRect liveResizeStartFrame;
+@property(nonatomic, assign) uint32_t activeResizeEdges;
 @property(nonatomic, assign) BOOL stopped;
 
 #if TARGET_OS_IPHONE || TARGET_OS_SIMULATOR
@@ -177,8 +198,4 @@ extern WawonaCompositor *g_wl_compositor_instance;
 @end
 
 // C function to get EGL buffer handler (for rendering EGL buffers)
-#if !TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
-struct egl_buffer_handler *macos_compositor_get_egl_buffer_handler(void);
-#endif
-
 #endif // __OBJC__

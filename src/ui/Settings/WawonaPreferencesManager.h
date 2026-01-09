@@ -26,7 +26,6 @@ extern NSString *const kWawonaPrefsTCPListenerPort;
 extern NSString *const kWawonaPrefsWaylandSocketDir;
 extern NSString *const kWawonaPrefsWaylandDisplayNumber;
 extern NSString *const kWawonaPrefsEnableVulkanDrivers;
-extern NSString *const kWawonaPrefsEnableEGLDrivers;
 extern NSString *const kWawonaPrefsEnableDmabuf;
 extern NSString *const kWawonaPrefsRespectSafeArea;
 // Waypipe configuration keys

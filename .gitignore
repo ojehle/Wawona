@@ -30,6 +30,7 @@ wayland-*
 *.log
 logs/
 .nvimlog
+*.err
 
 # Test client
 test_client

@@ -29,7 +29,6 @@ NSString *const kWawonaPrefsTCPListenerPort = @"TCPListenerPort";
 NSString *const kWawonaPrefsWaylandSocketDir = @"WaylandSocketDir";
 NSString *const kWawonaPrefsWaylandDisplayNumber = @"WaylandDisplayNumber";
 NSString *const kWawonaPrefsEnableVulkanDrivers = @"EnableVulkanDrivers";
-NSString *const kWawonaPrefsEnableEGLDrivers = @"EnableEGLDrivers";
 NSString *const kWawonaPrefsEnableDmabuf = @"EnableDmabuf";
 NSString *const kWawonaPrefsRespectSafeArea = @"RespectSafeArea";
 // Waypipe configuration keys
@@ -325,9 +324,6 @@ static NSString *WawonaPreferredSharedRuntimeDir(void) {
   if (![defaults objectForKey:kWawonaPrefsEnableVulkanDrivers]) {
     [defaults setBool:YES forKey:kWawonaPrefsEnableVulkanDrivers];
   }
-  if (![defaults objectForKey:kWawonaPrefsEnableEGLDrivers]) {
-    [defaults setBool:NO forKey:kWawonaPrefsEnableEGLDrivers];
-  }
   if (![defaults objectForKey:kWawonaPrefsEnableDmabuf]) {
     [defaults setBool:YES forKey:kWawonaPrefsEnableDmabuf];
   }
@@ -355,7 +351,6 @@ static NSString *WawonaPreferredSharedRuntimeDir(void) {
   [defaults removeObjectForKey:kWawonaPrefsWaylandSocketDir];
   [defaults removeObjectForKey:kWawonaPrefsWaylandDisplayNumber];
   [defaults removeObjectForKey:kWawonaPrefsEnableVulkanDrivers];
-  [defaults removeObjectForKey:kWawonaPrefsEnableEGLDrivers];
   [defaults removeObjectForKey:kWawonaPrefsEnableDmabuf];
   [defaults synchronize];
   [self setDefaultsIfNeeded];
@@ -591,16 +586,7 @@ static NSString *WawonaPreferredSharedRuntimeDir(void) {
   [[NSUserDefaults standardUserDefaults] synchronize];
 }
 
-- (BOOL)eglDriversEnabled {
-  return [[NSUserDefaults standardUserDefaults]
-      boolForKey:kWawonaPrefsEnableEGLDrivers];
-}
 
-- (void)setEglDriversEnabled:(BOOL)enabled {
-  [[NSUserDefaults standardUserDefaults] setBool:enabled
-                                          forKey:kWawonaPrefsEnableEGLDrivers];
-  [[NSUserDefaults standardUserDefaults] synchronize];
-}
 
 // Dmabuf Support
 - (BOOL)dmabufEnabled {

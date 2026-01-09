@@ -107,4 +107,3 @@ extern const struct wl_compositor_interface compositor_interface;
 // Buffer querying
 bool is_dmabuf_buffer(struct wl_resource *buffer);
 struct metal_dmabuf_buffer *dmabuf_buffer_get(struct wl_resource *buffer);
-struct egl_buffer_handler *macos_compositor_get_egl_buffer_handler(void);

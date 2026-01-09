@@ -380,6 +380,53 @@ static uint32_t getWaylandTime(void) {
     }
   }
 }
+#endif
+
+#if !TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+// macOS hit-testing helper
+#endif
+
+static struct wl_surface_impl *
+pick_surface_recursive(struct wl_surface_impl *surface, double px, double py,
+                       int32_t absX, int32_t absY) {
+  if (!surface)
+    return NULL;
+
+  int32_t currentAbsX = absX + surface->x;
+  int32_t currentAbsY = absY + surface->y;
+
+  // Search for subsurfaces first (top-most in Wayland Z-order are usually
+  // at the end of the list, but Wawona list order might be different).
+  // For now, we iterate the global list and find surfaces where parent ==
+  // surface.
+  struct wl_surface_impl *child = g_wl_surface_list;
+  struct wl_surface_impl *bestMatch = NULL;
+
+  while (child) {
+    if (child->parent == surface && child->resource) {
+      struct wl_surface_impl *match =
+          pick_surface_recursive(child, px, py, currentAbsX, currentAbsY);
+      if (match) {
+        // In Wayland, subsurfaces can be stacked. This simple implementation
+        // might need to handle Z-order better. For now, we take the last one
+        // found (likely top-most).
+        bestMatch = match;
+      }
+    }
+    child = child->next;
+  }
+
+  if (bestMatch)
+    return bestMatch;
+
+  // Check if point is in this surface
+  if (px >= (double)currentAbsX && px < (double)currentAbsX + surface->width &&
+      py >= (double)currentAbsY && py < (double)currentAbsY + surface->height) {
+    return surface;
+  }
+
+  return NULL;
+}
 
 - (struct wl_surface_impl *)pickSurfaceAt:(CGPoint)location {
   // Lookup toplevel for this window
@@ -387,8 +434,6 @@ static uint32_t getWaylandTime(void) {
   if (!compositor)
     return NULL;
 
-  // Ensure we are using the correct window (if _window is nil, fallback? No,
-  // must have window)
   if (!_window)
     return NULL;
 
@@ -401,24 +446,54 @@ static uint32_t getWaylandTime(void) {
 
   if (!toplevel || !toplevel->xdg_surface ||
       !toplevel->xdg_surface->wl_surface) {
-    // Fallback or early return.
-    // If we are main window (not in map?), maybe fallback to
-    // wl_get_all_surfaces? But for resizeable clients, they should be in map.
     return NULL;
   }
 
   struct wl_surface_impl *root_surface = toplevel->xdg_surface->wl_surface;
+  if (!root_surface->resource)
+    return NULL;
 
-  // Simple hit test against the root surface
-  // TODO: Handle subsurfaces properly by traversing the tree
-  // For now, just return the root surface if it exists and has a resource
-  if (root_surface->resource) {
-    return root_surface;
+  // Check if we should ignore clicks in the CSD shadow area
+  int32_t gx = 0, gy = 0, gw = root_surface->width, gh = root_surface->height;
+  if (toplevel && toplevel->decoration_mode == 1 && toplevel->xdg_surface &&
+      toplevel->xdg_surface->has_geometry) {
+    gx = toplevel->xdg_surface->geometry_x;
+    gy = toplevel->xdg_surface->geometry_y;
+    gw = toplevel->xdg_surface->geometry_width;
+    gh = toplevel->xdg_surface->geometry_height;
   }
 
-  return NULL;
+  // Location is in points (logical macOS units).
+  // Wayland coordinates should be in logical units (points) to match macOS
+  // scaling.
+  double px = (double)location.x;
+  double py = (double)location.y;
+
+  // Boundary check against logical window geometry.
+  // Since NSWindow frame already matches geometry, window-local (0,0) is
+  // geometry (0,0).
+  if (px < 0 || px >= (double)gw || py < 0 || py >= (double)gh) {
+    // If we are in CSD mode, ignore clicks in the shadow area
+    if (toplevel->decoration_mode == 1) {
+      // Use NSLog for debugging shadow clicks
+      NSLog(@"[INPUT] 🛡️ Shadow area click! px=%.1f py=%.1f, root_surface=(%d, "
+            @"%d), geometry=(%d,%d %dx%d)",
+            px, py, root_surface->x, root_surface->y, gx, gy, gw, gh);
+      return NULL;
+    }
+  }
+
+  // Find the actual surface (root or subsurface) at this location
+  struct wl_surface_impl *result =
+      pick_surface_recursive(root_surface, px, py, 0, 0);
+  if (result) {
+    NSLog(@"[INPUT] 🎯 Picked surface %p at (%.1f, %.1f)", (void *)result, px,
+          py);
+  }
+  return result;
 }
 
+#if TARGET_OS_IPHONE || TARGET_OS_SIMULATOR
 - (void)sendTouchDown:(CGPoint)location touch:(UITouch *)touch {
   if (_seat) {
     struct wl_seat_impl *seat_impl = _seat;
@@ -454,26 +529,36 @@ static uint32_t getWaylandTime(void) {
           location.x, location.y, scale, wl_fixed_to_double(x),
           wl_fixed_to_double(y));
 
-    wl_seat_send_touch_down(seat_impl, wl_seat_get_serial(seat_impl),
-                            getWaylandTime(),  // timestamp
-                            surface->resource, // Valid surface!
-                            (int32_t)(intptr_t)touch, x, y);
-    wl_seat_send_touch_frame(seat_impl); // REQUIRED: Group events
+    // Dispatch touch down to event thread
+    struct wl_surface_impl *target_surface = surface;
+    struct wl_seat_impl *seat_impl_copy = seat_impl;
+    int32_t touch_id = (int32_t)(intptr_t)touch;
+    WawonaCompositor *compositor = (WawonaCompositor *)_compositor;
 
-    // Also send pointer events for desktop apps compatibility (emulate mouse
-    // click)
-    wl_seat_send_pointer_enter(seat_impl, surface->resource,
-                               wl_seat_get_serial(seat_impl), x, y);
-    wl_seat_send_pointer_frame(seat_impl);
+    [compositor dispatchToEventThread:^{
+      wl_seat_send_touch_down(seat_impl_copy,
+                              wl_seat_get_serial(seat_impl_copy),
+                              getWaylandTime(),         // timestamp
+                              target_surface->resource, // Valid surface!
+                              touch_id, x, y);
+      wl_seat_send_touch_frame(seat_impl_copy); // REQUIRED: Group events
 
-    // Send explicit motion to ensure client updates cursor position before
-    // click
-    wl_seat_send_pointer_motion(seat_impl, getWaylandTime(), x, y);
-    wl_seat_send_pointer_frame(seat_impl);
+      // Also send pointer events for desktop apps compatibility (emulate mouse
+      // click)
+      wl_seat_send_pointer_enter(seat_impl_copy, target_surface->resource,
+                                 wl_seat_get_serial(seat_impl_copy), x, y);
+      wl_seat_send_pointer_frame(seat_impl_copy);
 
-    wl_seat_send_pointer_button(seat_impl, wl_seat_get_serial(seat_impl),
-                                getWaylandTime(), 272, 1); // BTN_LEFT down
-    wl_seat_send_pointer_frame(seat_impl);
+      // Send explicit motion to ensure client updates cursor position before
+      // click
+      wl_seat_send_pointer_motion(seat_impl_copy, getWaylandTime(), x, y);
+      wl_seat_send_pointer_frame(seat_impl_copy);
+
+      wl_seat_send_pointer_button(seat_impl_copy,
+                                  wl_seat_get_serial(seat_impl_copy),
+                                  getWaylandTime(), 272, 1); // BTN_LEFT down
+      wl_seat_send_pointer_frame(seat_impl_copy);
+    }];
 
     NSLog(@"📱 Touch down at (%.1f, %.1f) on surface %p", location.x,
           location.y, (void *)surface);
@@ -497,14 +582,21 @@ static uint32_t getWaylandTime(void) {
     wl_fixed_t x = wl_fixed_from_double(location.x * scale);
     wl_fixed_t y = wl_fixed_from_double(location.y * scale);
 
-    wl_seat_send_touch_motion(seat_impl,
-                              getWaylandTime(), // timestamp
-                              (int32_t)(intptr_t)touch, x, y);
-    wl_seat_send_touch_frame(seat_impl); // REQUIRED
+    // Dispatch touch motion to event thread
+    struct wl_seat_impl *seat_impl_copy = seat_impl;
+    int32_t touch_id = (int32_t)(intptr_t)touch;
+    WawonaCompositor *compositor = (WawonaCompositor *)_compositor;
 
-    // Send pointer motion
-    wl_seat_send_pointer_motion(seat_impl, getWaylandTime(), x, y);
-    wl_seat_send_pointer_frame(seat_impl);
+    [compositor dispatchToEventThread:^{
+      wl_seat_send_touch_motion(seat_impl_copy,
+                                getWaylandTime(), // timestamp
+                                touch_id, x, y);
+      wl_seat_send_touch_frame(seat_impl_copy); // REQUIRED
+
+      // Send pointer motion
+      wl_seat_send_pointer_motion(seat_impl_copy, getWaylandTime(), x, y);
+      wl_seat_send_pointer_frame(seat_impl_copy);
+    }];
 
     // Reduce log spam for motion
     // NSLog(@"📱 Touch motion at (%.1f, %.1f)", location.x, location.y);
@@ -514,15 +606,23 @@ static uint32_t getWaylandTime(void) {
 - (void)sendTouchUp:(CGPoint)location touch:(UITouch *)touch {
   if (_seat) {
     struct wl_seat_impl *seat_impl = _seat;
-    wl_seat_send_touch_up(seat_impl, wl_seat_get_serial(seat_impl),
-                          getWaylandTime(), // timestamp
-                          (int32_t)(intptr_t)touch);
-    wl_seat_send_touch_frame(seat_impl); // REQUIRED
+    // Dispatch touch up to event thread
+    struct wl_seat_impl *seat_impl_copy = seat_impl;
+    int32_t touch_id = (int32_t)(intptr_t)touch;
+    WawonaCompositor *compositor = (WawonaCompositor *)_compositor;
 
-    // Send pointer button up
-    wl_seat_send_pointer_button(seat_impl, wl_seat_get_serial(seat_impl),
-                                getWaylandTime(), 272, 0); // BTN_LEFT up
-    wl_seat_send_pointer_frame(seat_impl);
+    [compositor dispatchToEventThread:^{
+      wl_seat_send_touch_up(seat_impl_copy, wl_seat_get_serial(seat_impl_copy),
+                            getWaylandTime(), // timestamp
+                            touch_id);
+      wl_seat_send_touch_frame(seat_impl_copy); // REQUIRED
+
+      // Send pointer button up
+      wl_seat_send_pointer_button(seat_impl_copy,
+                                  wl_seat_get_serial(seat_impl_copy),
+                                  getWaylandTime(), 272, 0); // BTN_LEFT up
+      wl_seat_send_pointer_frame(seat_impl_copy);
+    }];
 
     NSLog(@"📱 Touch up at (%.1f, %.1f)", location.x, location.y);
   }
@@ -531,8 +631,14 @@ static uint32_t getWaylandTime(void) {
 - (void)sendTouchCancel:(UITouch *)touch {
   if (_seat) {
     struct wl_seat_impl *seat_impl = _seat;
-    wl_seat_send_touch_cancel(seat_impl);
-    wl_seat_send_touch_frame(seat_impl); // REQUIRED
+    WawonaCompositor *compositor = (WawonaCompositor *)_compositor;
+
+    // Dispatch touch cancel to event thread
+    [compositor dispatchToEventThread:^{
+      wl_seat_send_touch_cancel(seat_impl);
+      wl_seat_send_touch_frame(seat_impl); // REQUIRED
+    }];
+
     NSLog(@"📱 Touch cancelled");
   }
 }
@@ -564,6 +670,12 @@ static uint32_t getWaylandTime(void) {
 
 #if !TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
 - (void)handleMouseEvent:(NSEvent *)event {
+  NSEventType type = [event type];
+  if (type == NSEventTypeLeftMouseDown || type == NSEventTypeRightMouseDown ||
+      type == NSEventTypeOtherMouseDown) {
+    self.lastMouseDownEvent = event;
+  }
+
   NSLog(@"[INPUT] handleMouseEvent called: type=%lu, locationInWindow=(%.1f, "
         @"%.1f)",
         (unsigned long)[event type], [event locationInWindow].x,
@@ -597,11 +709,10 @@ static uint32_t getWaylandTime(void) {
   NSPoint locationInView =
       [_window.contentView convertPoint:locationInWindow fromView:nil];
 
-  // Convert to pixel coordinates (Wayland uses pixels, not points)
-  CGFloat scale = _window.backingScaleFactor;
-  CGFloat viewHeight = _window.contentView.bounds.size.height;
-  double window_x = locationInView.x * scale;
-  double window_y = (viewHeight - locationInView.y) * scale;
+  // Use logical coordinates (points). Wayland clients expect logical units.
+  // If we send pixels on HiDPI, clients will see double coordinates.
+  double window_x = locationInView.x;
+  double window_y = locationInView.y;
 
   NSEventType eventType = [event type];
   struct timespec ts;
@@ -623,12 +734,38 @@ static uint32_t getWaylandTime(void) {
         (void *)surface, locationInView.x, locationInView.y, surface->x,
         surface->y, surface->width, surface->height);
 
-  // CRITICAL: Convert window coordinates to surface-local coordinates
+  // CRITICAL: Convert window coordinates to surface-local coordinates.
   // Wayland protocol requires motion/enter events to use surface-local
-  // coordinates Surface position is in pixels, so we subtract surface position
-  // from window position
-  double surface_x = window_x - surface->x;
-  double surface_y = window_y - surface->y;
+  // coordinates (buffer-relative).
+  double surface_x = window_x;
+  double surface_y = window_y;
+
+  if (surface->parent == NULL) {
+    // Root surface: window-local (0,0) is geometry (0,0).
+    // Add geometry offset to get buffer-local coordinates for the client.
+    struct xdg_toplevel_impl *toplevel =
+        xdg_surface_get_toplevel_from_wl_surface(surface);
+    if (toplevel && toplevel->xdg_surface &&
+        toplevel->xdg_surface->has_geometry) {
+      surface_x += toplevel->xdg_surface->geometry_x;
+      surface_y += toplevel->xdg_surface->geometry_y;
+    }
+  } else {
+    // Subsurface: Position is relative to parent buffer origin.
+    // SurfaceRenderer positions it relative to parent geometry as (surface->x -
+    // pgx). We subtract this layer offset from the window-local coordinate to
+    // get subsurface-local coordinates.
+    int32_t pgx = 0, pgy = 0;
+    struct xdg_toplevel_impl *parentToplevel =
+        xdg_surface_get_toplevel_from_wl_surface(surface->parent);
+    if (parentToplevel && parentToplevel->xdg_surface &&
+        parentToplevel->xdg_surface->has_geometry) {
+      pgx = parentToplevel->xdg_surface->geometry_x;
+      pgy = parentToplevel->xdg_surface->geometry_y;
+    }
+    surface_x -= (surface->x - pgx);
+    surface_y -= (surface->y - pgy);
+  }
 
   // Ensure coordinates are non-negative (clamp to surface bounds)
   if (surface_x < 0)
@@ -648,9 +785,17 @@ static uint32_t getWaylandTime(void) {
   if (!self.lastPointerSurface && current_surface &&
       current_surface->resource && _seat->pointer_resource) {
     uint32_t serial = wl_seat_get_serial(_seat);
-    wl_seat_send_pointer_enter(_seat, current_surface->resource, serial,
-                               surface_x, surface_y);
-    wl_seat_send_pointer_frame(_seat);
+    struct wl_surface_impl *target_surface = current_surface;
+    struct wl_seat_impl *seat_impl = _seat;
+
+    // Dispatch pointer enter to event thread
+    WawonaCompositor *compositor = (WawonaCompositor *)_compositor;
+    [compositor dispatchToEventThread:^{
+      wl_seat_send_pointer_enter(seat_impl, target_surface->resource, serial,
+                                 surface_x, surface_y);
+      wl_seat_send_pointer_frame(seat_impl);
+    }];
+
     NSLog(@"[INPUT] Pointer entered surface %p at surface-local (%.1f, %.1f) "
           @"[window: (%.1f, %.1f), surface pos: (%d, %d)]",
           (void *)current_surface, surface_x, surface_y, window_x, window_y,
@@ -667,9 +812,16 @@ static uint32_t getWaylandTime(void) {
     if (self.lastPointerSurface && self.lastPointerSurface->resource &&
         _seat->pointer_resource) {
       uint32_t serial = wl_seat_get_serial(_seat);
-      wl_seat_send_pointer_leave(_seat, self.lastPointerSurface->resource,
-                                 serial);
-      wl_seat_send_pointer_frame(_seat);
+      struct wl_surface_impl *old_surface = self.lastPointerSurface;
+      struct wl_seat_impl *seat_impl = _seat;
+
+      // Dispatch pointer leave to event thread
+      WawonaCompositor *compositor = (WawonaCompositor *)_compositor;
+      [compositor dispatchToEventThread:^{
+        wl_seat_send_pointer_leave(seat_impl, old_surface->resource, serial);
+        wl_seat_send_pointer_frame(seat_impl);
+      }];
+
       NSLog(@"[INPUT] Pointer left surface %p",
             (void *)self.lastPointerSurface);
     }
@@ -677,9 +829,17 @@ static uint32_t getWaylandTime(void) {
     if (current_surface && current_surface->resource &&
         _seat->pointer_resource) {
       uint32_t serial = wl_seat_get_serial(_seat);
-      wl_seat_send_pointer_enter(_seat, current_surface->resource, serial,
-                                 surface_x, surface_y);
-      wl_seat_send_pointer_frame(_seat);
+      struct wl_surface_impl *new_surface = current_surface;
+      struct wl_seat_impl *seat_impl = _seat;
+
+      // Dispatch pointer enter to event thread
+      WawonaCompositor *compositor = (WawonaCompositor *)_compositor;
+      [compositor dispatchToEventThread:^{
+        wl_seat_send_pointer_enter(seat_impl, new_surface->resource, serial,
+                                   surface_x, surface_y);
+        wl_seat_send_pointer_frame(seat_impl);
+      }];
+
       NSLog(@"[INPUT] Pointer entered surface %p at surface-local (%.1f, %.1f) "
             @"[window: (%.1f, %.1f)]",
             (void *)current_surface, surface_x, surface_y, window_x, window_y);
@@ -705,26 +865,42 @@ static uint32_t getWaylandTime(void) {
         wl_resource_get_client(_seat->keyboard_resource) &&
         wl_resource_get_client(self.lastKeyboardSurface->resource)) {
       uint32_t serial = wl_seat_get_serial(_seat);
-      wl_seat_send_keyboard_leave(_seat, self.lastKeyboardSurface->resource,
-                                  serial);
+      struct wl_surface_impl *old_keyboard_surface = self.lastKeyboardSurface;
+      struct wl_seat_impl *seat_impl = _seat;
+
+      // Dispatch keyboard leave to event thread
+      WawonaCompositor *compositor = (WawonaCompositor *)_compositor;
+      [compositor dispatchToEventThread:^{
+        wl_seat_send_keyboard_leave(seat_impl, old_keyboard_surface->resource,
+                                    serial);
+      }];
+
       NSLog(@"[INPUT] Keyboard left surface %p",
             (void *)self.lastKeyboardSurface);
     }
-
     // Enter new surface
     if (current_surface && current_surface->resource &&
         _seat->keyboard_resource &&
         wl_resource_get_client(_seat->keyboard_resource) &&
         wl_resource_get_client(current_surface->resource)) {
       uint32_t serial = wl_seat_get_serial(_seat);
-      // Create empty keys array for keyboard enter (no pressed keys initially)
-      struct wl_array keys;
-      wl_array_init(&keys);
-      wl_seat_send_keyboard_enter(_seat, current_surface->resource, serial,
-                                  &keys);
-      wl_array_release(&keys);
-      // Send current modifiers after enter
-      wl_seat_send_keyboard_modifiers(_seat, serial);
+      struct wl_surface_impl *new_keyboard_surface = current_surface;
+      struct wl_seat_impl *seat_impl = _seat;
+
+      // Dispatch keyboard enter to event thread
+      WawonaCompositor *compositor = (WawonaCompositor *)_compositor;
+      [compositor dispatchToEventThread:^{
+        // Create empty keys array for keyboard enter (no pressed keys
+        // initially)
+        struct wl_array keys;
+        wl_array_init(&keys);
+        wl_seat_send_keyboard_enter(seat_impl, new_keyboard_surface->resource,
+                                    serial, &keys);
+        wl_array_release(&keys);
+        // Send current modifiers after enter
+        wl_seat_send_keyboard_modifiers(seat_impl, serial);
+      }];
+
       NSLog(@"[INPUT] Keyboard entered surface %p", (void *)current_surface);
     }
     self.lastKeyboardSurface = current_surface;
@@ -740,8 +916,14 @@ static uint32_t getWaylandTime(void) {
           @"%.1f)] - pointer_resource=%p",
           surface_x, surface_y, window_x, window_y,
           (void *)_seat->pointer_resource);
-    wl_seat_send_pointer_motion(_seat, time, surface_x, surface_y);
-    wl_seat_send_pointer_frame(_seat);
+
+    // Dispatch pointer motion to event thread
+    struct wl_seat_impl *seat_impl = _seat;
+    WawonaCompositor *compositor = (WawonaCompositor *)_compositor;
+    [compositor dispatchToEventThread:^{
+      wl_seat_send_pointer_motion(seat_impl, time, surface_x, surface_y);
+      wl_seat_send_pointer_frame(seat_impl);
+    }];
 
     // Flush mouse events immediately so clients receive them right away
     if (_compositor && [_compositor respondsToSelector:@selector
@@ -761,9 +943,15 @@ static uint32_t getWaylandTime(void) {
           @"[window: (%.1f, %.1f)] - pointer_resource=%p",
           button, surface_x, surface_y, window_x, window_y,
           (void *)_seat->pointer_resource);
-    wl_seat_send_pointer_button(_seat, serial, time, button,
-                                WL_POINTER_BUTTON_STATE_PRESSED);
-    wl_seat_send_pointer_frame(_seat);
+
+    // Dispatch pointer button down to event thread
+    struct wl_seat_impl *seat_impl = _seat;
+    WawonaCompositor *compositor = (WawonaCompositor *)_compositor;
+    [compositor dispatchToEventThread:^{
+      wl_seat_send_pointer_button(seat_impl, serial, time, button,
+                                  WL_POINTER_BUTTON_STATE_PRESSED);
+      wl_seat_send_pointer_frame(seat_impl);
+    }];
 
     // Flush mouse events immediately so clients receive them right away
     if (_compositor && [_compositor respondsToSelector:@selector
@@ -782,9 +970,15 @@ static uint32_t getWaylandTime(void) {
     NSLog(@"[INPUT] Mouse button up: button=%u at surface-local (%.1f, %.1f) "
           @"[window: (%.1f, %.1f)]",
           button, surface_x, surface_y, window_x, window_y);
-    wl_seat_send_pointer_button(_seat, serial, time, button,
-                                WL_POINTER_BUTTON_STATE_RELEASED);
-    wl_seat_send_pointer_frame(_seat);
+
+    // Dispatch pointer button up to event thread
+    struct wl_seat_impl *seat_impl = _seat;
+    WawonaCompositor *compositor = (WawonaCompositor *)_compositor;
+    [compositor dispatchToEventThread:^{
+      wl_seat_send_pointer_button(seat_impl, serial, time, button,
+                                  WL_POINTER_BUTTON_STATE_RELEASED);
+      wl_seat_send_pointer_frame(seat_impl);
+    }];
 
     // Flush mouse events immediately so clients receive them right away
     if (_compositor && [_compositor respondsToSelector:@selector
@@ -801,10 +995,17 @@ static uint32_t getWaylandTime(void) {
       // Send scroll event (axis event)
       if (wl_resource_get_version(_seat->pointer_resource) >=
           WL_POINTER_AXIS_SINCE_VERSION) {
-        wl_pointer_send_axis(_seat->pointer_resource, time,
-                             WL_POINTER_AXIS_VERTICAL_SCROLL,
-                             wl_fixed_from_double(deltaY * 10));
-        wl_seat_send_pointer_frame(_seat);
+        struct wl_seat_impl *seat_impl = _seat;
+        double scroll_delta = deltaY;
+        WawonaCompositor *compositor = (WawonaCompositor *)_compositor;
+
+        // Dispatch scroll event to event thread
+        [compositor dispatchToEventThread:^{
+          wl_pointer_send_axis(seat_impl->pointer_resource, time,
+                               WL_POINTER_AXIS_VERTICAL_SCROLL,
+                               wl_fixed_from_double(scroll_delta * 10));
+          wl_seat_send_pointer_frame(seat_impl);
+        }];
       }
 
       // Flush scroll events immediately so clients receive them right away
