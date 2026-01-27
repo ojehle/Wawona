@@ -35,95 +35,10 @@ let
     "video"
   ];
 
-  # Generate updated Cargo.lock that includes bindgen
-  updatedCargoLockFile =
-    let
-      modifiedSrcForLock =
-        pkgs.runCommand "waypipe-src-with-bindgen-for-lock"
-          {
-            src = fetchSource waypipeSource;
-          }
-          ''
-            mkdir -p $out
-            if [ -d "$src" ]; then 
-              cp -r "$src"/. "$out/"
-            else 
-              tar -xf "$src" -C "$out" --strip-components=1
-            fi
-            chmod -R u+w $out
-            cd $out
-
-            if [ -f "wrap-ffmpeg/Cargo.toml" ] && ! grep -q "bindgen" wrap-ffmpeg/Cargo.toml; then
-              if grep -q "\[build-dependencies\]" wrap-ffmpeg/Cargo.toml; then
-                sed -i '/\[build-dependencies\]/a\bindgen = "0.69"' wrap-ffmpeg/Cargo.toml
-              else
-                echo "" >> wrap-ffmpeg/Cargo.toml; echo "[build-dependencies]" >> wrap-ffmpeg/Cargo.toml; echo 'bindgen = "0.69"' >> wrap-ffmpeg/Cargo.toml
-              fi
-            fi
-
-            if [ -f "wrap-ffmpeg/Cargo.toml" ] && ! grep -q "pkg-config" wrap-ffmpeg/Cargo.toml; then
-              if grep -q "\[build-dependencies\]" wrap-ffmpeg/Cargo.toml; then
-                sed -i '/\[build-dependencies\]/a\pkg-config = "0.3"' wrap-ffmpeg/Cargo.toml
-              else
-                echo "" >> wrap-ffmpeg/Cargo.toml; echo "[build-dependencies]" >> wrap-ffmpeg/Cargo.toml; echo 'pkg-config = "0.3"' >> wrap-ffmpeg/Cargo.toml
-              fi
-            fi
-
-            # Add bindgen and pkg-config to wrap-lz4
-            if [ -f "wrap-lz4/Cargo.toml" ] && ! grep -q "bindgen" wrap-lz4/Cargo.toml; then
-              if grep -q "\[build-dependencies\]" wrap-lz4/Cargo.toml; then
-                sed -i '/\[build-dependencies\]/a\bindgen = "0.69"' wrap-lz4/Cargo.toml
-              else
-                echo "" >> wrap-lz4/Cargo.toml; echo "[build-dependencies]" >> wrap-lz4/Cargo.toml; echo 'bindgen = "0.69"' >> wrap-lz4/Cargo.toml
-              fi
-            fi
-            if [ -f "wrap-lz4/Cargo.toml" ] && ! grep -q "pkg-config" wrap-lz4/Cargo.toml; then
-              if grep -q "\[build-dependencies\]" wrap-lz4/Cargo.toml; then
-                sed -i '/\[build-dependencies\]/a\pkg-config = "0.3"' wrap-lz4/Cargo.toml
-              else
-                echo "" >> wrap-lz4/Cargo.toml; echo "[build-dependencies]" >> wrap-lz4/Cargo.toml; echo 'pkg-config = "0.3"' >> wrap-lz4/Cargo.toml
-              fi
-            fi
-
-            # Add bindgen and pkg-config to wrap-zstd
-            if [ -f "wrap-zstd/Cargo.toml" ] && ! grep -q "bindgen" wrap-zstd/Cargo.toml; then
-              if grep -q "\[build-dependencies\]" wrap-zstd/Cargo.toml; then
-                sed -i '/\[build-dependencies\]/a\bindgen = "0.69"' wrap-zstd/Cargo.toml
-              else
-                echo "" >> wrap-zstd/Cargo.toml; echo "[build-dependencies]" >> wrap-zstd/Cargo.toml; echo 'bindgen = "0.69"' >> wrap-zstd/Cargo.toml
-              fi
-            fi
-            if [ -f "wrap-zstd/Cargo.toml" ] && ! grep -q "pkg-config" wrap-zstd/Cargo.toml; then
-              if grep -q "\[build-dependencies\]" wrap-zstd/Cargo.toml; then
-                sed -i '/\[build-dependencies\]/a\pkg-config = "0.3"' wrap-zstd/Cargo.toml
-              else
-                echo "" >> wrap-zstd/Cargo.toml; echo "[build-dependencies]" >> wrap-zstd/Cargo.toml; echo 'pkg-config = "0.3"' >> wrap-zstd/Cargo.toml
-              fi
-            fi
-          '';
-      updatedCargoLock =
-        pkgs.runCommand "waypipe-cargo-lock-updated"
-          {
-            nativeBuildInputs = with pkgs; [
-              cargo
-              rustc
-              cacert
-            ];
-            modifiedSrc = modifiedSrcForLock;
-            __noChroot = true;
-          }
-          ''
-            export SSL_CERT_FILE="${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
-            export CARGO_HOME=$(mktemp -d)
-            cp -r "$modifiedSrc" source
-            chmod -R u+w source
-            cd source
-
-            cargo update --manifest-path Cargo.toml -p bindgen 2>&1 || cargo generate-lockfile --manifest-path Cargo.toml 2>&1
-            cp Cargo.lock $out
-          '';
-    in
-    updatedCargoLock;
+  # Use pre-generated Cargo.lock that includes bindgen for reproducible builds
+  # This file was generated once and committed to the repository to avoid
+  # network access during builds (which breaks Nix reproducibility)
+  updatedCargoLockFile = ./Cargo.lock.patched;
 
   # Define custom rust platform with Android target to avoid pkgsCross bootstrap issues
   rustToolchain = pkgs.rust-bin.stable.latest.default.override {

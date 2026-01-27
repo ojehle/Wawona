@@ -215,7 +215,7 @@ let
       else if name == "libffi" then
         (import ./deps/libffi/macos.nix) { inherit lib pkgs common; }
       else if name == "libxml2" then
-        (import ./deps/libxml2/macos.nix) { inherit lib pkgs common; }
+        pkgs.callPackage ./deps/libxml2/macos.nix { }
       else if name == "epoll-shim" then
         (import ./deps/epoll-shim/macos.nix) {
           inherit lib pkgs common;
@@ -244,6 +244,16 @@ let
       else if name == "sshpass" then
         (import ./deps/sshpass/macos.nix) {
           inherit lib pkgs common;
+        }
+      else if name == "xkbcommon" then
+        (import ./deps/xkbcommon/macos.nix) {
+          inherit lib pkgs common;
+          buildModule = macosModuleSelf;
+        }
+      else if name == "pixman" then
+        (import ./deps/pixman/macos.nix) {
+          inherit lib pkgs common;
+          buildModule = macosModuleSelf;
         }
       # Font stack dependencies for foot terminal
       else if name == "tllist" then
@@ -341,6 +351,9 @@ let
             "spirv-tools" = macosModule.buildForMacOS "spirv-tools" { };
             "spirv-llvm-translator" = macosModule.buildForMacOS "spirv-llvm-translator" { };
             sshpass = macosModule.buildForMacOS "sshpass" { };
+            # Rendering and input dependencies
+            xkbcommon = macosModule.buildForMacOS "xkbcommon" { };
+            pixman = macosModule.buildForMacOS "pixman" { };
             # Font stack for foot terminal
             tllist = macosModule.buildForMacOS "tllist" { };
             freetype = macosModule.buildForMacOS "freetype" { };

@@ -1,8 +1,9 @@
 #import "input_handler.h"
 #include "../compositor_implementations/xdg_shell.h"
-#import "../core/WawonaCompositor.h" // For wl_get_all_surfaces and wl_surface_impl
-#import "../core/WawonaSurfaceManager.h"
 #import "../input/wayland_seat.h"
+#import "../logging/WawonaLog.h"
+#import "../platform/macos/WawonaCompositor.h" // For wl_get_all_surfaces and wl_surface_impl
+#import "../platform/macos/WawonaSurfaceManager.h"
 #include <stdint.h>
 #include <time.h>
 #include <wayland-server-protocol.h>
@@ -321,7 +322,8 @@ static uint32_t getWaylandTime(void) {
     // mouse
     seat_impl->capabilities =
         WL_SEAT_CAPABILITY_TOUCH | WL_SEAT_CAPABILITY_POINTER;
-    NSLog(@"✅ iOS input handling configured (Touch + Pointer emulation)");
+    WLog(@"INPUT",
+         @"iOS input handling configured (Touch + Pointer emulation)");
   }
   // Use direct touch handling in CompositorView instead of gesture recognizers
   // [self setupGestureRecognizers];
@@ -354,7 +356,7 @@ static uint32_t getWaylandTime(void) {
               action:@selector(handlePinchGesture:)];
   [_window addGestureRecognizer:pinchGesture];
 
-  NSLog(@"✅ iOS gesture recognizers configured");
+  WLog(@"INPUT", @"iOS gesture recognizers configured");
 }
 
 - (void)handleTouchEvent:(UIEvent *)event {
@@ -472,24 +474,29 @@ pick_surface_recursive(struct wl_surface_impl *surface, double px, double py,
   double py = (double)location.y;
 
   // CRITICAL: Offset coordinates for CSD shadow margin
+  // With separate Shadow Window, the Main Window coordinate space is EXACTLY
+  // the surface space. No offsets needed anymore.
+  /*
   if (toplevel && toplevel->decoration_mode == 1) {
-    px -= kCSDShadowMargin;
-    py -= kCSDShadowMargin;
+    CGFloat expansionPerSide = kCSDShadowMargin * 2.0;
+    px -= expansionPerSide;
+    py -= expansionPerSide;
   }
+  */
 
   // Boundary check against logical window geometry with leeway for resize
-  // handles. We allow clicks within 10px of the edge to be captured for CSD
-  // resize handles.
-  CGFloat leeway = 10.0;
+  // handles. We allow clicks within 20px of the edge to be captured for CSD
+  // resize handles (consistent with WawonaSurfaceManager.m's threshold).
+  CGFloat leeway = 20.0;
   if (px < -leeway || px >= (double)gw + leeway || py < -leeway ||
       py >= (double)gh + leeway) {
     // If we are in CSD mode, ignore clicks in the deep shadow area
     if (toplevel->decoration_mode == 1) {
       // Use NSLog for debugging shadow clicks
-      NSLog(@"[INPUT] 🛡️ Deep shadow area click (passed through)! px=%.1f "
-            @"py=%.1f, "
-            @"geometry=(%d,%d %dx%d)",
-            px, py, gx, gy, gw, gh);
+      WLog(@"INPUT",
+           @"Deep shadow area click (passed through)! px=%.1f py=%.1f, "
+           @"geometry=(%d,%d %dx%d)",
+           px, py, gx, gy, gw, gh);
       return NULL;
     }
   }
@@ -498,8 +505,8 @@ pick_surface_recursive(struct wl_surface_impl *surface, double px, double py,
   struct wl_surface_impl *result =
       pick_surface_recursive(root_surface, px, py, 0, 0);
   if (result) {
-    NSLog(@"[INPUT] 🎯 Picked surface %p at (%.1f, %.1f)", (void *)result, px,
-          py);
+    WLog(@"INPUT", @"Picked surface %p at (%.1f, %.1f)", (void *)result, px,
+         py);
   }
   return result;
 }
@@ -512,8 +519,9 @@ pick_surface_recursive(struct wl_surface_impl *surface, double px, double py,
 
     if (!surface || !surface->resource) {
       // No surface found - can't send event
-      NSLog(@"⚠️ No surface found at touch location (%.1f, %.1f)", location.x,
-            location.y);
+      WLog(@"INPUT",
+           @"Warning: No surface found at touch location (%.1f, %.1f)",
+           location.x, location.y);
       return;
     }
 
@@ -535,10 +543,11 @@ pick_surface_recursive(struct wl_surface_impl *surface, double px, double py,
     wl_fixed_t x = wl_fixed_from_double(location.x * scale);
     wl_fixed_t y = wl_fixed_from_double(location.y * scale);
 
-    NSLog(@"📱 Touch down: view coords (%.1f, %.1f) points, scale %.0fx = "
-          @"Wayland (%.1f, %.1f) pixels",
-          location.x, location.y, scale, wl_fixed_to_double(x),
-          wl_fixed_to_double(y));
+    WLog(@"INPUT",
+         @"Touch down: view coords (%.1f, %.1f) points, scale %.0fx = Wayland "
+         @"(%.1f, %.1f) pixels",
+         location.x, location.y, scale, wl_fixed_to_double(x),
+         wl_fixed_to_double(y));
 
     // Dispatch touch down to event thread
     struct wl_surface_impl *target_surface = surface;
@@ -571,8 +580,8 @@ pick_surface_recursive(struct wl_surface_impl *surface, double px, double py,
       wl_seat_send_pointer_frame(seat_impl_copy);
     }];
 
-    NSLog(@"📱 Touch down at (%.1f, %.1f) on surface %p", location.x,
-          location.y, (void *)surface);
+    WLog(@"INPUT", @"Touch down at (%.1f, %.1f) on surface %p", location.x,
+         location.y, (void *)surface);
   }
 }
 
@@ -635,7 +644,7 @@ pick_surface_recursive(struct wl_surface_impl *surface, double px, double py,
       wl_seat_send_pointer_frame(seat_impl_copy);
     }];
 
-    NSLog(@"📱 Touch up at (%.1f, %.1f)", location.x, location.y);
+    WLog(@"INPUT", @"Touch up at (%.1f, %.1f)", location.x, location.y);
   }
 }
 
@@ -650,14 +659,14 @@ pick_surface_recursive(struct wl_surface_impl *surface, double px, double py,
       wl_seat_send_touch_frame(seat_impl); // REQUIRED
     }];
 
-    NSLog(@"📱 Touch cancelled");
+    WLog(@"INPUT", @"Touch cancelled");
   }
 }
 
 - (void)handleTapGesture:(UITapGestureRecognizer *)gesture {
   UIView *view = self.targetView ? self.targetView : _window;
   CGPoint location = [gesture locationInView:view];
-  NSLog(@"📱 Tap gesture at (%.1f, %.1f)", location.x, location.y);
+  WLog(@"INPUT", @"Tap gesture at (%.1f, %.1f)", location.x, location.y);
   if (_seat) {
     UITouch *syntheticTouch = (__bridge UITouch *)((void *)gesture.hash);
     [self sendTouchDown:location touch:syntheticTouch];
@@ -675,7 +684,7 @@ pick_surface_recursive(struct wl_surface_impl *surface, double px, double py,
 
 - (void)handlePinchGesture:(UIPinchGestureRecognizer *)gesture {
   // TODO: Implement pinch axis events
-  NSLog(@"📱 Pinch gesture: scale %.2f", gesture.scale);
+  WLog(@"INPUT", @"Pinch gesture: scale %.2f", gesture.scale);
 }
 #endif
 
@@ -687,13 +696,13 @@ pick_surface_recursive(struct wl_surface_impl *surface, double px, double py,
     self.lastMouseDownEvent = event;
   }
 
-  NSLog(@"[INPUT] handleMouseEvent called: type=%lu, locationInWindow=(%.1f, "
-        @"%.1f)",
-        (unsigned long)[event type], [event locationInWindow].x,
-        [event locationInWindow].y);
+  WLog(@"INPUT",
+       @"handleMouseEvent called: type=%lu, locationInWindow=(%.1f, %.1f)",
+       (unsigned long)[event type], [event locationInWindow].x,
+       [event locationInWindow].y);
 
   if (!_seat) {
-    NSLog(@"[INPUT] ⚠️ No seat available for mouse event");
+    WLog(@"INPUT", @"Warning: No seat available for mouse event");
     return;
   }
 
@@ -703,14 +712,14 @@ pick_surface_recursive(struct wl_surface_impl *surface, double px, double py,
     // if pointer isn't requested yet
     static BOOL logged_warning = NO;
     if (!logged_warning) {
-      NSLog(@"[INPUT] ⚠️ No pointer resource available (client hasn't requested "
-            @"pointer yet)");
-      NSLog(@"[INPUT]   Seat capabilities: 0x%x (KEYBOARD=0x%x, POINTER=0x%x, "
-            @"TOUCH=0x%x)",
-            _seat->capabilities, WL_SEAT_CAPABILITY_KEYBOARD,
-            WL_SEAT_CAPABILITY_POINTER, WL_SEAT_CAPABILITY_TOUCH);
-      NSLog(@"[INPUT]   Mouse events will be sent but may be ignored until "
-            @"client requests pointer");
+      WLog(@"INPUT", @"Warning: No pointer resource available (client hasn't "
+                     @"requested pointer yet)");
+      WLog(@"INPUT",
+           @"Seat capabilities: 0x%x (KEYBOARD=0x%x, POINTER=0x%x, TOUCH=0x%x)",
+           _seat->capabilities, WL_SEAT_CAPABILITY_KEYBOARD,
+           WL_SEAT_CAPABILITY_POINTER, WL_SEAT_CAPABILITY_TOUCH);
+      WLog(@"INPUT", @"Mouse events will be sent but may be ignored until "
+                     @"client requests pointer");
       logged_warning = YES;
     }
     // Continue - the send functions check for pointer_resource internally
@@ -726,21 +735,15 @@ pick_surface_recursive(struct wl_surface_impl *surface, double px, double py,
   double window_y = locationInView.y;
 
   // CRITICAL: Offset coordinates for CSD shadow margin
-  struct xdg_toplevel_impl *toplevel =
-      xdg_surface_get_toplevel_from_wl_surface(_seat->focused_surface);
-  if (!toplevel && _window) {
-    WawonaCompositor *compositor = (WawonaCompositor *)_compositor;
-    NSValue *toplevelValue = [compositor.windowToToplevelMap
-        objectForKey:[NSValue valueWithPointer:(__bridge void *)_window]];
-    if (toplevelValue) {
-      toplevel = [toplevelValue pointerValue];
-    }
-  }
-
+  // With separate Shadow Window, the Main Window coordinate space is EXACTLY
+  // the surface space. No offsets needed anymore.
+  /*
   if (toplevel && toplevel->decoration_mode == 1) {
-    window_x -= kCSDShadowMargin;
-    window_y -= kCSDShadowMargin;
+    CGFloat expansionPerSide = kCSDShadowMargin * 2.0;
+    window_x -= expansionPerSide;
+    window_y -= expansionPerSide;
   }
+  */
 
   NSEventType eventType = [event type];
   struct timespec ts;
@@ -751,16 +754,18 @@ pick_surface_recursive(struct wl_surface_impl *surface, double px, double py,
   struct wl_surface_impl *surface = [self pickSurfaceAt:locationInView];
 
   if (!surface || !surface->resource) {
-    NSLog(@"[INPUT] ⚠️ No surface found at (%.1f, %.1f) - cannot send mouse "
-          @"events",
-          locationInView.x, locationInView.y);
+    WLog(
+        @"INPUT",
+        @"Warning: No surface found at (%.1f, %.1f) - cannot send mouse events",
+        locationInView.x, locationInView.y);
     return;
   }
 
-  NSLog(@"[INPUT] Found surface %p at window (%.1f, %.1f), surface pos=(%d, "
-        @"%d), size=(%d, %d)",
-        (void *)surface, locationInView.x, locationInView.y, surface->x,
-        surface->y, surface->width, surface->height);
+  WLog(@"INPUT",
+       @"Found surface %p at window (%.1f, %.1f), surface pos=(%d, %d), "
+       @"size=(%d, %d)",
+       (void *)surface, locationInView.x, locationInView.y, surface->x,
+       surface->y, surface->width, surface->height);
 
   // CRITICAL: Convert window coordinates to surface-local coordinates.
   // Wayland protocol requires motion/enter events to use surface-local
@@ -824,10 +829,11 @@ pick_surface_recursive(struct wl_surface_impl *surface, double px, double py,
       wl_seat_send_pointer_frame(seat_impl);
     }];
 
-    NSLog(@"[INPUT] Pointer entered surface %p at surface-local (%.1f, %.1f) "
-          @"[window: (%.1f, %.1f), surface pos: (%d, %d)]",
-          (void *)current_surface, surface_x, surface_y, window_x, window_y,
-          current_surface->x, current_surface->y);
+    WLog(@"INPUT",
+         @"Pointer entered surface %p at surface-local (%.1f, %.1f) [window: "
+         @"(%.1f, %.1f), surface pos: (%d, %d)]",
+         (void *)current_surface, surface_x, surface_y, window_x, window_y,
+         current_surface->x, current_surface->y);
     self.lastPointerSurface = current_surface;
 
     // Flush enter event immediately
@@ -850,8 +856,8 @@ pick_surface_recursive(struct wl_surface_impl *surface, double px, double py,
         wl_seat_send_pointer_frame(seat_impl);
       }];
 
-      NSLog(@"[INPUT] Pointer left surface %p",
-            (void *)self.lastPointerSurface);
+      WLog(@"INPUT", @"Pointer left surface %p",
+           (void *)self.lastPointerSurface);
     }
     // Enter new surface
     if (current_surface && current_surface->resource &&
@@ -868,9 +874,10 @@ pick_surface_recursive(struct wl_surface_impl *surface, double px, double py,
         wl_seat_send_pointer_frame(seat_impl);
       }];
 
-      NSLog(@"[INPUT] Pointer entered surface %p at surface-local (%.1f, %.1f) "
-            @"[window: (%.1f, %.1f)]",
-            (void *)current_surface, surface_x, surface_y, window_x, window_y);
+      WLog(@"INPUT",
+           @"Pointer entered surface %p at surface-local (%.1f, %.1f) [window: "
+           @"(%.1f, %.1f)]",
+           (void *)current_surface, surface_x, surface_y, window_x, window_y);
     }
     self.lastPointerSurface = current_surface;
 
@@ -903,8 +910,8 @@ pick_surface_recursive(struct wl_surface_impl *surface, double px, double py,
                                     serial);
       }];
 
-      NSLog(@"[INPUT] Keyboard left surface %p",
-            (void *)self.lastKeyboardSurface);
+      WLog(@"INPUT", @"Keyboard left surface %p",
+           (void *)self.lastKeyboardSurface);
     }
     // Enter new surface
     if (current_surface && current_surface->resource &&
@@ -929,7 +936,7 @@ pick_surface_recursive(struct wl_surface_impl *surface, double px, double py,
         wl_seat_send_keyboard_modifiers(seat_impl, serial);
       }];
 
-      NSLog(@"[INPUT] Keyboard entered surface %p", (void *)current_surface);
+      WLog(@"INPUT", @"Keyboard entered surface %p", (void *)current_surface);
     }
     self.lastKeyboardSurface = current_surface;
   }
@@ -940,10 +947,11 @@ pick_surface_recursive(struct wl_surface_impl *surface, double px, double py,
   case NSEventTypeRightMouseDragged:
   case NSEventTypeOtherMouseDragged: {
     // Use surface-local coordinates for motion events
-    NSLog(@"[INPUT] Mouse moved to surface-local (%.1f, %.1f) [window: (%.1f, "
-          @"%.1f)] - pointer_resource=%p",
-          surface_x, surface_y, window_x, window_y,
-          (void *)_seat->pointer_resource);
+    WLog(@"INPUT",
+         @"Mouse moved to surface-local (%.1f, %.1f) [window: (%.1f, %.1f)] - "
+         @"pointer_resource=%p",
+         surface_x, surface_y, window_x, window_y,
+         (void *)_seat->pointer_resource);
 
     // Dispatch pointer motion to event thread
     struct wl_seat_impl *seat_impl = _seat;
@@ -967,10 +975,11 @@ pick_surface_recursive(struct wl_surface_impl *surface, double px, double py,
   case NSEventTypeOtherMouseDown: {
     uint32_t serial = wl_seat_get_serial(_seat);
     uint32_t button = macButtonToWaylandButton(eventType, event);
-    NSLog(@"[INPUT] Mouse button down: button=%u at surface-local (%.1f, %.1f) "
-          @"[window: (%.1f, %.1f)] - pointer_resource=%p",
-          button, surface_x, surface_y, window_x, window_y,
-          (void *)_seat->pointer_resource);
+    WLog(@"INPUT",
+         @"Mouse button down: button=%u at surface-local (%.1f, %.1f) [window: "
+         @"(%.1f, %.1f)] - pointer_resource=%p",
+         button, surface_x, surface_y, window_x, window_y,
+         (void *)_seat->pointer_resource);
 
     // Dispatch pointer button down to event thread
     struct wl_seat_impl *seat_impl = _seat;
@@ -995,9 +1004,10 @@ pick_surface_recursive(struct wl_surface_impl *surface, double px, double py,
   case NSEventTypeOtherMouseUp: {
     uint32_t serial = wl_seat_get_serial(_seat);
     uint32_t button = macButtonToWaylandButton(eventType, event);
-    NSLog(@"[INPUT] Mouse button up: button=%u at surface-local (%.1f, %.1f) "
-          @"[window: (%.1f, %.1f)]",
-          button, surface_x, surface_y, window_x, window_y);
+    WLog(@"INPUT",
+         @"Mouse button up: button=%u at surface-local (%.1f, %.1f) [window: "
+         @"(%.1f, %.1f)]",
+         button, surface_x, surface_y, window_x, window_y);
 
     // Dispatch pointer button up to event thread
     struct wl_seat_impl *seat_impl = _seat;
@@ -1091,13 +1101,13 @@ pick_surface_recursive(struct wl_surface_impl *surface, double px, double py,
 
 - (void)handleKeyboardEvent:(NSEvent *)event {
   if (!_seat) {
-    NSLog(@"[INPUT] ⚠️ No seat available for keyboard event");
+    WLog(@"INPUT", @"Warning: No seat available for keyboard event");
     return;
   }
 
   if (!_seat->keyboard_resource) {
-    NSLog(@"[INPUT] ⚠️ No keyboard resource available (client hasn't requested "
-          @"keyboard)");
+    WLog(@"INPUT", @"Warning: No keyboard resource available (client hasn't "
+                   @"requested keyboard)");
     return;
   }
 
@@ -1113,8 +1123,8 @@ pick_surface_recursive(struct wl_surface_impl *surface, double px, double py,
   NSString *charsIgnoringModifiers = [event charactersIgnoringModifiers];
   uint32_t linuxKeyCode = 0;
 
-  NSLog(@"[INPUT] Keyboard event: type=%lu, keyCode=%u, chars=%@",
-        (unsigned long)eventType, macKeyCode, charsIgnoringModifiers);
+  WLog(@"INPUT", @"Keyboard event: type=%lu, keyCode=%u, chars=%@",
+       (unsigned long)eventType, macKeyCode, charsIgnoringModifiers);
 
   linuxKeyCode = macKeyCodeToLinuxKeyCode(macKeyCode);
 
@@ -1244,8 +1254,8 @@ pick_surface_recursive(struct wl_surface_impl *surface, double px, double py,
         wl_resource_get_client(_seat->keyboard_resource)) {
       wl_seat_send_keyboard_modifiers(_seat, serial);
     } else {
-      NSLog(@"[INPUT] ⚠️ Skipping keyboard modifiers: keyboard resource is "
-            @"invalid");
+      WLog(@"INPUT", @"Warning: Skipping keyboard modifiers: keyboard resource "
+                     @"is invalid");
     }
   }
 
@@ -1272,8 +1282,8 @@ pick_surface_recursive(struct wl_surface_impl *surface, double px, double py,
 
   // Defensive checks to prevent crash
   if (!_seat || !_seat->keyboard_resource) {
-    NSLog(
-        @"[INPUT] ⚠️ Skipping keyboard key: invalid seat or keyboard resource");
+    WLog(@"INPUT",
+         @"Warning: Skipping keyboard key: invalid seat or keyboard resource");
     return;
   }
 
@@ -1287,14 +1297,14 @@ pick_surface_recursive(struct wl_surface_impl *surface, double px, double py,
       // Surface is valid, proceed normally
     } else {
       // Surface is invalid or destroyed, skip this event
-      NSLog(@"[INPUT] ⚠️ Skipping keyboard key: keyboard surface is invalid "
-            @"(likely destroyed)");
+      WLog(@"INPUT", @"Warning: Skipping keyboard key: keyboard surface is "
+                     @"invalid (likely destroyed)");
       return;
     }
   }
 
-  NSLog(@"[INPUT] Sending keyboard key: keyCode=%u, state=%u, serial=%u",
-        linuxKeyCode, state, serial);
+  WLog(@"INPUT", @"Sending keyboard key: keyCode=%u, state=%u, serial=%u",
+       linuxKeyCode, state, serial);
   wl_seat_send_keyboard_key(_seat, serial, time, linuxKeyCode, state);
 
   // Trigger immediate frame callback so client can redraw in response to

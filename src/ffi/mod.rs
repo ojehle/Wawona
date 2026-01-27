@@ -1,0 +1,15 @@
+//! FFI module - Stable API boundary for platform integration
+//! 
+//! This module provides a UniFFI-based API that platforms (macOS, iOS, Android)
+//! use to interact with the Wawona compositor core.
+
+pub mod api;
+pub mod types;
+pub mod errors;
+pub mod callbacks;
+
+// Re-export for convenience
+pub use api::*;
+
+pub use callbacks::*;
+pub mod c_api;

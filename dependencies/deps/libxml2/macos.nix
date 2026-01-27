@@ -1,58 +1,90 @@
 {
   lib,
-  pkgs,
-  common,
+  stdenv,
+  fetchFromGitHub,
+  pkg-config,
+  autoreconfHook,
+  zlib,
+  libiconv,
+  icu,
 }:
 
-let
-  fetchSource = common.fetchSource;
-  xcodeUtils = import ../../../utils/xcode-wrapper.nix { inherit lib pkgs; };
-  libxml2Source = {
-    source = "gitlab-gnome";
+stdenv.mkDerivation rec {
+  pname = "libxml2";
+  version = "2.14.0";
+
+  outputs = [
+    "bin"
+    "dev"
+    "out"
+  ]
+  ++ lib.optional (stdenv.hostPlatform.isStatic && !stdenv.hostPlatform.isDarwin) "static"
+  ++ lib.optionals pythonSupport [ "py" ];
+  
+  outputMan = "bin";
+
+  src = fetchFromGitHub {
     owner = "GNOME";
     repo = "libxml2";
-    rev = "v2.14.0";
-    sha256 = "sha256-SFDNj4QPPqZUGLx4lfaUzHn0G/HhvWWXWCFoekD9lYM=";
+    rev = "v${version}";
+    hash = "sha256-SFDNj4QPPqZUGLx4lfaUzHn0G/HhvWWXWCFoekD9lYM=";
   };
-  src = fetchSource libxml2Source;
-  buildFlags = [ "--without-python" ];
-  patches = [ ];
-in
-pkgs.stdenv.mkDerivation {
-  name = "libxml2-macos";
-  inherit src patches;
-  nativeBuildInputs = with pkgs; [
-    autoconf
-    automake
-    libtool
+
+  # Configuration options
+  pythonSupport = false; 
+  icuSupport = false;
+  zlibSupport = true;
+  enableShared = !stdenv.hostPlatform.isStatic;
+  enableStatic = !enableShared;
+
+  strictDeps = true;
+
+  nativeBuildInputs = [
     pkg-config
+    autoreconfHook
   ];
-  buildInputs = [ ];
-  preConfigure = ''
-    if [ -z "''${XCODE_APP:-}" ]; then
-      XCODE_APP=$(${xcodeUtils.findXcodeScript}/bin/find-xcode || true)
-      if [ -n "$XCODE_APP" ]; then
-        export XCODE_APP
-        export DEVELOPER_DIR="$XCODE_APP/Contents/Developer"
-        export PATH="$DEVELOPER_DIR/usr/bin:$PATH"
-        export SDKROOT="$DEVELOPER_DIR/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"
-      fi
-    fi
-    if [ ! -f ./configure ]; then
-      autoreconf -fi || autogen.sh || true
-    fi
-    export CC="${pkgs.clang}/bin/clang"
-    export CXX="${pkgs.clang}/bin/clang++"
-    export CFLAGS="-isysroot $SDKROOT -mmacosx-version-min=26.0 -fPIC"
-    export CXXFLAGS="-isysroot $SDKROOT -mmacosx-version-min=26.0 -fPIC"
-    export LDFLAGS="-isysroot $SDKROOT -mmacosx-version-min=26.0"
+
+  buildInputs = lib.optionals zlibSupport [ zlib ];
+
+  propagatedBuildInputs = lib.optionals (stdenv.hostPlatform.isDarwin) [
+    libiconv
+  ];
+
+  configureFlags = [
+    "--exec-prefix=${placeholder "dev"}"
+    (lib.enableFeature enableStatic "static")
+    (lib.enableFeature enableShared "shared")
+    (lib.withFeature icuSupport "icu")
+    (lib.withFeature pythonSupport "python")
+    (lib.withFeature false "http") 
+    (lib.withFeature zlibSupport "zlib")
+    (lib.withFeature false "docs")
+  ];
+
+  enableParallelBuilding = true;
+
+  doCheck = (stdenv.hostPlatform == stdenv.buildPlatform) && stdenv.hostPlatform.libc != "musl";
+  
+  preCheck = lib.optionalString stdenv.hostPlatform.isDarwin ''
+    export DYLD_LIBRARY_PATH="$PWD/.libs:$DYLD_LIBRARY_PATH"
   '';
-  configurePhase = ''
-    runHook preConfigure
-    ./configure --prefix=$out --host=aarch64-apple-darwin ${
-      lib.concatMapStringsSep " " (flag: flag) buildFlags
-    }
-    runHook postConfigure
+
+  preConfigure = lib.optionalString (lib.versionAtLeast stdenv.hostPlatform.darwinMinVersion "11") ''
+    MACOSX_DEPLOYMENT_TARGET=10.16
   '';
-  configureFlags = buildFlags;
+
+  postFixup = ''
+    moveToOutput bin/xml2-config "$dev"
+    moveToOutput lib/xml2Conf.sh "$dev"
+  ''
+  + lib.optionalString (enableStatic && enableShared) ''
+    moveToOutput lib/libxml2.a "$static"
+  '';
+
+  meta = {
+    homepage = "https://gitlab.gnome.org/GNOME/libxml2";
+    description = "XML parsing library for C";
+    license = lib.licenses.mit;
+    platforms = lib.platforms.all;
+  };
 }

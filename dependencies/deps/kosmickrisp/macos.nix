@@ -7,12 +7,14 @@
 
 let
   fetchSource = common.fetchSource;
+  # Pin to a specific commit for reproducible builds
+  # Using branch = "main" is not reproducible as it changes over time
   mesaSource = {
     source = "gitlab";
     owner = "mesa";
     repo = "mesa";
-    branch = "main";
-    sha256 = "sha256-Kw5xL5RllnCBWvQiGK5pAb5KedJZy/Tt6rVYVbkobh8=";
+    rev = "9994db58b3afe385724cfb3562b9fc0a7fb82723";
+    sha256 = "sha256-lgsYsJNepGTEWDPmD7H6teijULlxyPl9akcDXvSAU60=";
   };
   src = fetchSource mesaSource;
   buildFlags = [

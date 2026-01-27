@@ -1,93 +1,64 @@
 #pragma once
+// STUB: This file is a compatibility stub
+// Legacy C protocol files have been removed - project now uses Rust protocols
+// only See src/core/wayland/protocol/ for Rust protocol implementations
 
-#include "../protocols/xdg-shell-protocol.h"
 #include <stdbool.h>
 #include <stdint.h>
-#include <wayland-server-core.h>
+#include <wayland-server-protocol.h>
 #include <wayland-server.h>
 
-// xdg-shell protocol implementation
+// Stub structures - kept for compatibility with macOS code
+// Real protocol handling is done in Rust via src/core/wayland/protocol/
+
 struct xdg_wm_base_impl {
-  struct wl_global *global;
-  struct wl_display *display;
-  uint32_t version;
-  int32_t output_width;
-  int32_t output_height;
+  void *stub;
 };
 
 struct xdg_surface_impl {
+  void *stub;
   struct wl_resource *resource;
   struct wl_surface_impl *wl_surface;
-  struct xdg_surface_impl *next;
-  struct xdg_wm_base_impl
-      *wm_base; // Reference to wm_base for accessing output size
-
-  // Surface state
-  bool configured;
-  uint32_t configure_serial;  // Most recent configure serial sent
-  uint32_t last_acked_serial; // Last acknowledged configure serial
-
-  // Role (toplevel or popup)
-  void *role;
-
-  // Title and app_id stored in toplevel
-
-  // Window geometry
+  uint32_t configure_serial;
+  bool has_geometry;
   int32_t geometry_x;
   int32_t geometry_y;
   int32_t geometry_width;
   int32_t geometry_height;
-  bool has_geometry;
 };
 
 struct xdg_toplevel_impl {
-  struct wl_resource *resource;
-  struct xdg_surface_impl *xdg_surface;
-
-  // Window state
+  void *stub;
   char *title;
   char *app_id;
-  uint32_t states;
-  int32_t width, height;
-
-  // Decoration mode: 0 = unset, 1 = CLIENT_SIDE, 2 = SERVER_SIDE
-  uint32_t decoration_mode;
-  void *decoration_data; // Pointer to toplevel_decoration_impl
-
-  // Native window (NSWindow *)
   void *native_window;
+  uint32_t decoration_mode; // Added: referenced by WawonaCompositorView_macos.m
+  struct wl_resource *resource; // Added: referenced by WawonaSurfaceManager.m
+  struct xdg_surface_impl
+      *xdg_surface;      // Added: referenced by WawonaSurfaceManager.m
+  int32_t width;         // Added: referenced by WawonaSurfaceManager.m
+  int32_t height;        // Added: referenced by WawonaSurfaceManager.m
+  void *decoration_data; // Added: for decoration protocol
 };
 
 struct xdg_popup_impl {
-  struct wl_resource *resource;
-  struct xdg_surface_impl *xdg_surface;
-  struct xdg_surface_impl *parent;
-  struct xdg_positioner_impl *positioner;
-  int32_t x, y;
-  bool configured;
-  uint32_t configure_serial;
+  void *stub;
 };
 
-struct xdg_wm_base_impl *xdg_wm_base_create(struct wl_display *display);
-void xdg_wm_base_destroy(struct xdg_wm_base_impl *wm_base);
-void xdg_wm_base_send_configure_to_all_toplevels(
-    struct xdg_wm_base_impl *wm_base, int32_t width, int32_t height);
-void xdg_wm_base_set_output_size(struct xdg_wm_base_impl *wm_base,
-                                 int32_t width, int32_t height);
-
-// Forward declaration
-struct wl_surface_impl;
-struct wl_client;
-bool xdg_surface_is_toplevel(struct wl_surface_impl *wl_surface);
+// Stub declarations - macOS code may reference these
+void *xdg_wm_base_create(void *display);
+void xdg_wm_base_destroy(void *wm_base);
+void xdg_wm_base_send_configure_to_all_toplevels(void *wm_base, int32_t width,
+                                                 int32_t height);
+void xdg_wm_base_set_output_size(void *wm_base, int32_t width, int32_t height);
 struct xdg_toplevel_impl *
 xdg_surface_get_toplevel_from_wl_surface(struct wl_surface_impl *wl_surface);
 
-// Mark a client as a nested compositor (will auto-fullscreen its toplevels)
-void xdg_shell_mark_nested_compositor(struct wl_client *client);
-
-// Get the nested compositor client (for use by other modules like decoration
-// manager)
-struct wl_client *nested_compositor_client_from_xdg_shell(void);
-
-// Global xdg_surfaces list (declared in xdg_shell.c)
-extern struct xdg_surface_impl *xdg_surfaces;
+// Protocol send function stubs (needed for linking)
+void xdg_surface_send_configure(struct wl_resource *resource, uint32_t serial);
+struct wl_array; // Forward declare
+void xdg_toplevel_send_configure(struct wl_resource *resource, int32_t width,
+                                 int32_t height, struct wl_array *states);
+void xdg_toplevel_send_close(struct wl_resource *resource);
+void xdg_toplevel_send_configure_bounds(struct wl_resource *resource,
+                                        int32_t width, int32_t height);

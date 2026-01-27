@@ -1,0 +1,9 @@
+// Wawona Compositor - UniFFI Interface Definition
+// 
+// This is a minimal UDL file for UniFFI 0.25+
+// All types and functions are defined using Rust proc-macros.
+// This file only declares the namespace.
+
+namespace wawona {
+  // All functions are defined with #[uniffi::export] in Rust
+};

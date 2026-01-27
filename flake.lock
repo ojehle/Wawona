@@ -25,14 +25,17 @@
         "rust-overlay": "rust-overlay"
       },
       "locked": {
-        "lastModified": 1767487665,
-        "narHash": "sha256-ULDLaySyHeL6f9yMoVciZFwpU1DNXQiRN5QeGBArYX8=",
-        "path": "/Users/alex/HIAHKernel",
-        "type": "path"
+        "lastModified": 1767583553,
+        "narHash": "sha256-SnZJvtDiIP4/d8e1BRh4DBB7wgXI+mz5rS+W8dowtso=",
+        "owner": "aspauldingcode",
+        "repo": "HIAHKernel",
+        "rev": "127bdebf2b1af531dfa554605a223189823fd82c",
+        "type": "github"
       },
       "original": {
-        "path": "/Users/alex/HIAHKernel",
-        "type": "path"
+        "owner": "aspauldingcode",
+        "repo": "HIAHKernel",
+        "type": "github"
       }
     },
     "nixpkgs": {
@@ -53,15 +56,16 @@
     },
     "nixpkgs_2": {
       "locked": {
-        "lastModified": 1767421086,
-        "narHash": "sha256-ICWaNRNeq55brKaYKGwxK3+alnPCVKMqInre4wnp/GE=",
+        "lastModified": 1768032153,
+        "narHash": "sha256-6kD1MdY9fsE6FgSwdnx29hdH2UcBKs3/+JJleMShuJg=",
         "owner": "NixOS",
         "repo": "nixpkgs",
-        "rev": "ab9e65b0b20c9b92b73064b6b3e90bdee4f3c45a",
+        "rev": "3146c6aa9995e7351a398e17470e15305e6e18ff",
         "type": "github"
       },
       "original": {
         "owner": "NixOS",
+        "ref": "nixpkgs-unstable",
         "repo": "nixpkgs",
         "type": "github"
       }
@@ -101,11 +105,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1767408057,
-        "narHash": "sha256-0TD2PNTt6olOonFgcvZJcNGiU3x5cX+RMzrfWfHB9Jw=",
+        "lastModified": 1768012928,
+        "narHash": "sha256-HFFVQaux1JoOjEvgBT0ASk1Je+jsipyO5c91FoLMed8=",
         "owner": "oxalica",
         "repo": "rust-overlay",
-        "rev": "294198315a13d6d130565ad08e97685df7b0d458",
+        "rev": "312b4371e72f644ffcff25b23615195e3b390643",
         "type": "github"
       },
       "original": {

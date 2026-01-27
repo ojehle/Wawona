@@ -1,4 +1,4 @@
-{ lib, pkgs }:
+{ lib, pkgs, TEAM_ID ? null }:
 
 let
   # Script to find Xcode
@@ -64,6 +64,11 @@ in
 
     # Set developer directory
     export DEVELOPER_DIR="$XCODE_APP/Contents/Developer"
+
+    # Set Development Team from environment if not already set
+    if [ -z "''${DEVELOPMENT_TEAM:-}" ] && [ -n "''${TEAM_ID:-}" ]; then
+      export DEVELOPMENT_TEAM="''${TEAM_ID}"
+    fi
 
     # Add Xcode tools to PATH
     export PATH="$DEVELOPER_DIR/usr/bin:$PATH"

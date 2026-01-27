@@ -1,26 +1,16 @@
-// wayland_decoration.h - XDG Decoration Protocol Header
-// Implements zxdg_decoration_manager_v1 for server-side/client-side decoration
-// negotiation
+#pragma once
+// STUB: This file is a compatibility stub
+// Legacy C protocol files have been removed - project now uses Rust protocols
+// only
 
-#ifndef WAYLAND_DECORATION_H
-#define WAYLAND_DECORATION_H
+#include <wayland-server-protocol.h>
+#include <wayland-server.h>
 
-#include <stdbool.h>
-#include <wayland-server-core.h>
+struct wl_decoration_manager_impl {
+  void *stub;
+};
 
-struct wl_decoration_manager_impl;
-
-// Create and initialize the decoration manager global
-struct wl_decoration_manager_impl *
-wl_decoration_create(struct wl_display *display);
-
-// Destroy the decoration manager
-void wl_decoration_destroy(struct wl_decoration_manager_impl *manager);
-
-// Hot-reload decorations for all active clients
-void wl_decoration_hot_reload(struct wl_decoration_manager_impl *manager);
-
-struct xdg_toplevel_impl;
-void wl_decoration_send_configure(struct xdg_toplevel_impl *toplevel);
-
-#endif // WAYLAND_DECORATION_H
+void *wl_decoration_manager_create(void *display);
+void wl_decoration_manager_destroy(void *manager);
+void wl_decoration_hot_reload(void *manager);
+void *wl_decoration_create(void *display);

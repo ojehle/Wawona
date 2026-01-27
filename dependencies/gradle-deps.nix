@@ -7,6 +7,7 @@
   androidSDK,
   wawonaSrc,
   pkgs,
+  gradlegen,
 }:
 
 stdenv.mkDerivation {
@@ -52,12 +53,22 @@ stdenv.mkDerivation {
     echo "Checking network connectivity..."
     curl -f -I https://dl.google.com/dl/android/maven2/com/android/tools/build/gradle/8.10.0/gradle-8.10.0.pom || echo "AGP 8.10.0 POM check failed"
 
-    echo "Checking Java networking..."
-    echo 'public class CheckNet { public static void main(String[] args) throws Exception { System.out.println("Resolved: " + java.net.InetAddress.getByName("dl.google.com")); } }' > CheckNet.java
-    javac CheckNet.java
-    java CheckNet || echo "Java networking failed"
+    # Generate Gradle files
+    mkdir -p project-root
+    cd project-root
+    cp ${gradlegen.buildGradle} build.gradle.kts
+    cp ${gradlegen.settingsGradle} settings.gradle.kts
+    chmod u+w build.gradle.kts settings.gradle.kts
 
-    cd src/android
+    # Create a dummy AndroidManifest.xml and source structure since Gradle might need it
+    mkdir -p java
+    mkdir -p res
+    cat > AndroidManifest.xml <<EOF
+    <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.aspauldingcode.wawona">
+        <application />
+    </manifest>
+    EOF
+
     # We use a custom init script to ensure we don't fail on missing signing config
     gradle --version
 

@@ -5,8 +5,12 @@
 #include "wayland_decoration.h"
 #include "../core/WawonaSettings.h"
 #include "../logging/logging.h"
-#include "../protocols/xdg-decoration-protocol.h"
-#include "../protocols/xdg-shell-protocol.h"
+#include "WawonaCompositor.h"
+#include "xdg_shell.h"
+#include <wayland-server.h>
+// Removed: Legacy C protocol headers (using Rust protocols)
+// #include "../protocols/xdg-decoration-protocol.h"
+// #include "../protocols/xdg-shell-protocol.h"
 #include "xdg_shell.h"
 #include <stdint.h>
 #include <stdlib.h>

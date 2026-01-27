@@ -38,106 +38,10 @@ let
   # Vulkan loader (required to load the ICD)
   vulkan-loader = pkgs.vulkan-loader;
 
-  # Generate updated Cargo.lock that includes bindgen
-  # This needs to be defined before cargoLock so it can be referenced in postPatch
-  updatedCargoLockFile =
-    let
-      # Create modified source with bindgen in Cargo.toml (same logic as src)
-      modifiedSrcForLock =
-        pkgs.runCommand "waypipe-src-with-bindgen-for-lock"
-          {
-            src = fetchSource waypipeSource;
-          }
-          ''
-            # Copy source
-            if [ -d "$src" ]; then
-              cp -r "$src" $out
-            else
-              mkdir $out
-              tar -xf "$src" -C $out --strip-components=1
-            fi
-            chmod -R u+w $out
-            cd $out
-
-            # Add bindgen to wrap-ffmpeg/Cargo.toml if not present
-            if [ -f "wrap-ffmpeg/Cargo.toml" ] && ! grep -q "bindgen" wrap-ffmpeg/Cargo.toml; then
-              if grep -q "\[build-dependencies\]" wrap-ffmpeg/Cargo.toml; then
-                sed -i '/\[build-dependencies\]/a\
-        bindgen = "0.69"
-        ' wrap-ffmpeg/Cargo.toml
-              else
-                echo "" >> wrap-ffmpeg/Cargo.toml
-                echo "[build-dependencies]" >> wrap-ffmpeg/Cargo.toml
-                echo 'bindgen = "0.69"' >> wrap-ffmpeg/Cargo.toml
-              fi
-            fi
-            
-            # Add pkg-config to wrap-ffmpeg/Cargo.toml if not present
-            if [ -f "wrap-ffmpeg/Cargo.toml" ] && ! grep -q "pkg-config" wrap-ffmpeg/Cargo.toml; then
-              if grep -q "\[build-dependencies\]" wrap-ffmpeg/Cargo.toml; then
-                sed -i '/\[build-dependencies\]/a\
-        pkg-config = "0.3"
-        ' wrap-ffmpeg/Cargo.toml
-              else
-                echo "" >> wrap-ffmpeg/Cargo.toml
-                echo "[build-dependencies]" >> wrap-ffmpeg/Cargo.toml
-                echo 'pkg-config = "0.3"' >> wrap-ffmpeg/Cargo.toml
-              fi
-            fi
-            
-            # Note: No ssh2 dependency needed - waypipe will use OpenSSH binary
-          '';
-      # Create a derivation that generates Cargo.lock with bindgen included
-      # This derivation has network access to run cargo update
-      updatedCargoLock =
-        pkgs.runCommand "waypipe-cargo-lock-updated"
-          {
-            nativeBuildInputs = with pkgs; [
-              cargo
-              rustc
-              cacert
-            ];
-            modifiedSrc = modifiedSrcForLock;
-            __noChroot = true; # Allow network access for cargo update
-          }
-          ''
-            # Set up SSL certificates for network access
-            export SSL_CERT_FILE="${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
-            export CARGO_HOME=$(mktemp -d)
-            # Copy modified source (which already has bindgen in Cargo.toml)
-            cp -r "$modifiedSrc" source
-            chmod -R u+w source
-            cd source
-
-            # Verify bindgen is in wrap-ffmpeg/Cargo.toml
-            echo "Checking wrap-ffmpeg/Cargo.toml for bindgen..."
-            if ! grep -q "bindgen" wrap-ffmpeg/Cargo.toml; then
-              echo "Error: bindgen not found in wrap-ffmpeg/Cargo.toml" >&2
-              exit 1
-            fi
-
-            # Update Cargo.lock to include bindgen
-            echo "Updating Cargo.lock to include bindgen..."
-            cargo update --manifest-path Cargo.toml -p bindgen 2>&1 || {
-              echo "cargo update failed, trying cargo generate-lockfile"
-              cargo generate-lockfile --manifest-path Cargo.toml 2>&1 || {
-                echo "Error: Failed to update Cargo.lock" >&2
-                exit 1
-              }
-            }
-
-            # Verify bindgen is in Cargo.lock
-            if ! grep -q 'name = "bindgen"' Cargo.lock; then
-              echo "Error: bindgen not found in Cargo.lock after update" >&2
-              exit 1
-            fi
-
-            # Copy the updated Cargo.lock to output
-            cp Cargo.lock $out
-            echo "✓ Successfully generated Cargo.lock with bindgen"
-          '';
-    in
-    updatedCargoLock;
+  # Use pre-generated Cargo.lock that includes bindgen for reproducible builds
+  # This file was generated once and committed to the repository to avoid
+  # network access during builds (which breaks Nix reproducibility)
+  updatedCargoLockFile = ./Cargo.lock.patched;
 
   patches = [ ];
 in
@@ -332,14 +236,12 @@ EOF
     # Waypipe will spawn ssh binary normally
   ];
 
-  # Enable video feature for waypipe-rs
+  # Enable dmabuf and video features for waypipe-rs
   # Note: Vulkan is always enabled in waypipe-rs v0.10.6+ (not a feature)
-  # dmabuf is DISABLED on iOS because kosmickrisp doesn't support DMA-BUF file descriptors
-  # iOS uses IOSurface instead, which is handled by the compositor directly
-  # waypipe will use SHM buffers on iOS, which works fine for remote display
+  # kosmickrisp supports VK_EXT_external_memory_dma_buf for GPU buffer sharing
   # video enables video encoding/decoding via FFmpeg
   buildFeatures = [
-    # "dmabuf"  # Disabled on iOS - kosmickrisp doesn't support VK_EXT_external_memory_dma_buf
+    "dmabuf"  # Enable DMABUF - kosmickrisp supports VK_EXT_external_memory_dma_buf
     "video"
   ];
 
@@ -425,9 +327,8 @@ CARGO_CONFIG
   CARGO_BUILD_TARGET = "aarch64-apple-ios-sim";
 
   # Patch waypipe for iOS compatibility
-  # Note: dmabuf feature is disabled for iOS waypipe because kosmickrisp doesn't support
-  # DMA-BUF file descriptors (VK_EXT_external_memory_dma_buf). iOS uses IOSurface instead.
-  # Waypipe will use SHM buffers on iOS, which the compositor handles correctly.
+  # kosmickrisp provides Vulkan with VK_EXT_external_memory_dma_buf support for DMABUF
+  # This enables GPU-accelerated buffer sharing for nested compositors like Weston
   # Also patch other wrappers that may be built unconditionally
   postPatch = ''
         # Make source files writable for patching
@@ -1254,6 +1155,64 @@ with open('src/dmabuf.rs', 'w') as f:
     f.write(content)
 PYTHON_EOF
           echo "✓ Patched src/dmabuf.rs for eventfd compatibility"
+          
+          # Patch dmabuf.rs to handle iOS where DRM render nodes don't exist
+          # waypipe requires a device ID for the Wayland protocol, but iOS doesn't have DRM
+          # We generate a synthetic device ID from vendor_id and device_id instead
+          echo "Patching src/dmabuf.rs to support iOS (no DRM render nodes)"
+          
+          # Use sed to add macOS/iOS fallback for device ID generation
+          if grep -q "let render_id = if drm_prop.has_render != 0" src/dmabuf.rs; then
+            echo "Found render_id block, patching for iOS..."
+            
+            # Create a patch file for the render_id block
+            cat > /tmp/dmabuf_drm_patch.py << 'DRMPATCH'
+import sys
+
+content = open('src/dmabuf.rs', 'r').read()
+
+# Find and replace the render_id assignment
+old_pattern = """} else {
+                None
+            };"""
+
+new_code = """} else if cfg!(target_os = "macos") || cfg!(target_os = "ios") {
+                // On macOS/iOS, DRM doesn't exist. Generate a synthetic device ID
+                // from the Vulkan vendor_id and device_id to satisfy the protocol.
+                let synthetic_id = ((prop.properties.vendor_id as u64) << 32) 
+                    | (prop.properties.device_id as u64);
+                debug!("Using synthetic device ID on Darwin: {:#x}", synthetic_id);
+                Some(synthetic_id)
+            } else {
+                None
+            };"""
+
+# Only replace if it's in the context of render_id (check preceding lines)
+if 'let render_id = if drm_prop.has_render != 0' in content and old_pattern in content:
+    # Find the specific occurrence after render_id
+    render_id_pos = content.find('let render_id = if drm_prop.has_render != 0')
+    if render_id_pos != -1:
+        # Find the "} else { None };" after this position
+        search_start = render_id_pos
+        pattern_pos = content.find(old_pattern, search_start)
+        if pattern_pos != -1 and pattern_pos < render_id_pos + 500:  # Within reasonable distance
+            content = content[:pattern_pos] + new_code + content[pattern_pos + len(old_pattern):]
+            print("✓ Patched render_id for macOS/iOS synthetic device ID", file=sys.stderr)
+        else:
+            print("Warning: Could not find else block near render_id", file=sys.stderr)
+    else:
+        print("Warning: render_id position not found", file=sys.stderr)
+else:
+    print("Warning: Pattern not found in dmabuf.rs", file=sys.stderr)
+
+open('src/dmabuf.rs', 'w').write(content)
+DRMPATCH
+            python3 /tmp/dmabuf_drm_patch.py
+            rm -f /tmp/dmabuf_drm_patch.py
+            echo "✓ Patched src/dmabuf.rs for iOS DRM compatibility"
+          else
+            echo "Warning: render_id block not found in dmabuf.rs"
+          fi
         fi
         
         # Patch src/video.rs to use correct library extension on iOS

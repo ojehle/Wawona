@@ -64,6 +64,10 @@ in
           buildModule
           ;
       }
+    else if name == "pixman" then
+      pkgs.pixman
+    else if name == "xkbcommon" then
+      pkgs.libxkbcommon
     else if name == "ffmpeg" then
       (import ../deps/ffmpeg/macos.nix) {
         inherit

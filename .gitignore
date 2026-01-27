@@ -3,6 +3,7 @@ build/
 cmake-build-*/
 *.xcodeproj/
 *.xcworkspace/
+target/
 
 # Compiled binaries
 macos_wlcompositor
@@ -22,8 +23,9 @@ cmake_install.cmake
 .AppleDouble
 .LSOverride
 
-# Wayland runtime (but not .pc source files)
+# Wayland runtime
 wayland-*
+!tools/wayland-protocol-gen/**
 !**/*wayland*.pc
 
 # Log files
@@ -31,6 +33,7 @@ wayland-*
 logs/
 .nvimlog
 *.err
+*.txt
 
 # Test client
 test_client
@@ -46,14 +49,6 @@ test_xdg-shell-client-protocol.c
 
 # Node.js (docs)
 docs/node_modules/
-docs/npm-debug.log
-docs/.DS_Store
-
-# Generated protocol files
-protocols/*-protocol.h
-protocols/*-protocol.c
-protocols/*-client-protocol.h
-protocols/*-server-protocol.h
 
 # Apple Containerization framework (submodule or cloned repo)
 containerization/
@@ -83,5 +78,28 @@ result-*
 *.qcow2.gradle_home
 src/android/.gradle/
 
-# Inspiration
-weston/
+# generated xcode proj
+Wawona.xcodeproj/
+
+# Environment variables
+.envrc
+
+# direnv cache
+.direnv/
+_GEN-*
+
+# Legacy generated files (remove after migration)
+# src/platform/macos/wawona-Swift.h
+
+# Generated Rust Protocol Bindings
+src/core/wayland/protocol/_GEN-*.rs
+src/core/wayland/protocol/wlroots/_GEN-*.rs
+
+# Legacy protocol files (removing from git)
+src/core/wayland/protocol/*.rs
+src/core/wayland/protocol/wlroots/*.rs
+!src/core/wayland/protocol/mod.rs
+!src/core/wayland/protocol/wlroots/mod.rs
+
+
+mesa/

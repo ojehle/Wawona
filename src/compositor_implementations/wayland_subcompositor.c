@@ -1,5 +1,5 @@
 #include "wayland_subcompositor.h"
-#include "../core/WawonaCompositor.h"
+#include "../platform/macos/WawonaCompositor.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <wayland-server-protocol.h>

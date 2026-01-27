@@ -14,7 +14,7 @@ let
     project = "freetype";
     repo = "freetype2";
     tag = "VER-2-13-2";
-    sha256 = "sha256-EEQ/SJpXqVbJa+nZhxBXp3C1pT6pXr6JGKU0W/eOjX4=";
+    sha256 = "sha256-EpkcTlXFBt1/m3ZZM+Yv0r4uBtQhUF15UKEy5PG7SE0=";
   };
 in
 pkgs.stdenv.mkDerivation rec {
@@ -23,7 +23,7 @@ pkgs.stdenv.mkDerivation rec {
 
   src = pkgs.fetchurl {
     url = "https://download.savannah.gnu.org/releases/freetype/freetype-${version}.tar.xz";
-    sha256 = "sha256-EEQ/SJpXqVbJa+nZhxBXp3C1pT6pXr6JGKU0W/eOjX4=";
+    sha256 = "sha256-EpkcTlXFBt1/m3ZZM+Yv0r4uBtQhUF15UKEy5PG7SE0=";
   };
 
   nativeBuildInputs = with pkgs; [

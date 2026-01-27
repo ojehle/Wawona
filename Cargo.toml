@@ -1,0 +1,62 @@
+[workspace]
+members = [
+    ".",
+]
+
+[package]
+name = "wawona"
+version = "0.2.0"
+edition = "2021"
+
+[lints.rust]
+warnings = "deny"
+
+[lib]
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[[bin]]
+name = "wawona"
+path = "src/main.rs"
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/uniffi-bindgen.rs"
+
+[[bin]]
+name = "keyboard-test-client"
+path = "src/bin/keyboard-test-client.rs"
+
+[dependencies]
+thiserror = "2.0.17"
+anyhow = "1.0.100"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.22", features = ["chrono", "local-time"] }
+bitflags = "2.4"
+chrono = "0.4"
+libc = "0.2.180"
+
+uniffi = { version = "0.30.0", features = ["cli"] }
+
+# Core Wayland
+wayland-server = "0.31.11"
+wayland-client = "0.31.12"
+wayland-backend = "0.3.12"
+
+# Protocol bindings (pre-generated, no custom generator needed)
+wayland-protocols = { version = "0.32.10", features = ["server", "client", "staging", "unstable"] }
+wayland-protocols-wlr = { version = "0.3.10", features = ["server", "client"] }
+wayland-protocols-misc = { version = "0.3.10", features = ["server", "client"] }
+
+# XKB for keymap generation (FFI to libxkbcommon, already ported to macOS)
+xkbcommon = { version = "0.8", features = ["wayland"] }
+
+
+# Code generation for custom protocols only
+wayland-scanner = "0.31.8"
+
+[build-dependencies]
+uniffi = { version = "0.30.0", features = ["build"] }
+wayland-scanner = "0.31.8"
+
+[features]
+default = []

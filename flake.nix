@@ -1,510 +1,420 @@
 {
-  description = "Wawona";
+  description = "Wawona Compositor";
+
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+
     rust-overlay.url = "github:oxalica/rust-overlay";
     rust-overlay.inputs.nixpkgs.follows = "nixpkgs";
-    # HIAHKernel - Virtual kernel for iOS ONLY (not macOS/Android)
-    # Enables multi-process execution on jailed iOS devices
-    # TODO: Integrate as iOS-only dependency when flake is ready
-    # hiahkernel.url = "github:aspauldingcode/HIAHKernel";
-    # hiahkernel.url = "github:aspauldingcode/HIAHKernel";
-    hiahkernel.url = "path:/Users/alex/HIAHKernel";
+
+    hiahkernel.url = "github:aspauldingcode/HIAHKernel";
   };
 
-  outputs =
-    {
-      self,
-      nixpkgs,
-      rust-overlay,
-      hiahkernel,
-    }:
-    let
-      system = "aarch64-darwin";
-      pkgs = import nixpkgs {
+  outputs = { self, nixpkgs, rust-overlay, hiahkernel }:
+  let
+    systems = [
+      "x86_64-linux"
+      "aarch64-linux"
+      "x86_64-darwin"
+      "aarch64-darwin"
+    ];
+
+    pkgsFor = system:
+      import nixpkgs {
         inherit system;
-        overlays = [ (import rust-overlay) ];
+        overlays = [
+          (import rust-overlay)
+          (self: super: {
+            rustToolchain = super.rust-bin.stable.latest.default.override {
+              targets = [ "aarch64-apple-ios-sim" ];
+            };
+            rustPlatform = super.makeRustPlatform {
+              cargo = self.rustToolchain;
+              rustc = self.rustToolchain;
+            };
+          })
+        ];
         config = {
           allowUnfree = true;
           android_sdk.accept_license = true;
         };
       };
 
+    srcFor = pkgs:
+      pkgs.lib.cleanSourceWith {
+        src = ./.;
+        filter = path: _:
+          let name = builtins.baseNameOf path;
+          in !(name == ".git" || name == "result" || name == ".direnv" || name == "target");
+      };
+
+    unixWrapper = pkgs: name: bin:
+      pkgs.writeShellScriptBin name ''
+        export XDG_RUNTIME_DIR="''${XDG_RUNTIME_DIR:-/tmp/$(id -u)-runtime}"
+        export WAYLAND_DISPLAY="''${WAYLAND_DISPLAY:-wayland-0}"
+        exec ${bin} "$@"
+      '';
+
+    macosEnv = ''
+      export XDG_RUNTIME_DIR="/tmp/wawona-$(id -u)"
+      export WAYLAND_DISPLAY="''${WAYLAND_DISPLAY:-wayland-0}"
+      if [ ! -d "$XDG_RUNTIME_DIR" ]; then
+        mkdir -p "$XDG_RUNTIME_DIR"
+        chmod 700 "$XDG_RUNTIME_DIR"
+      fi
+    '';
+
+    macosWrapper = pkgs: wawona: pkgs.writeShellScriptBin "wawona" ''
+      ${macosEnv}
+      exec "${wawona}/bin/wawona-macos" "$@"
+    '';
+
+    waypipeWrapper = pkgs: waypipe: pkgs.writeShellScriptBin "waypipe" ''
+      ${macosEnv}
+      exec "${waypipe}/bin/waypipe" "$@"
+    '';
+
+    footWrapper = pkgs: foot: pkgs.writeShellScriptBin "foot" ''
+      ${macosEnv}
+      
+      # Check if user has a config
+      if [ ! -f "$HOME/.config/foot/foot.ini" ] && [ ! -f "''${XDG_CONFIG_HOME:-$HOME/.config}/foot/foot.ini" ]; then
+        echo "Info: No foot.ini found, using default macOS configuration (Menlo font)"
+        DEFAULT_CONFIG="''${XDG_RUNTIME_DIR}/foot-default.ini"
+        cat > "$DEFAULT_CONFIG" <<EOF
+[main]
+font=Menlo:size=12,Monaco:size=12,monospace:size=12
+dpi-aware=yes
+EOF
+        exec "${foot}/bin/foot" -c "$DEFAULT_CONFIG" "$@"
+      else
+        exec "${foot}/bin/foot" "$@"
+      fi
+    '';
+
+    iosWrapper = pkgs: wawona: pkgs.writeShellScriptBin "wawona-ios" ''
+      export XDG_RUNTIME_DIR="/tmp/wawona-$(id -u)"
+      exec "${wawona}/bin/wawona-ios-simulator" "$@"
+    '';
+
+    androidWrapper = pkgs: wawona: pkgs.writeShellScriptBin "wawona-android" ''
+      export XDG_RUNTIME_DIR="/tmp/wawona-$(id -u)"
+      exec "${wawona}/bin/wawona-android-run" "$@"
+    '';
+
+    linuxWrapper = pkgs: wawona: pkgs.writeShellScriptBin "wawona" ''
+      export XDG_RUNTIME_DIR="/tmp/wawona-$(id -u)"
+      exec "${wawona}/bin/wawona" "$@"
+    '';
+
+
+
+  in
+  {
+    packages = builtins.listToAttrs (map (system: let
+      pkgs = pkgsFor system;
+      src  = srcFor pkgs;
+
+      wawonaVersion = pkgs.lib.removeSuffix "\n" (pkgs.lib.fileContents (src + "/VERSION"));
+
+      # Rust compositor
+      compositor = pkgs.rustPlatform.buildRustPackage {
+        pname = "wawona";
+        version = wawonaVersion;
+
+        inherit src;
+        cargoLock.lockFile = ./Cargo.lock;
+        
+        # Disable tests - they require XDG_RUNTIME_DIR which isn't available in Nix sandbox
+        doCheck = false;
+        
+        # Build library and all binaries
+        cargoBuildFlags = [ "--lib" "--bins" ];
+
+        nativeBuildInputs = [ pkgs.pkg-config ];
+        buildInputs = [
+          pkgs.libxkbcommon
+          pkgs.libffi
+        ];
+
+        postInstall = ''
+          # Create include directory for Rust backend headers
+          mkdir -p $out/include
+          
+          # Copy any existing headers if they exist
+          if [ -d include ]; then
+            cp -r include/* $out/include/ || true
+          fi
+          
+          # Generate UniFFI bindings for Swift/Objective-C
+          echo "📦 Generating UniFFI bindings..."
+          mkdir -p $out/uniffi/swift
+          
+          # Generate Swift bindings from UDL file (must be in source dir during build)
+          if [ -f "$out/bin/uniffi-bindgen" ] && [ -f "src/wawona.udl" ]; then
+            echo "Found uniffi-bindgen and wawona.udl, generating bindings..."
+            $out/bin/uniffi-bindgen generate \
+              src/wawona.udl \
+              --language swift \
+              --out-dir $out/uniffi/swift 2>&1 | tee $out/uniffi/generation.log
+          else
+            echo "Missing: uniffi-bindgen=$(test -f $out/bin/uniffi-bindgen && echo yes || echo no), udl=$(test -f src/wawona.udl && echo yes || echo no)"
+          fi
+          
+          # Copy UDL for reference
+          cp src/wawona.udl $out/uniffi/ 2>/dev/null || true
+          
+          if [ -d "$out/uniffi/swift" ] && [ "$(ls -A $out/uniffi/swift)" ]; then
+            echo "✅ UniFFI bindings generated in $out/uniffi/swift/"
+          else
+            echo "⚠️  UniFFI bindings not generated (this is OK for now)"
+          fi
+        '';
+      };
+
+      compositor-ios = let
+        # Use Nixpkgs cross-compilation infrastructure for iOS Simulator (aarch64) dependencies
+        crossPkgs = import nixpkgs {
+          localSystem = system;
+          crossSystem = {
+            config = "aarch64-apple-darwin";
+            sdk = "iPhoneSimulator";
+            xcodePlatform = "iPhoneSimulator";
+            rustc.config = "aarch64-apple-ios-sim";
+          };
+          config.allowUnfree = true;
+          overlays = [
+            (self: super: {
+              # Fix atf configure check for cross-compilation
+              atf = super.atf.overrideAttrs (old: {
+                configureFlags = (old.configureFlags or []) ++ [
+                  "atf_cv_prog_getopt_plus=yes"
+                ];
+                doCheck = false; # Cannot run tests for cross-compiled binaries
+              });
+              # Disable tests for libuv during cross-compilation
+              libuv = super.libuv.overrideAttrs (old: {
+                doCheck = false;
+              });
+            })
+          ];
+        };
+      in pkgs.rustPlatform.buildRustPackage {
+        pname = "wawona-ios-backend";
+        version = wawonaVersion;
+        inherit src;
+        cargoLock.lockFile = ./Cargo.lock;
+
+        # Target aarch64-apple-ios-sim specifically for simulator
+        cargoBuildTarget = "aarch64-apple-ios-sim";
+
+        # Disable tests as they can't run on the build host
+        doCheck = false;
+
+        nativeBuildInputs = [ pkgs.pkg-config ];
+        buildInputs = [
+          crossPkgs.libxkbcommon
+          crossPkgs.libffi
+        ];
+
+        # Cargo needs the linker set correctly for the cross target
+        # We use the cross-compiler from crossPkgs
+        CARGO_TARGET_AARCH64_APPLE_IOS_SIM_LINKER = "${crossPkgs.stdenv.cc.targetPrefix}cc";
+        
+        # Patch dependencies that don't support iOS out of the box
+        postPatch = ''
+          # Patch wayland-backend to support iOS (kqueue and socket flags)
+          # We search for it in the vendor directory
+          find . -name common_poll.rs -exec sed -i 's/"macos"/"macos", target_os = "ios"/g' {} +
+          find . -name handle.rs -exec sed -i 's/"macos"/"macos", target_os = "ios"/g' {} +
+          
+          # Socket flags: ios (like macos) doesn't have MSG_NOSIGNAL or CMSG_CLOEXEC
+          find . -name socket.rs -exec sed -i 's/target_os = "macos"/any(target_os = "macos", target_os = "ios")/g' {} +
+          find . -name socket.rs -exec sed -i 's/not(target_os = "macos")/not(any(target_os = "macos", target_os = "ios"))/g' {} +
+        '';
+
+        postInstall = ''
+          mkdir -p $out/include
+          if [ -d include ]; then
+            cp -r include/* $out/include/ || true
+          fi
+        '';
+      };
+
+      # Platform-specific builds (macOS/iOS/Android)
+      buildModule = import ./dependencies/build.nix {
+        inherit (pkgs) lib pkgs stdenv buildPackages;
+      };
+
+      # Wawona system module (macOS/iOS/Android)
+      wawonaSrc = src;
+      
+      wawona-macos = pkgs.callPackage ./dependencies/wawona-macos.nix {
+        inherit buildModule wawonaSrc;
+        compositor = compositor;
+        wawonaVersion = wawonaVersion;
+      };
+
       androidSDK = pkgs.androidenv.composeAndroidPackages {
-        cmdLineToolsVersion = "latest";
-        platformToolsVersion = "latest";
+        cmdLineToolsVersion = "8.0";
         buildToolsVersions = [ "36.0.0" ];
+        platformToolsVersion = "35.0.2";
         platformVersions = [ "36" ];
         abiVersions = [ "arm64-v8a" ];
-        includeEmulator = true;
-        emulatorVersion = "36.4.2";
-        includeSystemImages = true;
         systemImageTypes = [ "google_apis_playstore" ];
+        includeEmulator = true;
+        emulatorVersion = "35.1.4";
+        includeSystemImages = true;
+        useGoogleAPIs = false;
+        includeNDK = true;
+        ndkVersions = ["27.0.12077973"];
       };
 
-      buildModule = import ./dependencies/build.nix {
-        lib = pkgs.lib;
-        inherit pkgs;
-        stdenv = pkgs.stdenv;
-        buildPackages = pkgs.buildPackages;
+      wawona-android = pkgs.callPackage ./dependencies/wawona-android.nix {
+        inherit buildModule wawonaSrc androidSDK;
+        wawonaVersion = wawonaVersion;
       };
 
-      wawonaSrc = pkgs.lib.cleanSourceWith {
-        src = ./.;
-        filter =
-          path: type:
-          let
-            base = baseNameOf path;
-          in
-          !(
-            base == ".git"
-            || base == "build"
-            || base == "result"
-            || base == ".direnv"
-            || pkgs.lib.hasPrefix "result" base
-          );
+      wawona-ios = pkgs.callPackage ./dependencies/wawona-ios.nix {
+        inherit buildModule wawonaSrc hiahkernel;
+        wawonaVersion = wawonaVersion;
+        compositor = compositor-ios;
       };
-
-      wawonaBuildModule = import ./dependencies/wawona.nix {
-        lib = pkgs.lib;
-        inherit
-          pkgs
-          buildModule
-          wawonaSrc
-          androidSDK
-          hiahkernel
-          ;
-      };
-
-      androidToolchain = import ./dependencies/common/android-toolchain.nix {
-        inherit (pkgs) lib;
-        inherit pkgs;
-      };
-
-      updateAndroidDeps = pkgs.writeShellScriptBin "update-android-deps" ''
-        export ANDROID_SDK_ROOT="${androidSDK.androidsdk}/libexec/android-sdk"
-        export GRADLE_USER_HOME=$(pwd)/.gradle-home
-        cd src/android
-        ${pkgs.gradle}/bin/gradle dependencyUpdates
-      '';
-
-      multiplexDev = pkgs.writeShellScriptBin "wawona-multiplex" ''
-        tmux="${pkgs.tmux}/bin/tmux"
-        $tmux new-session -d -s wawona "nix run .#wawona-macos"
-        $tmux split-window -t wawona "nix run .#wawona-ios"
-        $tmux split-window -t wawona "nix run .#wawona-android"
-        $tmux select-layout -t wawona tiled
-        $tmux attach -t wawona
-      '';
-
-      # Individual dependency packages for each platform
-      iosDeps = buildModule.ios;
-      macosDeps = buildModule.macos;
-      androidDeps = buildModule.android;
-
-      waypipeMacosWrapper = pkgs.writeShellScriptBin "waypipe-macos" ''
-        # Force XDG_RUNTIME_DIR to match Wawona's predictable path
-        # We override any existing value to ensure connection with Wawona compositor
-        export XDG_RUNTIME_DIR="/tmp/wawona-$(id -u)"
-        
-        # Default to wayland-0 if not set
-        if [ -z "$WAYLAND_DISPLAY" ]; then
-          export WAYLAND_DISPLAY="wayland-0"
-        fi
-
-        exec "${macosDeps.waypipe}/bin/waypipe" "$@"
-      '';
-
-      wawonaMacosWrapper = pkgs.writeShellScriptBin "wawona-macos" ''
-        # Force XDG_RUNTIME_DIR to match Wawona's predictable path
-        # We override any existing value to ensure predictable socket location
-        export XDG_RUNTIME_DIR="/tmp/wawona-$(id -u)"
-        
-        # Initialize crash logging
-        echo "$(date): Starting Wawona with auto-crash logging" > macos-crash.log
-        echo "PID: $$" >> macos-crash.log
-        echo "Command: $*" >> macos-crash.log
-        echo "---" >> macos-crash.log
-        
-        # Clear previous log files (truncate instead of append)
-        > macos-output.log
-        > macos-output.err
-        
-        # Run with crash detection and logging
-        # .log gets all output (stdout + stderr), .err gets only errors
-        if ! "${wawonaBuildModule.macos}/bin/Wawona" "$@" > >(tee macos-output.log) 2> >(tee macos-output.log >> macos-output.err); then
-          EXIT_CODE=$?
-          echo "$(date): Wawona crashed with exit code $EXIT_CODE" >> macos-crash.log
-          echo "Exit code: $EXIT_CODE" >> macos-crash.log
-          echo "--- Crash detected ---" >> macos-crash.log
-          
-          # Try to get any available crash reports from system
-          if command -v log >/dev/null 2>&1; then
-            echo "System log entries around crash time:" >> macos-crash.log
-            log show --predicate 'process == "Wawona"' --last 1m --style compact >> macos-crash.log 2>/dev/null || true
-          fi
-          
-          exit $EXIT_CODE
-        fi
-      '';
       
-      wawonaKernelIosWrapper = pkgs.writeShellScriptBin "wawona-kernel-ios" ''
-        # Set environment variables for the iOS Simulator app
-        # simctl launch passes variables prefixed with SIMCTL_CHILD_ to the app
-        export SIMCTL_CHILD_WAWONA_KERNEL_TEST=1
-        export SIMCTL_CHILD_WAWONA_EXIT_ON_TEST_COMPLETE=1
-        
-        # Enable log following and debug level for kernel testing
-        export WAWONA_IOS_FOLLOW_LOGS=1
-        export WAWONA_IOS_LOG_LEVEL=debug
-        export WAWONA_IOS_LOG_FILE=output.log
-        
-        echo "🚀 Launching Wawona iOS Kernel Tests 🚀"
-        echo "   Testing: hello_world, ssh, waypipe"
-        exec "${wawonaBuildModule.ios}/bin/wawona-ios-simulator" "$@"
-      '';
-      
-      opensshTestIosWrapper = pkgs.writeShellScriptBin "openssh-test-ios" ''
-        # Find the openssh_test_ios binary in the app bundle
-        APP_BUNDLE="${wawonaBuildModule.ios}/Applications/Wawona.app"
-        TEST_BIN="$APP_BUNDLE/bin/openssh_test_ios"
-        
-        if [ ! -f "$TEST_BIN" ]; then
-          echo "❌ Error: openssh_test_ios not found at $TEST_BIN"
-          echo "   Make sure you've built wawona-ios first: nix build .#wawona-ios"
-          exit 1
-        fi
-        
-        # Get device ID (use first available simulator)
-        DEVICE_ID=$(xcrun simctl list devices available | grep -i "iphone" | head -1 | grep -oE '[A-F0-9-]{36}' | head -1)
-        
-        if [ -z "$DEVICE_ID" ]; then
-          echo "❌ Error: No iOS simulator found"
-          exit 1
-        fi
-        
-        echo "🔐 OpenSSH Test for iOS"
-        echo "======================"
-        echo "Device: $DEVICE_ID"
-        echo "Binary: $TEST_BIN"
-        echo ""
-        echo "This will test SSH connection using Wawona's settings"
-        echo "Make sure you've configured SSH host/user in Wawona preferences"
-        echo ""
-        
-        # Boot simulator if needed
-        xcrun simctl boot "$DEVICE_ID" 2>/dev/null || true
-        
-        # Install app if needed
-        xcrun simctl install "$DEVICE_ID" "$APP_BUNDLE" 2>/dev/null || true
-        
-        # Run the test binary via simctl spawn
-        xcrun simctl spawn "$DEVICE_ID" "$TEST_BIN"
-      '';
-
-      # Waypipe SSH Test for iOS - tests full SSH connection with hardcoded test server
-      waypipeTestIosWrapper = pkgs.writeShellScriptBin "waypipe-test-ios" ''
-        set -e
-        
-        echo "🚀 Waypipe SSH Connection Test for iOS 🚀"
-        echo "=========================================="
-        echo ""
-        echo "Test Server: alex@10.0.0.87"
-        echo "Password: (hardcoded for testing)"
-        echo ""
-        
-        # Get the app bundle path
-        APP_BUNDLE="${wawonaBuildModule.ios}/Applications/Wawona.app"
-        
-        if [ ! -d "$APP_BUNDLE" ]; then
-          echo "❌ Error: Wawona app bundle not found"
-          echo "   Run: nix build .#wawona-ios"
-          exit 1
-        fi
-        
-        # Get device ID (use first available iPhone simulator)
-        DEVICE_ID=$(xcrun simctl list devices available | grep -i "iphone" | head -1 | grep -oE '[A-F0-9-]{36}' | head -1)
-        
-        if [ -z "$DEVICE_ID" ]; then
-          echo "❌ Error: No iOS simulator found"
-          echo "   Please install Xcode and create an iPhone simulator"
-          exit 1
-        fi
-        
-        echo "📱 Device ID: $DEVICE_ID"
-        
-        # Boot simulator if needed
-        echo "Booting simulator..."
-        xcrun simctl boot "$DEVICE_ID" 2>/dev/null || true
-        sleep 2
-        
-        # Get the device data directory for simctl spawn
-        DATA_DIR=$(xcrun simctl get_app_container "$DEVICE_ID" com.aspauldingcode.Wawona data 2>/dev/null || true)
-        
-        # Install the app
-        echo "Installing Wawona.app..."
-        xcrun simctl install "$DEVICE_ID" "$APP_BUNDLE"
-        
-        # Get container path after install
-        BUNDLE_PATH=$(xcrun simctl get_app_container "$DEVICE_ID" com.aspauldingcode.Wawona app 2>/dev/null || true)
-        echo "📦 Bundle installed at: $BUNDLE_PATH"
-        
-        # Check if ssh.dylib exists
-        if [ -n "$BUNDLE_PATH" ]; then
-          echo ""
-          echo "Checking SSH binary..."
-          if [ -f "$BUNDLE_PATH/bin/ssh.dylib" ]; then
-            echo "✓ ssh.dylib found"
-            ls -la "$BUNDLE_PATH/bin/ssh.dylib"
-          fi
-          if [ -f "$BUNDLE_PATH/bin/ssh" ]; then
-            echo "✓ ssh executable found"
-            ls -la "$BUNDLE_PATH/bin/ssh"
-          fi
-        fi
-        
-        # Set environment variables for test
-        # SSH_ASKPASS_PASSWORD is used by our patched readpassphrase
-        export SIMCTL_CHILD_SSH_ASKPASS_PASSWORD="787866"
-        export SIMCTL_CHILD_SSHPASS="787866"
-        export SIMCTL_CHILD_WAWONA_SSH_TEST=1
-        export SIMCTL_CHILD_WAWONA_SSH_HOST="10.0.0.87"
-        export SIMCTL_CHILD_WAWONA_SSH_USER="alex"
-        export SIMCTL_CHILD_WAWONA_SSH_PASSWORD="787866"
-        export SIMCTL_CHILD_WAWONA_EXIT_ON_TEST_COMPLETE=1
-        export SIMCTL_CHILD_WAWONA_WAYPIPE_TEST=1
-        
-        # Enable log following
-        export WAWONA_IOS_FOLLOW_LOGS=1
-        export WAWONA_IOS_LOG_LEVEL=debug
-        export WAWONA_IOS_LOG_FILE=output.log
-        
-        echo ""
-        echo "📝 Logs will be written to: output.log"
-        echo ""
-        
-        # Clear previous log
-        > output.log
-        
-        # Start log stream in background
-        echo "Starting log stream..."
-        xcrun simctl spawn "$DEVICE_ID" log stream \
-          --level debug \
-          --predicate 'subsystem == "com.aspauldingcode.Wawona" OR process == "Wawona" OR process == "WawonaSSHRunner" OR processImagePath CONTAINS "ssh" OR processImagePath CONTAINS "waypipe"' \
-          >> output.log 2>&1 &
-        LOG_PID=$!
-        echo "Log stream started (PID: $LOG_PID)"
-        
-        # Function to cleanup
-        cleanup() {
-          echo ""
-          echo "Cleaning up..."
-          kill $LOG_PID 2>/dev/null || true
-          xcrun simctl terminate "$DEVICE_ID" com.aspauldingcode.Wawona 2>/dev/null || true
-        }
-        trap cleanup EXIT
-        
-        echo ""
-        echo "🔍 Launching with LLDB for debugging..."
-        echo "   You can attach to the SSH process for debugging"
-        echo ""
-        
-        # Launch the app with test environment
-        echo "Launching Wawona with SSH test configuration..."
-        xcrun simctl launch --console-pty "$DEVICE_ID" com.aspauldingcode.Wawona &
-        APP_PID=$!
-        
-        # Give the app time to start
-        sleep 3
-        
-        # Show LLDB instructions
-        echo ""
-        echo "📎 LLDB Debugging Instructions:"
-        echo "   In another terminal, run:"
-        echo "     xcrun simctl spawn booted lldb"
-        echo "     (lldb) process attach -n WawonaSSHRunner"
-        echo "     (lldb) breakpoint set -n ssh_main"
-        echo "     (lldb) continue"
-        echo ""
-        
-        # Wait for test to complete (timeout after 60 seconds)
-        echo "Waiting for SSH connection test (timeout: 60s)..."
-        TIMEOUT=60
-        ELAPSED=0
-        TEST_RESULT=""
-        while [ $ELAPSED -lt $TIMEOUT ]; do
-          # Check if test completed successfully (look for actual success message from SSH exiting with code 0)
-          # Note: "SSH connection test completed successfully" is an echo command in our test, not the actual result
-          if strings output.log 2>/dev/null | grep -q "ssh_main.*SSH exited with code 0"; then
-            echo "✅ SSH connection test completed successfully!"
-            TEST_RESULT="success"
-            break
-          fi
-          # Check for explicit failure messages
-          if strings output.log 2>/dev/null | grep -q "\[WawonaKernel\] SSH connection failed"; then
-            echo "❌ SSH connection test failed!"
-            TEST_RESULT="failed"
-            break
-          fi
-          if strings output.log 2>/dev/null | grep -q "ssh_main.*exited with code 0"; then
-            echo "✅ SSH process exited successfully"
-            TEST_RESULT="success"
-            break
-          fi
-          if strings output.log 2>/dev/null | grep -q "ssh_main.*exited with code"; then
-            echo "⚠️  SSH process exited with non-zero code"
-            TEST_RESULT="failed"
-            break
-          fi
-          if strings output.log 2>/dev/null | grep -q "Failed to load extension"; then
-            echo "❌ Extension loading failed - check app extension configuration"
-            TEST_RESULT="failed"
-            break
-          fi
-          if strings output.log 2>/dev/null | grep -q "Failed to chdir to app group"; then
-            echo "❌ App group container not accessible - this is a simulator limitation"
-            TEST_RESULT="failed"
-            break
-          fi
-          sleep 1
-          ELAPSED=$((ELAPSED + 1))
-          if [ $((ELAPSED % 10)) -eq 0 ]; then
-            echo "  ... waiting ($ELAPSED/$TIMEOUT seconds)"
-          fi
-        done
-        
-        if [ $ELAPSED -ge $TIMEOUT ]; then
-          echo "⚠️  Test timed out after $TIMEOUT seconds"
-          TEST_RESULT="timeout"
-        fi
-        
-        echo ""
-        echo "📋 Test Results Summary:"
-        echo "========================"
-        
-        # Show relevant log entries
-        echo ""
-        echo "SSH-related log entries:"
-        strings output.log 2>/dev/null | grep -iE "ssh|password|connect|kernel|extension" | tail -50 || echo "  (no SSH logs found)"
-        
-        echo ""
-        echo "Full log available in: output.log"
-        
-        # Terminate the app
-        xcrun simctl terminate "$DEVICE_ID" com.aspauldingcode.Wawona 2>/dev/null || true
-        
-        echo ""
-        echo "✅ Waypipe SSH test finished."
-      '';
-
-    in
-    {
-      packages.${system} = {
-        default = wawonaMacosWrapper;
-        wawona-ios = wawonaBuildModule.ios;
-        wawona-kernel-ios = wawonaKernelIosWrapper;
-        openssh-test-ios = opensshTestIosWrapper;
-        waypipe-test-ios = waypipeTestIosWrapper;
-        wawona-macos = wawonaMacosWrapper;
-        wawona-android = wawonaBuildModule.android;
-
-        # iOS dependencies
-        waypipe-ios = iosDeps.waypipe;
-        ffmpeg-ios = iosDeps.ffmpeg;
-        "libwayland-ios" = iosDeps.libwayland;
-        "kosmickrisp-ios" = iosDeps.kosmickrisp;
-        "lz4-ios" = iosDeps.lz4;
-        "zstd-ios" = iosDeps.zstd;
-        "expat-ios" = iosDeps.expat;
-        "libffi-ios" = iosDeps.libffi;
-        "libxml2-ios" = iosDeps.libxml2;
-        "epoll-shim-ios" = iosDeps."epoll-shim";
-        "mbedtls-ios" = iosDeps.mbedtls;
-        # Note: libssh2 removed - using OpenSSH binary instead
-        "openssh-ios" = iosDeps.openssh;
-
-        # macOS dependencies
-        waypipe-macos = macosDeps.waypipe;
-        ffmpeg-macos = macosDeps.ffmpeg;
-        "libwayland-macos" = macosDeps.libwayland;
-        "kosmickrisp-macos" = macosDeps.kosmickrisp;
-        "lz4-macos" = macosDeps.lz4;
-        "zstd-macos" = macosDeps.zstd;
-        "expat-macos" = macosDeps.expat;
-        "libffi-macos" = macosDeps.libffi;
-        "libxml2-macos" = macosDeps.libxml2;
-        "epoll-shim-macos" = macosDeps."epoll-shim";
-        "sshpass-macos" = macosDeps.sshpass;
-        # Font stack for foot terminal
-        "tllist-macos" = macosDeps.tllist;
-        "freetype-macos" = macosDeps.freetype;
-        "fontconfig-macos" = macosDeps.fontconfig;
-        "utf8proc-macos" = macosDeps.utf8proc;
-        "fcft-macos" = macosDeps.fcft;
-        # Applications
-        "foot-macos" = macosDeps.foot;
-
-        # Android dependencies
-        waypipe-android = androidDeps.waypipe;
-        ffmpeg-android = androidDeps.ffmpeg;
-        "libwayland-android" = androidDeps.libwayland;
-        "swiftshader-android" = androidDeps.swiftshader;
-        "lz4-android" = androidDeps.lz4;
-        "zstd-android" = androidDeps.zstd;
-        "expat-android" = androidDeps.expat;
-        "libffi-android" = androidDeps.libffi;
-        "libxml2-android" = androidDeps.libxml2;
+      xcodegenProject = pkgs.callPackage ./dependencies/xcodegen-wawona.nix {
+        inherit pkgs;
+        rustPlatform = pkgs.rustPlatform;
+        hiahkernel = hiahkernel;
+        wawonaVersion = wawonaVersion;
+        compositor = compositor-ios;
       };
 
-      apps.${system} = {
-        default = {
+      gradlegen = pkgs.callPackage ./dependencies/gradlegen-wawona.nix { };
+
+      isDarwin = pkgs.stdenv.isDarwin;
+      isLinux = pkgs.stdenv.isLinux;
+
+      # Keyboard test client wrapper
+      keyboard-test-client-macos = pkgs.writeShellScriptBin "keyboard-test-client" ''
+        export XDG_RUNTIME_DIR="/tmp/wawona-$(id -u)"
+        export WAYLAND_DISPLAY="wayland-0"
+        echo "[CLIENT] Connecting to $XDG_RUNTIME_DIR/$WAYLAND_DISPLAY"
+        exec ${compositor}/bin/keyboard-test-client "$@"
+      '';
+
+      # Define the main package based on platform
+      mainPackage = if pkgs.stdenv.isDarwin 
+        then (macosWrapper pkgs wawona-macos)
+        else (linuxWrapper pkgs compositor);
+
+      # Generic keyboard test client (wrapper handles env vars)
+      keyboardTestClient = keyboard-test-client-macos; 
+
+      packagesForSystem = {
+        default = mainPackage;
+        wawona = mainPackage;
+        
+        # Mobile targets
+        wawona-android = wawona-android;
+        
+        # Tooling
+        gradlegen-android = gradlegen;
+        
+        # Clients
+        keyboard-test-client = keyboardTestClient;
+      } // (pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin {
+        # macOS/iOS specific
+        wawona-ios = wawona-ios;
+        xcodegen-ios = xcodegenProject.project;
+        waypipe = waypipeWrapper pkgs buildModule.macos.waypipe;
+        foot = footWrapper pkgs buildModule.macos.foot;
+      });
+
+    in {
+      name = system;
+      value = packagesForSystem;
+    }) systems);
+
+    apps = builtins.listToAttrs (map (system: let
+      pkgs = pkgsFor system;
+      src = srcFor pkgs;
+      wv = pkgs.lib.removeSuffix "\n" (pkgs.lib.fileContents (src + "/VERSION"));
+      
+
+    in {
+      name = system;
+      value = {
+        gradlegen-android = {
           type = "app";
-          program = "${multiplexDev}/bin/wawona-multiplex";
+          program = "${(pkgs.callPackage ./dependencies/gradlegen-wawona.nix { }).generateScript}/bin/gradlegen";
         };
-        wawona-ios = {
-          type = "app";
-          program = "${wawonaBuildModule.ios}/bin/wawona-ios-simulator";
-        };
-        wawona-kernel-ios = {
-          type = "app";
-          program = "${wawonaKernelIosWrapper}/bin/wawona-kernel-ios";
-        };
-        openssh-test-ios = {
-          type = "app";
-          program = "${opensshTestIosWrapper}/bin/openssh-test-ios";
-        };
-        waypipe-test-ios = {
-          type = "app";
-          program = "${waypipeTestIosWrapper}/bin/waypipe-test-ios";
-        };
+
         wawona-android = {
           type = "app";
-          program = "${wawonaBuildModule.android}/bin/wawona-android-run";
+          program = "${self.packages.${system}.wawona-android}/bin/wawona-android-run";
         };
-        wawona-macos = {
+        
+      } // (pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin {
+        wawona-ios = {
           type = "app";
-          program = "${wawonaMacosWrapper}/bin/wawona-macos";
+          program = "${self.packages.${system}.wawona-ios.automationScript}/bin/wawona-ios-automat";
         };
-        update-android-deps = {
+
+        xcodegen-ios = {
           type = "app";
-          program = "${updateAndroidDeps}/bin/update-android-deps";
+          program = "${(pkgs.callPackage ./dependencies/xcodegen-wawona.nix {
+            inherit pkgs;
+            rustPlatform = pkgs.rustPlatform;
+            hiahkernel = hiahkernel;
+            wawonaVersion = wv;
+          }).openScript}/bin/xcodegen-open";
         };
-        waypipe-macos = {
+
+        foot = {
           type = "app";
-          program = "${waypipeMacosWrapper}/bin/waypipe-macos";
+          program = "${self.packages.${system}.foot}/bin/foot";
+        };
+      });
+    }) systems);
+    devShells = builtins.listToAttrs (map (system: let
+      pkgs = pkgsFor system;
+    in {
+      name = system;
+      value = {
+        default = pkgs.mkShell {
+          nativeBuildInputs = [
+            pkgs.pkg-config
+            pkgs.wayland-scanner
+          ];
+          buildInputs = [
+            pkgs.rustToolchain  # This provides both cargo and rustc
+            pkgs.libxkbcommon
+            pkgs.libffi
+            pkgs.wayland-protocols
+          ];
+
+          # Read TEAM_ID from .envrc if it exists, otherwise use default
+          shellHook = ''
+            export XDG_RUNTIME_DIR="/tmp/wawona-$(id -u)"
+            export WAYLAND_DISPLAY="wayland-0"
+            mkdir -p $XDG_RUNTIME_DIR
+            chmod 700 $XDG_RUNTIME_DIR
+            
+            # Load TEAM_ID from .envrc if it exists
+            if [ -f .envrc ]; then
+              TEAM_ID=$(grep '^export TEAM_ID=' .envrc | cut -d'=' -f2 | tr -d '"')
+              if [ -n "$TEAM_ID" ]; then
+                export TEAM_ID="$TEAM_ID"
+                echo "Loaded TEAM_ID from .envrc."
+              else
+                echo "Warning: TEAM_ID not found in .envrc"
+              fi
+            else
+              echo "Warning: .envrc not found. Create one with 'export TEAM_ID=\"your_team_id\"'"
+            fi
+          '';
         };
       };
-
-      formatter.${system} = pkgs.nixfmt;
-
-      devShells.${system}.default = pkgs.mkShell {
-        buildInputs = [
-          pkgs.gradle
-          pkgs.jdk17
-          androidSDK.androidsdk
-        ];
-        ANDROID_SDK_ROOT = "${androidSDK.androidsdk}/libexec/android-sdk";
-        ANDROID_NDK_ROOT = "${androidToolchain.androidndkRoot}";
-      };
-    };
+    }) systems);
+  };
 }

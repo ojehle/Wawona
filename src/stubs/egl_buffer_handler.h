@@ -1,7 +1,22 @@
 #pragma once
+#include <TargetConditionals.h>
 
+#if !TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
+#else
+// Minimal stubs for iOS to satisfy struct definition if needed, 
+// though egl_buffer_handler.c is already fully empty on iOS.
+typedef void* EGLDisplay;
+typedef void* EGLContext;
+typedef void* EGLConfig;
+typedef int EGLint;
+typedef void* EGLImageKHR;
+#define EGL_NO_DISPLAY ((EGLDisplay)0)
+#define EGL_NO_CONTEXT ((EGLContext)0)
+#define EGL_NO_IMAGE_KHR ((EGLImageKHR)0)
+#endif
+
 #include <wayland-server-core.h>
 
 // EGL buffer handler for rendering EGL buffers using KosmicKrisp+Zink

@@ -1,6 +1,8 @@
 #include "wayland_linux_dmabuf.h"
 #include "metal_dmabuf.h"
-#include "protocols/linux-dmabuf-unstable-v1-protocol.h"
+#include <wayland-server.h>
+// Removed: Legacy C protocol header (using Rust protocols)
+// #include "protocols/linux-dmabuf-unstable-v1-protocol.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>

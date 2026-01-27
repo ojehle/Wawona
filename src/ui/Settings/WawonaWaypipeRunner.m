@@ -1,4 +1,5 @@
 #import "WawonaWaypipeRunner.h"
+#import "../../logging/WawonaLog.h"
 #import "WawonaSSHClient.h"
 #import <errno.h>
 #import <spawn.h>
@@ -12,7 +13,9 @@ volatile pid_t g_active_waypipe_pgid = 0;
 
 @interface WawonaWaypipeRunner () <WawonaSSHClientDelegate>
 @property(nonatomic, assign) pid_t currentPid;
+#if !TARGET_OS_IPHONE
 @property(nonatomic, strong) NSTask *currentTask;
+#endif
 @property(nonatomic, strong) WawonaSSHClient *sshClient;
 @end
 
@@ -30,7 +33,8 @@ volatile pid_t g_active_waypipe_pgid = 0;
 - (NSString *)findWaypipeBinary {
   NSArray *searchPaths = @[
     @"/usr/local/bin/waypipe", @"/opt/homebrew/bin/waypipe",
-    @"/usr/bin/waypipe", @"~/.local/bin/waypipe"
+    @"/usr/bin/waypipe", @"~/.local/bin/waypipe",
+    @"/run/current-system/sw/bin/waypipe"
   ];
 
   for (NSString *path in searchPaths) {
@@ -80,7 +84,7 @@ volatile pid_t g_active_waypipe_pgid = 0;
       }
 
       if ([fm isExecutableFileAtPath:candidate]) {
-        NSLog(@"[Runner] Found waypipe binary at: %@", candidate);
+        WLog(@"WAYPIPE", @"Found waypipe binary at: %@", candidate);
         return candidate;
       }
     }
@@ -135,7 +139,7 @@ volatile pid_t g_active_waypipe_pgid = 0;
   return args;
 }
 
-- (NSString *)generatePreviewString:(WawonaPreferencesManager *)prefs {
+- (NSString *)generateWaypipePreviewString:(WawonaPreferencesManager *)prefs {
   NSString *bin = [self findWaypipeBinary] ?: @"waypipe";
   NSArray *args = [self buildWaypipeArguments:prefs];
   return [NSString
@@ -166,8 +170,9 @@ volatile pid_t g_active_waypipe_pgid = 0;
   // configuration)
   // - Check that the local IP address shown in settings is accessible from the
   // target
-  NSLog(@"⚠️ Running on iOS Simulator - networking may be limited. Waypipe "
-        @"connections may not work as expected.");
+  WLog(@"WAYPIPE",
+       @"Running on iOS Simulator - networking may be limited. Waypipe "
+       @"connections may not work as expected.");
 #endif
 
 #if TARGET_OS_IPHONE
@@ -279,7 +284,7 @@ volatile pid_t g_active_waypipe_pgid = 0;
   posix_spawnattr_init(&attr);
   // Put child in its own process group so we can kill all sub-processes later
   posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP);
-  posix_spawnattr_setpgid(&attr, 0);
+  posix_spawnattr_setpgroup(&attr, 0);
 
   pid_t pid;
   int status = posix_spawn(&pid, [waypipePath UTF8String], &fileActions, &attr,
@@ -297,7 +302,7 @@ volatile pid_t g_active_waypipe_pgid = 0;
   if (status == 0) {
     self.currentPid = pid;
     g_active_waypipe_pgid = pid;
-    NSLog(@"[Runner] Waypipe launched PID: %d", pid);
+    WLog(@"WAYPIPE", @"Waypipe launched PID: %d", pid);
 
     // Monitor output
     [self monitorDescriptor:stdoutPipe[0] isError:NO];
@@ -320,8 +325,8 @@ volatile pid_t g_active_waypipe_pgid = 0;
           stringWithFormat:@"Error code %d: %s", status, strerror(status)];
     }
 
-    NSLog(@"[Runner] Spawn failed: %d (%@)", status, errorMsg);
-    NSLog(@"[Runner] Binary path: %@", waypipePath);
+    WLog(@"WAYPIPE", @"Spawn failed: %d (%@)", status, errorMsg);
+    WLog(@"WAYPIPE", @"Binary path: %@", waypipePath);
 
     // Check file attributes
     NSFileManager *fm = [NSFileManager defaultManager];
@@ -381,9 +386,9 @@ volatile pid_t g_active_waypipe_pgid = 0;
     self.currentTask = task;
     self.currentPid = task.processIdentifier;
     g_active_waypipe_pgid = self.currentPid;
-    NSLog(@"[Runner] Waypipe launched via NSTask PID: %d", self.currentPid);
+    WLog(@"WAYPIPE", @"Waypipe launched via NSTask PID: %d", self.currentPid);
   } else {
-    NSLog(@"[Runner] Launch failed: %@", err);
+    WLog(@"WAYPIPE", @"Launch failed: %@", err);
   }
 #endif
 }
@@ -405,7 +410,7 @@ volatile pid_t g_active_waypipe_pgid = 0;
 }
 
 - (void)parseOutput:(NSString *)text isError:(BOOL)isError {
-  NSLog(@"[Waypipe %@] %@", isError ? @"stderr" : @"stdout", text);
+  WLog(@"WAYPIPE", @"[Waypipe %@] %@", isError ? @"stderr" : @"stdout", text);
 
   // Check for SSH prompts/errors
   if ([text containsString:@"password:"] ||
@@ -552,7 +557,7 @@ volatile pid_t g_active_waypipe_pgid = 0;
     return;
   }
 
-  NSLog(@"[Runner] SSH tunnel established for command: %@", remoteCommand);
+  WLog(@"WAYPIPE", @"SSH tunnel established for command: %@", remoteCommand);
 
   // Launch local waypipe client
   // We need to spawn 'waypipe client' with stdin/stdout connected to tunnelFd
@@ -612,7 +617,7 @@ volatile pid_t g_active_waypipe_pgid = 0;
   // Stderr -> Pipe (for logging)
   int stderrPipe[2] = {-1, -1};
   if (pipe(stderrPipe) != 0) {
-    NSLog(@"[Runner] Failed to create stderr pipe");
+    WLog(@"WAYPIPE", @"Failed to create stderr pipe");
   } else {
     posix_spawn_file_actions_adddup2(&fileActions, stderrPipe[1],
                                      STDERR_FILENO);
@@ -649,14 +654,14 @@ volatile pid_t g_active_waypipe_pgid = 0;
   if (status == 0) {
     self.currentPid = pid;
     g_active_waypipe_pgid = pid;
-    NSLog(@"[Runner] Waypipe client launched PID: %d", pid);
+    WLog(@"WAYPIPE", @"Waypipe client launched PID: %d", pid);
 
     // Monitor stderr
     if (stderrPipe[0] != -1) {
       [self monitorDescriptor:stderrPipe[0] isError:YES];
     }
   } else {
-    NSLog(@"[Runner] Failed to spawn waypipe client: %d", status);
+    WLog(@"WAYPIPE", @"Failed to spawn waypipe client: %d", status);
     if ([self.delegate
             respondsToSelector:@selector(runnerDidReceiveSSHError:)]) {
       [self.delegate
@@ -686,23 +691,25 @@ volatile pid_t g_active_waypipe_pgid = 0;
 }
 
 - (void)sshClientDidConnect:(WawonaSSHClient *)client {
-  NSLog(@"[Runner] SSH client connected");
+  WLog(@"WAYPIPE", @"SSH client connected");
 }
 
 - (void)sshClientDidDisconnect:(WawonaSSHClient *)client {
-  NSLog(@"[Runner] SSH client disconnected");
+  WLog(@"WAYPIPE", @"SSH client disconnected");
 }
 
 - (void)stopWaypipe {
+#if !TARGET_OS_IPHONE
   if (self.currentTask) {
-    NSLog(@"[Runner] Terminating waypipe task (PID %d)...", self.currentPid);
+    WLog(@"WAYPIPE", @"Terminating waypipe task (PID %d)...", self.currentPid);
     [self.currentTask terminate];
     self.currentTask = nil;
   }
+#endif
 
   if (self.currentPid > 0) {
-    NSLog(@"[Runner] Sending SIGTERM to waypipe process group %d...",
-          self.currentPid);
+    WLog(@"WAYPIPE", @"Sending SIGTERM to waypipe process group %d...",
+         self.currentPid);
     // kill(-pid) sends signal to the whole process group
     // We used POSIX_SPAWN_SETPGROUP earlier
     kill(-self.currentPid, SIGTERM);
@@ -721,7 +728,7 @@ volatile pid_t g_active_waypipe_pgid = 0;
   }
 
   if (self.sshClient) {
-    NSLog(@"[Runner] Disconnecting SSH client...");
+    WLog(@"WAYPIPE", @"Disconnecting SSH client...");
     [self.sshClient disconnect];
     self.sshClient = nil;
   }

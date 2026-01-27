@@ -39,13 +39,13 @@ else
     ];
     configurePhase = ''
       runHook preConfigure
-      export MACOSX_DEPLOYMENT_TARGET="13.0"
+      export MACOSX_DEPLOYMENT_TARGET="26.0"
       cmake -B build -S . \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX=$out \
         -DCMAKE_INSTALL_LIBDIR=lib \
         -DBUILD_SHARED_LIBS=ON \
-        -DCMAKE_OSX_DEPLOYMENT_TARGET="13.0"
+        -DCMAKE_OSX_DEPLOYMENT_TARGET="26.0"
       runHook postConfigure
     '';
     buildPhase = ''

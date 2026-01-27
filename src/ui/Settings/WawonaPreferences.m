@@ -1,11 +1,13 @@
 #import "WawonaPreferences.h"
+#import "../../logging/WawonaLog.h"
+#import "../Helpers/WawonaUIHelpers.h"
 #import "WawonaPreferencesManager.h"
 #import "WawonaSettingsModel.h"
 #import "WawonaWaypipeRunner.h"
-#if TARGET_OS_IPHONE || TARGET_OS_SIMULATOR
-#import <HIAHKernel/HIAHKernel.h>
-#endif
-// #import "../../core/WawonaKernel.h" // Removed
+// #if TARGET_OS_IPHONE || TARGET_OS_SIMULATOR
+// #import <HIAHKernel/HIAHKernel.h>
+// #endif
+//  #import "../../core/WawonaKernel.h" // Removed
 #import <Network/Network.h>
 #import <objc/runtime.h>
 
@@ -553,12 +555,12 @@
     }
 
     if ([fm isExecutableFileAtPath:path]) {
-      NSLog(@"[WawonaPreferences] Found Waypipe at: %@", path);
+      WLog(@"PREFS", @"Found Waypipe at: %@", path);
       return path;
     }
   }
 
-  NSLog(@"[WawonaPreferences] Waypipe binary not found.");
+  WLog(@"PREFS", @"Waypipe binary not found.");
   return nil;
 }
 
@@ -1058,8 +1060,8 @@
   NSString *host = prefs.sshHost;
   NSString *user = prefs.sshUser;
 
-  NSLog(@"[SSH Test] Attempting to test SSH connection to: '%@@%@'",
-        user ?: @"(nil)", host ?: @"(nil)");
+  WLog(@"SSH", @"Attempting to test SSH connection to: '%@%@'",
+       user ?: @"(nil)", host ?: @"(nil)");
 
   if (!host || host.length == 0) {
 #if TARGET_OS_IPHONE
@@ -1149,7 +1151,7 @@
     return;
   }
 
-  NSLog(@"[SSH Test] Using SSH at: %@", sshPath);
+  WLog(@"SSH", @"Using SSH at: %@", sshPath);
 
   // Build SSH command for connection test
   NSMutableArray *sshArgs = [NSMutableArray array];
@@ -1196,10 +1198,11 @@
     env[@"SSH_ASKPASS_PASSWORD"] = prefs.sshPassword;
     env[@"SSHPASS"] = prefs.sshPassword;
     env[@"WAWONA_SSH_PASSWORD"] = prefs.sshPassword;
-    NSLog(@"[SSH Test] Password set in environment (length=%lu)",
-          (unsigned long)prefs.sshPassword.length);
+    WLog(@"SSH", @"Password set in environment (length=%lu)",
+         (unsigned long)prefs.sshPassword.length);
   }
 
+#if 0 // HIAHKernel upstream is broken - disabled for now
   // Use HIAHKernel to spawn SSH, then monitor for completion (iOS only)
   HIAHKernel *kernel = [HIAHKernel sharedKernel];
   __block pid_t testPid = -1;
@@ -1231,8 +1234,8 @@
                              [progressAlert
                                  dismissViewControllerAnimated:YES
                                                     completion:^{
-                                                      UIAlertController *errorAlert = [UIAlertController
-                                                          alertControllerWithTitle:
+                                                      UIAlertController
+  *errorAlert = [UIAlertController alertControllerWithTitle:
                                                               @"SSH Spawn "
                                                               @"Failed"
                                                                            message:
@@ -1265,7 +1268,7 @@
                          }
 
                          testPid = pid;
-                         NSLog(@"[SSH Test] SSH spawned with PID: %d, "
+                         WLog(@"SSH", @"SSH spawned with PID: %d, ",
                                @"monitoring for completion via output...",
                                pid);
 
@@ -1308,8 +1311,8 @@
                                         [sshOutput containsString:@"arm64"])) {
                                      exitCode = 0;
                                      found = YES;
-                                     NSLog(
-                                         @"[SSH Test] Detected uname output in "
+                                     WLog(
+                                         @"SSH", @"Detected uname output in "
                                          @"SSH output");
                                      break;
                                    }
@@ -1329,8 +1332,8 @@
                                      if ([scanner scanInt:&parsedCode]) {
                                        exitCode = parsedCode;
                                        found = YES;
-                                       NSLog(
-                                           @"[SSH Test] Detected ssh_main exit "
+                                       WLog(
+                                           @"SSH", @"Detected ssh_main exit "
                                            @"code: %d",
                                            exitCode);
                                        break;
@@ -1342,7 +1345,7 @@
                                                       @"Permission denied"]) {
                                      exitCode = 255;
                                      found = YES;
-                                     NSLog(@"[SSH Test] Detected permission "
+                                     WLog(@"SSH", @"Detected permission "
                                            @"denied");
                                      break;
                                    }
@@ -1355,7 +1358,7 @@
                                                @"Connection timed out"]) {
                                      exitCode = 255;
                                      found = YES;
-                                     NSLog(@"[SSH Test] Detected connection "
+                                     WLog(@"SSH", @"Detected connection "
                                            @"failure");
                                      break;
                                    }
@@ -1372,261 +1375,250 @@
                                  respondsToSelector:@selector(isExited)] &&
                                  [proc isExited]) { exitCode = [[proc
                                  valueForKey:@"exitCode"] intValue]; found =
-                                 YES; NSLog(@"[SSH Test] Process marked as
+                                 YES; WLog(@"SSH", @"Process marked as");
                                  exited in kernel with code: %d", exitCode);
                                    break;
                                  }
                                  */
 
-                                 usleep(100000); // Sleep 100ms between checks
+  usleep(100000); // Sleep 100ms between checks
+}
+
+kernel.onOutput = originalOnOutput;
+
+dispatch_async(dispatch_get_main_queue(), ^{
+  [progressAlert
+      dismissViewControllerAnimated:YES
+                         completion:^{
+                           if (!found) {
+                             UIAlertController *errorAlert = [UIAlertController
+                                 alertControllerWithTitle:@"SS"
+                                                          @"H "
+                                                          @"Co"
+                                                          @"nn"
+                                                          @"ec"
+                                                          @"ti"
+                                                          @"on"
+                                                          @" T"
+                                                          @"im"
+                                                          @"eo"
+                                                          @"ut"
+                                                  message:
+                                                      [NSString
+                                                          stringWithFormat:
+                                                              @"SSH connection "
+                                                              @"test timed out "
+                                                              @"after 10 "
+                                                              @"seconds."
+                                                              @"\n\nPID: "
+                                                              @"%d\n\nThis may "
+                                                              @"indicate:\n- "
+                                                              @"Network "
+                                                              @"connectivity "
+                                                              @"issues\n- SSH "
+                                                              @"server not "
+                                                              @"responding\n- "
+                                                              @"Authentication "
+                                                              @"hanging",
+                                                              pid]
+                                           preferredStyle:
+                                               UIAlertControllerStyleAlert];
+                             [errorAlert
+                                 addAction:
+                                     [UIAlertAction
+                                         actionWithTitle:@"OK"
+                                                   style:
+                                                       UIAlertActionStyleDefault
+                                                 handler:nil]];
+                             [self presentViewController:errorAlert
+                                                animated:YES
+                                              completion:nil];
+                           } else if (exitCode == 0) {
+                             // Extract
+                             // uname
+                             // output
+                             // from the
+                             // captured
+                             // output
+                             // (filter
+                             // out debug
+                             // lines)
+                             NSString *unameOutput = @"";
+                             NSArray *outputLines =
+                                 [sshOutput componentsSeparatedByString:@"\n"];
+                             for (NSString *line in outputLines) {
+                               // uname
+                               // output
+                               // typically
+                               // contains
+                               // kernel
+                               // info -
+                               // look for
+                               // lines
+                               // with OS
+                               // names
+                               if ([line containsString:@"Linux "] ||
+                                   [line containsString:@"Darwin "] ||
+                                   [line containsString:@"FreeBSD "] ||
+                                   [line containsString:@"#"]) {
+                                 if (![line hasPrefix:@"debug"] &&
+                                     ![line hasPrefix:@"["]) {
+                                   unameOutput = [line
+                                       stringByTrimmingCharactersInSet:
+                                           [NSCharacterSet
+                                               whitespaceAndNewlineCharacterSet]];
+                                   break;
+                                 }
                                }
+                             }
 
-                               kernel.onOutput = originalOnOutput;
+                             NSString *message;
+                             if (unameOutput.length > 0) {
+                               message =
+                                   [NSString stringWithFormat:
+                                                 @"Connected to "
+                                                 @"%@@%@\n\nRemote system:\n%@",
+                                                 user, host, unameOutput];
+                             } else {
+                               message =
+                                   [NSString stringWithFormat:
+                                                 @"Successfully connected and "
+                                                 @"authenticated to %@@%@",
+                                                 user, host];
+                             }
 
-                               dispatch_async(
-                                   dispatch_get_main_queue(), ^{
-                                     [progressAlert dismissViewControllerAnimated:
-                                                        YES
-                                                                       completion:
-                                                                           ^{
-                                                                             if (!found) {
-                                                                               UIAlertController *errorAlert = [UIAlertController
-                                                                                   alertControllerWithTitle:
-                                                                                       @"SS"
-                                                                                       @"H "
-                                                                                       @"Co"
-                                                                                       @"nn"
-                                                                                       @"ec"
-                                                                                       @"ti"
-                                                                                       @"on"
-                                                                                       @" T"
-                                                                                       @"im"
-                                                                                       @"eo"
-                                                                                       @"ut"
-                                                                                                    message:
-                                                                                                        [NSString
-                                                                                                            stringWithFormat:
-                                                                                                                @"SSH connection test timed out after 10 seconds.\n\nPID: %d\n\nThis may indicate:\n- Network connectivity issues\n- SSH server not responding\n- Authentication hanging",
-                                                                                                                pid]
-                                                                                             preferredStyle:
-                                                                                                 UIAlertControllerStyleAlert];
-                                                                               [errorAlert
-                                                                                   addAction:
-                                                                                       [UIAlertAction
-                                                                                           actionWithTitle:
-                                                                                               @"OK"
-                                                                                                     style:
-                                                                                                         UIAlertActionStyleDefault
-                                                                                                   handler:
-                                                                                                       nil]];
-                                                                               [self
-                                                                                   presentViewController:
-                                                                                       errorAlert
-                                                                                                animated:
-                                                                                                    YES
-                                                                                              completion:
-                                                                                                  nil];
-                                                                             } else if (
-                                                                                 exitCode ==
-                                                                                 0) {
-                                                                               // Extract
-                                                                               // uname
-                                                                               // output
-                                                                               // from the
-                                                                               // captured
-                                                                               // output
-                                                                               // (filter
-                                                                               // out debug
-                                                                               // lines)
-                                                                               NSString
-                                                                                   *unameOutput =
-                                                                                       @"";
-                                                                               NSArray *outputLines =
-                                                                                   [sshOutput
-                                                                                       componentsSeparatedByString:
-                                                                                           @"\n"];
-                                                                               for (
-                                                                                   NSString
-                                                                                       *line in
-                                                                                           outputLines) {
-                                                                                 // uname
-                                                                                 // output
-                                                                                 // typically
-                                                                                 // contains
-                                                                                 // kernel
-                                                                                 // info -
-                                                                                 // look for
-                                                                                 // lines
-                                                                                 // with OS
-                                                                                 // names
-                                                                                 if ([line
-                                                                                         containsString:
-                                                                                             @"Linux "] ||
-                                                                                     [line
-                                                                                         containsString:
-                                                                                             @"Darwin "] ||
-                                                                                     [line
-                                                                                         containsString:
-                                                                                             @"FreeBSD "] ||
-                                                                                     [line
-                                                                                         containsString:
-                                                                                             @"#"]) {
-                                                                                   if (!
-                                                                                       [line
-                                                                                           hasPrefix:
-                                                                                               @"debug"] &&
-                                                                                       !
-                                                                                       [line
-                                                                                           hasPrefix:
-                                                                                               @"["]) {
-                                                                                     unameOutput = [line
-                                                                                         stringByTrimmingCharactersInSet:
-                                                                                             [NSCharacterSet
-                                                                                                 whitespaceAndNewlineCharacterSet]];
-                                                                                     break;
-                                                                                   }
-                                                                                 }
-                                                                               }
+                             UIAlertController *successAlert =
+                                 [UIAlertController
+                                     alertControllerWithTitle:@"SS"
+                                                              @"H "
+                                                              @"Co"
+                                                              @"nn"
+                                                              @"ec"
+                                                              @"ti"
+                                                              @"on"
+                                                              @" S"
+                                                              @"uc"
+                                                              @"ce"
+                                                              @"ss"
+                                                              @"fu"
+                                                              @"l"
+                                                      message:message
+                                               preferredStyle:
+                                                   UIAlertControllerStyleAlert];
+                             [successAlert
+                                 addAction:
+                                     [UIAlertAction
+                                         actionWithTitle:@"OK"
+                                                   style:
+                                                       UIAlertActionStyleDefault
+                                                 handler:nil]];
+                             [self presentViewController:successAlert
+                                                animated:YES
+                                              completion:nil];
+                           } else {
+                             NSString *errorDetails = @"";
+                             if (sshOutput.length > 0) {
+                               // Extract
+                               // last few
+                               // lines of
+                               // SSH
+                               // output
+                               // for
+                               // error
+                               // details
+                               NSArray *lines = [sshOutput
+                                   componentsSeparatedByString:@"\n"];
+                               NSArray *lastLines =
+                                   lines.count > 5
+                                       ? [lines
+                                             subarrayWithRange:NSMakeRange(
+                                                                   lines.count -
+                                                                       5,
+                                                                   5)]
+                                       : lines;
+                               errorDetails = [NSString
+                                   stringWithFormat:
+                                       @"\n\nLast output:\n%@",
+                                       [lastLines
+                                           componentsJoinedByString:@"\n"]];
+                             }
 
-                                                                               NSString
-                                                                                   *message;
-                                                                               if (unameOutput
-                                                                                       .length >
-                                                                                   0) {
-                                                                                 message = [NSString
-                                                                                     stringWithFormat:
-                                                                                         @"Connected to %@@%@\n\nRemote system:\n%@",
-                                                                                         user,
-                                                                                         host,
-                                                                                         unameOutput];
-                                                                               } else {
-                                                                                 message = [NSString
-                                                                                     stringWithFormat:
-                                                                                         @"Successfully connected and authenticated to %@@%@",
-                                                                                         user,
-                                                                                         host];
-                                                                               }
-
-                                                                               UIAlertController *successAlert = [UIAlertController
-                                                                                   alertControllerWithTitle:
-                                                                                       @"SS"
-                                                                                       @"H "
-                                                                                       @"Co"
-                                                                                       @"nn"
-                                                                                       @"ec"
-                                                                                       @"ti"
-                                                                                       @"on"
-                                                                                       @" S"
-                                                                                       @"uc"
-                                                                                       @"ce"
-                                                                                       @"ss"
-                                                                                       @"fu"
-                                                                                       @"l"
-                                                                                                    message:
-                                                                                                        message
-                                                                                             preferredStyle:
-                                                                                                 UIAlertControllerStyleAlert];
-                                                                               [successAlert
-                                                                                   addAction:
-                                                                                       [UIAlertAction
-                                                                                           actionWithTitle:
-                                                                                               @"OK"
-                                                                                                     style:
-                                                                                                         UIAlertActionStyleDefault
-                                                                                                   handler:
-                                                                                                       nil]];
-                                                                               [self
-                                                                                   presentViewController:
-                                                                                       successAlert
-                                                                                                animated:
-                                                                                                    YES
-                                                                                              completion:
-                                                                                                  nil];
-                                                                             } else {
-                                                                               NSString
-                                                                                   *errorDetails =
-                                                                                       @"";
-                                                                               if (sshOutput
-                                                                                       .length >
-                                                                                   0) {
-                                                                                 // Extract
-                                                                                 // last few
-                                                                                 // lines of
-                                                                                 // SSH
-                                                                                 // output
-                                                                                 // for
-                                                                                 // error
-                                                                                 // details
-                                                                                 NSArray *lines =
-                                                                                     [sshOutput
-                                                                                         componentsSeparatedByString:
-                                                                                             @"\n"];
-                                                                                 NSArray *lastLines =
-                                                                                     lines.count >
-                                                                                             5
-                                                                                         ? [lines
-                                                                                               subarrayWithRange:
-                                                                                                   NSMakeRange(
-                                                                                                       lines.count -
-                                                                                                           5,
-                                                                                                       5)]
-                                                                                         : lines;
-                                                                                 errorDetails = [NSString
-                                                                                     stringWithFormat:
-                                                                                         @"\n\nLast output:\n%@",
-                                                                                         [lastLines
-                                                                                             componentsJoinedByString:
-                                                                                                 @"\n"]];
-                                                                               }
-
-                                                                               UIAlertController *errorAlert = [UIAlertController
-                                                                                   alertControllerWithTitle:
-                                                                                       @"SS"
-                                                                                       @"H "
-                                                                                       @"Co"
-                                                                                       @"nn"
-                                                                                       @"ec"
-                                                                                       @"ti"
-                                                                                       @"on"
-                                                                                       @" F"
-                                                                                       @"ai"
-                                                                                       @"le"
-                                                                                       @"d"
-                                                                                                    message:
-                                                                                                        [NSString
-                                                                                                            stringWithFormat:
-                                                                                                                @"SSH connection failed (exit code %d).\n\nPossible reasons:\n- Invalid username or password\n- Invalid SSH key\n- Host unreachable\n- Authentication method mismatch%@",
-                                                                                                                exitCode,
-                                                                                                                errorDetails]
-                                                                                             preferredStyle:
-                                                                                                 UIAlertControllerStyleAlert];
-                                                                               [errorAlert
-                                                                                   addAction:
-                                                                                       [UIAlertAction
-                                                                                           actionWithTitle:
-                                                                                               @"OK"
-                                                                                                     style:
-                                                                                                         UIAlertActionStyleDefault
-                                                                                                   handler:
-                                                                                                       nil]];
-                                                                               [self
-                                                                                   presentViewController:
-                                                                                       errorAlert
-                                                                                                animated:
-                                                                                                    YES
-                                                                                              completion:
-                                                                                                  nil];
-                                                                             }
-                                                                           }];
-                                   });
+                             UIAlertController *errorAlert = [UIAlertController
+                                 alertControllerWithTitle:@"SS"
+                                                          @"H "
+                                                          @"Co"
+                                                          @"nn"
+                                                          @"ec"
+                                                          @"ti"
+                                                          @"on"
+                                                          @" F"
+                                                          @"ai"
+                                                          @"le"
+                                                          @"d"
+                                                  message:
+                                                      [NSString
+                                                          stringWithFormat:
+                                                              @"SSH connection "
+                                                              @"failed (exit "
+                                                              @"code "
+                                                              @"%d)."
+                                                              @"\n\nPossible "
+                                                              @"reasons:\n- "
+                                                              @"Invalid "
+                                                              @"username or "
+                                                              @"password\n- "
+                                                              @"Invalid SSH "
+                                                              @"key\n- Host "
+                                                              @"unreachable\n- "
+                                                              @"Authentication "
+                                                              @"method "
+                                                              @"mismatch%@",
+                                                              exitCode,
+                                                              errorDetails]
+                                           preferredStyle:
+                                               UIAlertControllerStyleAlert];
+                             [errorAlert
+                                 addAction:
+                                     [UIAlertAction
+                                         actionWithTitle:@"OK"
+                                                   style:
+                                                       UIAlertActionStyleDefault
+                                                 handler:nil]];
+                             [self presentViewController:errorAlert
+                                                animated:YES
+                                              completion:nil];
+                           }
+                         }];
 });
-                        }];
+});
+}];
+#endif
+  [progressAlert
+      dismissViewControllerAnimated:YES
+                         completion:^{
+                           UIAlertController *alert = [UIAlertController
+                               alertControllerWithTitle:@"SSH Test Disabled"
+                                                message:@"SSH testing via "
+                                                        @"HIAHKernel is "
+                                                        @"currently disabled."
+                                         preferredStyle:
+                                             UIAlertControllerStyleAlert];
+                           [alert
+                               addAction:
+                                   [UIAlertAction
+                                       actionWithTitle:@"OK"
+                                                 style:UIAlertActionStyleDefault
+                                               handler:nil]];
+                           [self presentViewController:alert
+                                              animated:YES
+                                            completion:nil];
+                         }];
 #else
   // macOS implementation using sshpass (if available) or expect-like pty
   // approach Run the SSH test asynchronously to avoid blocking UI
   dispatch_async(
       dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        NSLog(@"[SSH Test macOS] Starting SSH test to %@@%@", user, host);
+        WLog(@"SSH", @"Starting SSH test to %@@%@ (macOS)", user, host);
 
         NSString *password = prefs.sshPassword;
         BOOL usePasswordAuth =
@@ -1640,8 +1632,8 @@
           NSString *execPath = [[NSBundle mainBundle] executablePath];
           NSString *execDir = [execPath stringByDeletingLastPathComponent];
 
-          NSLog(@"[SSH Test macOS] Bundle path: %@", bundlePath);
-          NSLog(@"[SSH Test macOS] Executable path: %@", execPath);
+          WLog(@"SSH", @"Bundle path: %@", bundlePath);
+          WLog(@"SSH", @"Executable path: %@", execPath);
 
           // Check for bundled sshpass first (Nix-built), then fallback to
           // system locations macOS bundle structure:
@@ -1691,8 +1683,8 @@
             @"/usr/bin/sshpass"
           ];
 
-          NSLog(@"[SSH Test macOS] Searching for sshpass in %lu paths...",
-                (unsigned long)sshpassPaths.count);
+          WLog(@"SSH", @"Searching for sshpass in %lu paths...",
+               (unsigned long)sshpassPaths.count);
           for (NSString *path in sshpassPaths) {
             if (path.length > 0) {
               BOOL exists = [fm fileExistsAtPath:path];
@@ -1702,17 +1694,17 @@
                   path, exists, executable);
               if (executable) {
                 sshpassPath = path;
-                NSLog(@"[SSH Test macOS] ✓ Found sshpass at: %@", sshpassPath);
+                WLog(@"SSH", @"Found sshpass at: %@", sshpassPath);
                 break;
               }
             }
           }
 
           if (!sshpassPath) {
-            NSLog(@"[SSH Test macOS] ⚠️ sshpass not found in any location. "
-                  @"Password auth may fail.");
-            NSLog(@"[SSH Test macOS] To install sshpass: brew install "
-                  @"hudochenkov/sshpass/sshpass");
+            WLog(@"SSH",
+                 @"sshpass not found in any location. Password auth may fail.");
+            WLog(@"SSH", @"To install sshpass: brew install "
+                         @"hudochenkov/sshpass/sshpass");
           }
         }
 
@@ -1726,7 +1718,7 @@
           [sshArgs addObject:@"-p"];
           [sshArgs addObject:password];
           [sshArgs addObject:@"ssh"];
-          NSLog(@"[SSH Test macOS] Using sshpass at: %@", sshpassPath);
+          WLog(@"SSH", @"Using sshpass at: %@", sshpassPath);
         }
 
         [sshArgs addObject:@"-v"]; // Verbose for debugging
@@ -1770,8 +1762,8 @@
         [sshArgs addObject:target];
         [sshArgs addObject:@"uname -a"];
 
-        NSLog(@"[SSH Test macOS] Running: %@ %@", executablePath,
-              [sshArgs componentsJoinedByString:@" "]);
+        WLog(@"SSH", @"Running: %@ %@", executablePath,
+             [sshArgs componentsJoinedByString:@" "]);
 
         NSTask *task = [[NSTask alloc] init];
         task.launchPath = executablePath;
@@ -1801,7 +1793,7 @@
         [task launchAndReturnError:&launchError];
 
         if (launchError) {
-          NSLog(@"[SSH Test macOS] Launch error: %@", launchError);
+          WLog(@"SSH", @"Launch error: %@", launchError);
           dispatch_async(dispatch_get_main_queue(), ^{
             NSAlert *errorAlert = [[NSAlert alloc] init];
             errorAlert.messageText = @"SSH Launch Failed";
@@ -1850,7 +1842,7 @@
 
         if (timedOut) {
           [task terminate];
-          NSLog(@"[SSH Test macOS] Timed out after 15 seconds");
+          WLog(@"SSH", @"Timed out after 15 seconds");
           dispatch_async(dispatch_get_main_queue(), ^{
             NSAlert *errorAlert = [[NSAlert alloc] init];
             errorAlert.messageText = @"SSH Connection Timeout";
@@ -1878,9 +1870,9 @@
                                   encoding:NSUTF8StringEncoding]
                 ?: @"";
 
-        NSLog(@"[SSH Test macOS] Exit code: %d", exitCode);
-        NSLog(@"[SSH Test macOS] Output: %@", outputString);
-        NSLog(@"[SSH Test macOS] Stderr: %@", errorString);
+        WLog(@"SSH", @"Exit code: %d", exitCode);
+        WLog(@"SSH", @"Output: %@", outputString);
+        WLog(@"SSH", @"Stderr: %@", errorString);
 
         dispatch_async(dispatch_get_main_queue(), ^{
           NSAlert *resultAlert = [[NSAlert alloc] init];
@@ -1973,7 +1965,7 @@
   WawonaPreferencesManager *prefs = [WawonaPreferencesManager sharedManager];
   NSString *host = prefs.sshHost;
 
-  NSLog(@"[SSH Ping] Attempting to ping SSH host: '%@'", host ?: @"(nil)");
+  WLog(@"SSH", @"Attempting to ping SSH host: '%@'", host ?: @"(nil)");
 
   if (!host || host.length == 0) {
 #if TARGET_OS_IPHONE
@@ -2187,7 +2179,7 @@
   WawonaPreferencesManager *prefs = [WawonaPreferencesManager sharedManager];
   NSString *host = prefs.waypipeSSHHost ?: prefs.sshHost;
 
-  NSLog(@"[Ping] Attempting to ping host: '%@'", host ?: @"(nil)");
+  WLog(@"MAIN", @"Attempting to ping host: '%@'", host ?: @"(nil)");
 
   if (!host || host.length == 0) {
 #if TARGET_OS_IPHONE
@@ -2227,7 +2219,7 @@
     __block NSTimeInterval latency = 0;
 
     // Use Network.framework to test connectivity
-    NSLog(@"[Ping] Creating endpoint for host: '%@'", host);
+    WLog(@"MAIN", @"Creating endpoint for host: '%@'", host);
     nw_endpoint_t endpoint = nw_endpoint_create_host([host UTF8String], "22");
 
     // Explicitly configure for TCP without TLS, and enable local network access
@@ -2236,12 +2228,12 @@
         NW_PARAMETERS_DISABLE_PROTOCOL, NW_PARAMETERS_DEFAULT_CONFIGURATION);
     nw_parameters_set_include_peer_to_peer(parameters, true);
 
-    NSLog(@"[Ping] Starting connection test...");
+    WLog(@"MAIN", @"Starting connection test...");
 
     nw_connection_t connection = nw_connection_create(endpoint, parameters);
     if (!connection) {
       errorMessage = @"Failed to create Network.framework connection";
-      NSLog(@"Ping error: %@", errorMessage);
+      WLog(@"MAIN", @"Ping error: %@", errorMessage);
     } else {
       dispatch_queue_t connectionQueue = dispatch_queue_create(
           "com.aspauldingcode.wawona.ping", DISPATCH_QUEUE_SERIAL);
@@ -2319,7 +2311,7 @@
       if (dispatch_semaphore_wait(semaphore, timeout) != 0) {
         // Timeout
         errorMessage = @"Connection timeout after 10 seconds";
-        NSLog(@"Ping timeout");
+        WLog(@"MAIN", @"Ping timeout");
         nw_connection_cancel(connection);
       }
     }
@@ -2387,7 +2379,7 @@
 #pragma mark - WawonaWaypipeRunnerDelegate
 
 - (void)runnerDidReceiveSSHPasswordPrompt:(NSString *)prompt {
-  NSLog(@"[WawonaPreferences] SSH password prompt: %@", prompt);
+  WLog(@"PREFS", @"SSH password prompt: %@", prompt);
 #if TARGET_OS_IPHONE
   if (self.waypipeStatusAlert) {
     [self.waypipeStatusAlert dismissViewControllerAnimated:YES completion:nil];
@@ -3172,13 +3164,14 @@
   NSWindow *win = [[NSWindow alloc]
       initWithContentRect:NSMakeRect(0, 0, 700, 500)
                 styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
-                          NSWindowStyleMaskResizable
+                          NSWindowStyleMaskResizable |
+                          NSWindowStyleMaskFullSizeContentView
                   backing:NSBackingStoreBuffered
                     defer:NO];
   win.title = @"Wawona Settings";
-  win.titleVisibility = NSWindowTitleVisible;
-  win.titlebarAppearsTransparent = YES;
-  win.styleMask |= NSWindowStyleMaskFullSizeContentView;
+
+  // Apply Tahoe Liquid Glass styling
+  [WawonaUIHelpers configureWindowForGlassAppearance:win];
   win.movableByWindowBackground = YES;
 
   // Add Toolbar (Liquid Glass Style)
@@ -3188,12 +3181,8 @@
   toolbar.displayMode = NSToolbarDisplayModeIconOnly;
   win.toolbar = toolbar;
 
-  NSVisualEffectView *v =
-      [[NSVisualEffectView alloc] initWithFrame:NSMakeRect(0, 0, 700, 500)];
-  v.material = NSVisualEffectMaterialSidebar;
-  v.blendingMode = NSVisualEffectBlendingModeBehindWindow;
-  v.state = NSVisualEffectStateActive;
-  win.contentView = v;
+  // Use the glass content view we just configured
+  NSView *v = win.contentView;
 
   self.sidebar = [[WawonaPreferencesSidebar alloc] init];
   self.sidebar.parent = self;
@@ -3277,8 +3266,8 @@
 
 - (void)previewWaypipeCommand {
   id runner = [WawonaWaypipeRunner sharedRunner];
-  NSLog(@"[WawonaPreferences] previewWaypipeCommand: runner=%@, class=%@",
-        runner, [runner class]);
+  WLog(@"PREFS", @"previewWaypipeCommand: runner=%@, class=%@", runner,
+       [runner class]);
   NSString *cmdString = [runner
       generateWaypipePreviewString:[WawonaPreferencesManager sharedManager]];
 
@@ -3472,14 +3461,17 @@
     _switchControl.hidden = YES;
     [self addSubview:_switchControl];
 
-    _textControl = [[NSTextField alloc] init];
+    // Liquid Glass Text Field
+    _textControl = [WawonaUIHelpers createGlassTextFieldWithPlaceholder:@""];
     _textControl.translatesAutoresizingMaskIntoConstraints = NO;
     _textControl.hidden = YES;
     [self addSubview:_textControl];
 
-    _buttonControl = [NSButton buttonWithTitle:@"Run" target:nil action:nil];
+    // Liquid Glass Button
+    _buttonControl = [WawonaUIHelpers createGlassButtonWithTitle:@"Run"
+                                                          target:nil
+                                                          action:nil];
     _buttonControl.translatesAutoresizingMaskIntoConstraints = NO;
-    _buttonControl.bezelStyle = NSBezelStyleRounded;
     _buttonControl.hidden = YES;
     [self addSubview:_buttonControl];
 

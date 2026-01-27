@@ -21,7 +21,7 @@ pkgs.stdenv.mkDerivation rec {
 
   src = pkgs.fetchurl {
     url = "https://www.freedesktop.org/software/fontconfig/release/fontconfig-${version}.tar.xz";
-    sha256 = "sha256-m8rnYsHtPCDzKLMjIbSbxqcpD0bAXJ2OeU0HXHDOlLk=";
+    sha256 = "sha256-Y6BljQ4G4PqIYQZFK1jvBPIfWCAuoCqUw53g0zNdfA4=";
   };
 
   nativeBuildInputs = with pkgs; [
@@ -30,6 +30,7 @@ pkgs.stdenv.mkDerivation rec {
     ninja
     gperf
     python3
+    gettext
   ];
 
   buildInputs = [

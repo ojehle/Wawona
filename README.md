@@ -18,7 +18,21 @@
 
 1. Use an Apple Silicon Mac.
 2. Install Nix.
-3. Build with the Nix flake.
+3. Configure your environment (see below).
+4. Build with the Nix flake.
+
+### Environment Configuration
+
+This project uses a simple `.envrc` file to manage your Apple Development Team ID.
+
+1.  **Create or edit `.envrc`**:
+    ```bash
+    echo 'export TEAM_ID="your_apple_team_id_here"' > .envrc
+    ```
+    
+    Replace `your_apple_team_id_here` with your actual Apple Development Team ID.
+
+2.  **The environment is automatically loaded** when you use `nix develop` - no additional tools required!
 
 > For detailed instructions and available build targets, see → [Compilation Guide](docs/compilation.md).
 
@@ -29,6 +43,8 @@
 ### Why Nix?
 
 I use Nix to maintain a clean repository free of vendored dependency source code while ensuring hermetic, reproducible builds across all platforms. Nix allows us to define precise build environments for iOS, macOS, and Android without polluting your system.
+
+> _B`*`tch, I worked hard to make nix your ONLY dependency, use it!_
 
 #### Xcode Wrapper for Reproducible Builds
 

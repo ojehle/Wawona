@@ -23,13 +23,8 @@ void WawonaLogImpl(NSString *module, NSString *format, ...) {
   va_end(args);
 
   // Output: YYYY-MM-DD HH:MM:SS [MODULE] message
-  // Use fprintf to avoid NSLog's own timestamp
+  // Use fprintf to avoid NSLog's own timestamp and process info
   fprintf(stdout, "%s [%s] %s\n", time_str, [module UTF8String],
           [message UTF8String]);
   fflush(stdout);
-
-#if defined(DEBUG) && DEBUG
-  // Also log to system log in debug builds
-  NSLog(@"[%@] %@", module, message);
-#endif
 }

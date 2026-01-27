@@ -1,5 +1,5 @@
 #include "wayland_seat.h"
-#include "../core/WawonaCompositor.h"
+#include "../platform/macos/WawonaCompositor.h"
 #include "compat/macos/stubs/libinput-macos/posix-compat.h"
 #include "logging.h"
 #include <errno.h>

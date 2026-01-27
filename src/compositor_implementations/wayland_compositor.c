@@ -186,20 +186,20 @@ static void surface_commit(struct wl_client *client,
       surface->buffer_height = wl_shm_buffer_get_height(shm_buffer);
       surface->width = surface->buffer_width;
       surface->height = surface->buffer_height;
-    } else {
-      if (is_dmabuf_buffer(surface->buffer_resource)) {
-        struct metal_dmabuf_buffer *dmabuf_buffer =
-            dmabuf_buffer_get(surface->buffer_resource);
-        if (dmabuf_buffer) {
-          surface->buffer_width = dmabuf_buffer->width;
-          surface->buffer_height = dmabuf_buffer->height;
-          surface->width = dmabuf_buffer->width;
-          surface->height = dmabuf_buffer->height;
-        }
-      } else {
-        // Vulkan-only mode - no EGL buffers supported
-        // Skip non-SHM/dmabuf buffers
-      }
+      /*} else {
+        if (is_dmabuf_buffer(surface->buffer_resource)) {
+          struct metal_dmabuf_buffer *dmabuf_buffer =
+              dmabuf_buffer_get(surface->buffer_resource);
+          if (dmabuf_buffer) {
+            surface->buffer_width = dmabuf_buffer->width;
+            surface->buffer_height = dmabuf_buffer->height;
+            surface->width = dmabuf_buffer->width;
+            surface->height = dmabuf_buffer->height;
+          }
+        } else {
+          // Vulkan-only mode - no EGL buffers supported
+          // Skip non-SHM/dmabuf buffers
+        }*/
     }
 
     if (surface->buffer_scale < 1)
@@ -212,6 +212,9 @@ static void surface_commit(struct wl_client *client,
 
   if (g_wl_compositor && g_wl_compositor->render_callback) {
     g_wl_compositor->render_callback(surface);
+  } else {
+    log_printf("COMPOSITOR",
+               "WARNING: No render_callback set or compositor NULL\n");
   }
 }
 
@@ -420,21 +423,15 @@ void wl_compositor_destroy(struct wl_compositor_impl *compositor) {
 struct wl_surface_impl *wl_get_all_surfaces(void) { return g_wl_surface_list; }
 
 int wl_send_frame_callbacks(void) {
-  log_printf("COMPOSITOR", "wl_send_frame_callbacks: entry - g_wl_surface_list=%p\n", g_wl_surface_list);
-  
   if (!g_wl_surface_list) {
-    log_printf("COMPOSITOR", "wl_send_frame_callbacks: no surfaces, returning 0\n");
     return 0;
   }
 
   int count = 0;
   struct wl_surface_impl *surface = g_wl_surface_list;
-  log_printf("COMPOSITOR", "wl_send_frame_callbacks: starting with surface %p\n", surface);
   while (surface) {
     struct wl_surface_impl *next_surface = surface->next;
-    
-    log_printf("COMPOSITOR", "wl_send_frame_callbacks: processing surface %p, next=%p\n", surface, next_surface);
-    
+
     // Validate surface structure
     uintptr_t surface_addr = (uintptr_t)surface;
     if (surface_addr < 0x1000 || surface_addr > 0x7FFFFFFFFFFFF000) {
@@ -444,27 +441,26 @@ int wl_send_frame_callbacks(void) {
     }
 
     if (surface->frame_callback) {
-      log_printf("COMPOSITOR", "Processing frame callback for surface %p\n", surface);
-      
       uintptr_t callback_addr = (uintptr_t)surface->frame_callback;
       if (callback_addr < 0x1000 || callback_addr > 0x7FFFFFFFFFFFF000) {
-        log_printf("COMPOSITOR", "Invalid callback address %p for surface %p\n", surface->frame_callback, surface);
+        log_printf("COMPOSITOR", "Invalid callback address %p for surface %p\n",
+                   surface->frame_callback, surface);
         surface->frame_callback = NULL;
         surface = next_surface;
         continue;
       }
 
       if (!surface->resource) {
-        log_printf("COMPOSITOR", "Surface %p has NULL resource\n", surface);
         surface->frame_callback = NULL;
         surface = next_surface;
         continue;
       }
 
-      log_printf("COMPOSITOR", "Getting user data for surface resource %p\n", surface->resource);
       void *surface_user_data = wl_resource_get_user_data(surface->resource);
       if (surface_user_data != surface) {
-        log_printf("COMPOSITOR", "Surface user data mismatch: expected %p, got %p\n", surface, surface_user_data);
+        log_printf("COMPOSITOR",
+                   "Surface user data mismatch: expected %p, got %p\n", surface,
+                   surface_user_data);
         surface->frame_callback = NULL;
         surface = next_surface;
         continue;
@@ -473,26 +469,25 @@ int wl_send_frame_callbacks(void) {
       struct wl_client *surface_client =
           wl_resource_get_client(surface->resource);
       if (!surface_client) {
-        log_printf("COMPOSITOR", "Surface %p has NULL client\n", surface);
         surface->frame_callback = NULL;
         surface = next_surface;
         continue;
       }
 
-      log_printf("COMPOSITOR", "Getting user data for frame callback %p\n", surface->frame_callback);
-      
       // Additional validation: check if frame callback resource is still valid
-      struct wl_client *callback_client = wl_resource_get_client(surface->frame_callback);
+      struct wl_client *callback_client =
+          wl_resource_get_client(surface->frame_callback);
       if (!callback_client) {
-        log_printf("COMPOSITOR", "Frame callback %p has NULL client - skipping\n", surface->frame_callback);
         surface->frame_callback = NULL;
         surface = next_surface;
         continue;
       }
-      
+
       void *cb_user_data = wl_resource_get_user_data(surface->frame_callback);
       if (cb_user_data != surface) {
-        log_printf("COMPOSITOR", "Frame callback user data mismatch: expected %p, got %p\n", surface, cb_user_data);
+        log_printf("COMPOSITOR",
+                   "Frame callback user data mismatch: expected %p, got %p\n",
+                   surface, cb_user_data);
         surface->frame_callback = NULL;
         surface = next_surface;
         continue;
@@ -502,16 +497,13 @@ int wl_send_frame_callbacks(void) {
       clock_gettime(CLOCK_MONOTONIC, &ts);
       uint32_t time = (uint32_t)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
 
-      log_printf("COMPOSITOR", "Sending frame callback done for surface %p at time %u\n", surface, time);
       wl_callback_send_done(surface->frame_callback, time);
       wl_resource_destroy(surface->frame_callback);
       surface->frame_callback = NULL;
       count++;
-      log_printf("COMPOSITOR", "Frame callback completed for surface %p\n", surface);
     }
     surface = next_surface;
   }
-  log_printf("COMPOSITOR", "Frame callbacks sent: %d\n", count);
   return count;
 }
 
