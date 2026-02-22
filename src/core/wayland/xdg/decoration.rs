@@ -50,7 +50,7 @@ unsafe impl Sync for ToplevelDecorationData {}
 
 #[derive(Debug, Default)]
 pub struct DecorationState {
-    pub decorations: HashMap<u32, ToplevelDecorationData>,
+    pub decorations: HashMap<(wayland_server::backend::ClientId, u32), ToplevelDecorationData>,
 }
 
 
@@ -105,8 +105,9 @@ impl Dispatch<ZxdgDecorationManagerV1, ()> for CompositorState {
 
                 
                 let decoration_data = ToplevelDecorationData::new(window_id, Some(decoration.clone()));
+                let client_id = _client.id();
                 
-                state.xdg.decoration.decorations.insert(decoration.id().protocol_id(), decoration_data);
+                state.xdg.decoration.decorations.insert((client_id, decoration.id().protocol_id()), decoration_data);
 
                 
                 // Send the preferred mode based on compositor policy
@@ -228,7 +229,9 @@ impl Dispatch<ZxdgToplevelDecorationV1, u32> for CompositorState {
                     Mode::ServerSide => DecorationMode::ServerSide,
                     _ => DecorationMode::ClientSide,
                 };
-                if let Some(data) = state.xdg.decoration.decorations.get(&dec_id) {
+                let client_id = _client.id();
+                let dec_id = resource.id().protocol_id();
+                if let Some(data) = state.xdg.decoration.decorations.get(&(client_id, dec_id)) {
                     if let Some(window_arc) = state.get_window(data.window_id) {
                         let mut window = window_arc.write().unwrap();
                         window.decoration_mode = new_mode;
@@ -244,7 +247,9 @@ impl Dispatch<ZxdgToplevelDecorationV1, u32> for CompositorState {
                 resource.configure(preferred_mode);
             }
             zxdg_toplevel_decoration_v1::Request::Destroy => {
-                state.xdg.decoration.decorations.remove(&dec_id);
+                let client_id = _client.id();
+                let dec_id = resource.id().protocol_id();
+                state.xdg.decoration.decorations.remove(&(client_id, dec_id));
                 tracing::debug!("zxdg_toplevel_decoration_v1 destroyed");
             }
 

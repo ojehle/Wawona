@@ -129,8 +129,16 @@ impl CompositorState {
             None
         };
 
+        let client_id = if let Some(surface) = self.get_surface(surface_id) {
+            surface.read().unwrap().client_id.clone()
+        } else {
+            None
+        };
+
         if let Some(bid) = release_id {
-            self.queue_buffer_release(bid);
+            if let Some(cid) = client_id {
+                self.queue_buffer_release(cid, bid);
+            }
         }
 
         if !is_sync {
@@ -148,17 +156,17 @@ impl CompositorState {
     }
 
     /// Queue a buffer for release after next frame presentation
-    pub fn queue_buffer_release(&mut self, buffer_id: u32) {
-        if !self.pending_buffer_releases.contains(&buffer_id) {
-            self.pending_buffer_releases.push(buffer_id);
+    pub fn queue_buffer_release(&mut self, client_id: ClientId, buffer_id: u32) {
+        if !self.pending_buffer_releases.contains(&(client_id.clone(), buffer_id)) {
+            self.pending_buffer_releases.push((client_id, buffer_id));
         }
     }
 
     /// Flush all pending buffer releases (called after frame presentation)
     pub fn flush_buffer_releases(&mut self) {
         let releases: Vec<_> = self.pending_buffer_releases.drain(..).collect();
-        for bid in releases {
-            self.release_buffer(bid);
+        for (cid, bid) in releases {
+            self.release_buffer(cid, bid);
         }
     }
 
@@ -176,7 +184,9 @@ impl CompositorState {
                     };
                     
                     if let Some(bid) = release_id {
-                        self.queue_buffer_release(bid);
+                        if let Some(cid) = self.get_surface(child_id).and_then(|s| s.read().unwrap().client_id.clone()) {
+                            self.queue_buffer_release(cid, bid);
+                        }
                     }
                     
                     self.apply_subsurface_cached_state_recursive(child_id);
@@ -191,7 +201,13 @@ impl CompositorState {
         let surface = surface_ref.write().unwrap();
         
         let mut window_id = self.surface_to_window.get(&id).copied();
-        let layer_id = self.wlr.surface_to_layer.get(&id).copied();
+        
+        let client_id = surface.client_id.clone();
+        let layer_id = if let Some(cid) = &client_id {
+            self.wlr.surface_to_layer.get(&(cid.clone(), id)).copied()
+        } else {
+            None
+        };
         
         if window_id.is_none() && layer_id.is_none() {
             if let Some(sub) = self.subsurfaces.get(&id) {
@@ -211,11 +227,24 @@ impl CompositorState {
         }
 
         let is_cursor = self.seat.pointer.cursor_surface == Some(id);
+        let client_id = if let Some(cid) = client_id {
+            cid
+        } else {
+            return;
+        };
         
-        if let Some(_wid) = window_id {
+        if let Some(wid) = window_id {
+            // Synchronize window dimensions with surface dimensions
+            if let Some(window) = self.get_window(wid) {
+                let mut window = window.write().unwrap();
+                window.width = surface.current.width;
+                window.height = surface.current.height;
+            }
+
             let buffer_id = surface.current.buffer_id.map(|id| id as u64);
             self.pending_compositor_events.push(
                 crate::core::compositor::CompositorEvent::SurfaceCommitted {
+                    client_id: client_id.clone(),
                     surface_id: id,
                     buffer_id,
                 }
@@ -224,6 +253,7 @@ impl CompositorState {
             let buffer_id = surface.current.buffer_id.map(|id| id as u64);
             self.pending_compositor_events.push(
                 crate::core::compositor::CompositorEvent::LayerSurfaceCommitted {
+                    client_id: client_id.clone(),
                     surface_id: id,
                     buffer_id,
                 }
@@ -232,6 +262,7 @@ impl CompositorState {
             let buffer_id = surface.current.buffer_id.map(|id| id as u64);
             self.pending_compositor_events.push(
                 crate::core::compositor::CompositorEvent::CursorCommitted {
+                    client_id: client_id.clone(),
                     surface_id: id,
                     buffer_id,
                     hotspot_x: self.seat.pointer.cursor_hotspot_x as i32,
@@ -307,20 +338,20 @@ impl CompositorState {
     // =========================================================================
 
     /// Add a buffer
-    pub fn add_buffer(&mut self, buffer: crate::core::surface::Buffer) {
+    pub fn add_buffer(&mut self, client_id: ClientId, buffer: crate::core::surface::Buffer) {
         let id = buffer.id;
-        self.buffers.insert(id, Arc::new(RwLock::new(buffer)));
+        self.buffers.insert((client_id, id), Arc::new(RwLock::new(buffer)));
         tracing::debug!("Added buffer {}", id);
     }
 
     /// Get a buffer by ID
-    pub fn get_buffer(&self, id: u32) -> Option<Arc<RwLock<crate::core::surface::Buffer>>> {
-        self.buffers.get(&id).cloned()
+    pub fn get_buffer(&self, client_id: ClientId, id: u32) -> Option<Arc<RwLock<crate::core::surface::Buffer>>> {
+        self.buffers.get(&(client_id, id)).cloned()
     }
 
     /// Release a buffer (notify client we are done with it)
-    pub fn release_buffer(&mut self, buffer_id: u32) {
-        if let Some(buffer) = self.buffers.get(&buffer_id) {
+    pub fn release_buffer(&mut self, client_id: ClientId, buffer_id: u32) {
+        if let Some(buffer) = self.buffers.get(&(client_id, buffer_id)) {
             let mut buffer = buffer.write().unwrap();
             buffer.release();
             tracing::debug!("Released buffer {}", buffer_id);
@@ -328,8 +359,8 @@ impl CompositorState {
     }
 
     /// Remove a buffer
-    pub fn remove_buffer(&mut self, id: u32) {
-        self.buffers.remove(&id);
+    pub fn remove_buffer(&mut self, client_id: ClientId, id: u32) {
+        self.buffers.remove(&(client_id, id));
         tracing::debug!("Removed buffer {}", id);
     }
 }

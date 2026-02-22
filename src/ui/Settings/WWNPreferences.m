@@ -524,7 +524,11 @@ static UIImage *WWNLogoForStyle(UIUserInterfaceStyle style) {
     ITEM(@"Enable Wawona Shell", @"EnableLauncher", WSettingSwitch, @NO,
          @"Start the built-in Wayland Shell."),
     ITEM(@"Enable Weston Simple SHM", @"WestonSimpleSHMEnabled", WSettingSwitch,
-         @NO, @"Start weston-simple-shm on launch.")
+         @NO, @"Start weston-simple-shm on launch."),
+    ITEM(@"Enable Native Weston", @"WestonEnabled", WSettingSwitch, @NO,
+         @"Start Weston natively inside Wawona."),
+    ITEM(@"Enable Weston Terminal", @"WestonTerminalEnabled", WSettingSwitch,
+         @NO, @"Start Weston Terminal natively.")
   ];
   [sects addObject:advanced];
 
@@ -751,7 +755,7 @@ static UIImage *WWNLogoForStyle(UIUserInterfaceStyle style) {
   WWNSettingItem *headerItem =
       ITEM(@"Wawona", nil, WSettingHeader, nil,
            @"A Wayland Compositor for macOS, iOS & Android");
-  headerItem.imageName = @"WWNAdaptiveLogo";
+  headerItem.imageName = @"Wawona";
 
   WWNSettingItem *sourceItem =
       ITEM(@"Source Code", nil, WSettingLink, nil, @"View on GitHub");
@@ -4179,21 +4183,19 @@ static UIImage *WWNLogoForStyle(UIUserInterfaceStyle style) {
     if (item.imageURL || item.imageName) {
       self.headerImageView.hidden = NO;
 
-      NSImage *icon = nil;
+      // Load the adaptive Wawona icon using standard AppKit resolution.
+      // This will find Wawona.icon bundle on macOS 26+.
+      NSImage *icon = [NSImage imageNamed:@"Wawona"];
 
-      // Load the Wawona dark logo PNG from the app bundle
-      NSString *darkPath =
-          [[NSBundle mainBundle] pathForResource:@"Wawona-iOS-Dark-1024x1024@1x"
-                                          ofType:@"png"];
-      if (darkPath) {
-        icon = [[NSImage alloc] initWithContentsOfFile:darkPath];
-      }
-
-      // Fallback: try loading from source tree (Xcode dev builds)
+      // Fallback: try loading specific PNGs if imageNamed fails or we want a
+      // specific style
       if (!icon) {
-        icon = [[NSImage alloc]
-            initWithContentsOfFile:
-                @"src/resources/Wawona-iOS-Dark-1024x1024@1x.png"];
+        NSString *darkPath = [[NSBundle mainBundle]
+            pathForResource:@"Wawona-iOS-Dark-1024x1024@1x"
+                     ofType:@"png"];
+        if (darkPath) {
+          icon = [[NSImage alloc] initWithContentsOfFile:darkPath];
+        }
       }
 
       if (icon) {

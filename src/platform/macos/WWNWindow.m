@@ -1,24 +1,24 @@
 #import "WWNWindow.h"
-#import "WWNCompositorBridge.h"
 #import "../../util/WWNLog.h"
+#import "WWNCompositorBridge.h"
 #import "WWNSettings.h"
 
 //
 // WWNView Implementation (macOS)
 //
 @implementation WWNView {
-  CALayer *_contentLayer;
+  CALayer *contentLayer_;
   // NSTextInputClient state for IME / emoji composition
-  NSString *_markedText;
-  NSRange _markedRange;
-  NSRange _selectedRange;
+  NSString *markedText_;
+  NSRange markedRange_;
+  NSRange selectedRange_;
   // Set to YES during keyDown: if the raw keycode was already injected,
   // so insertText:replacementRange: can skip duplicate key events.
-  BOOL _handledByKeyEvent;
+  BOOL handledByKeyEvent_;
 
   // Text Assist proxy buffer for autocorrect / text replacement context
-  NSMutableString *_textBuffer;
-  BOOL _textAssistEnabled;
+  NSMutableString *textBuffer_;
+  BOOL textAssistEnabled_;
 }
 
 - (instancetype)initWithFrame:(NSRect)frameRect {
@@ -26,58 +26,80 @@
   if (self) {
     self.wantsLayer = YES;
     self.layer.masksToBounds = YES;
-    _contentLayer = [CALayer layer];
-    _contentLayer.contentsGravity = kCAGravityResize;
-    _contentLayer.masksToBounds = NO; // Allow subsurfaces to extend outside (Wayland spec)
-    _contentLayer.autoresizingMask =
+
+    // Prevent NSView from scaling or redrawing contents during resize
+    self.layerContentsRedrawPolicy = NSViewLayerContentsRedrawNever;
+    self.layerContentsPlacement = NSViewLayerContentsPlacementTopLeft;
+
+    contentLayer_ = [CALayer layer];
+    contentLayer_.contentsGravity = kCAGravityResize;
+    contentLayer_.masksToBounds =
+        NO; // Allow subsurfaces to extend outside (Wayland spec)
+    contentLayer_.autoresizingMask =
         kCALayerWidthSizable | kCALayerHeightSizable;
-    [self.layer addSublayer:_contentLayer];
+    [self.layer addSublayer:contentLayer_];
     [self updateTrackingAreas];
 
-    _textBuffer = [NSMutableString string];
-    _textAssistEnabled = WWNSettings_GetEnableTextAssist();
+    textBuffer_ = [NSMutableString string];
+    textAssistEnabled_ = WWNSettings_GetEnableTextAssist();
+
+    [[NSNotificationCenter defaultCenter]
+        addObserver:self
+           selector:@selector(defaultsChanged:)
+               name:NSUserDefaultsDidChangeNotification
+             object:nil];
   }
   return self;
 }
 
+- (void)dealloc {
+  [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
+- (void)defaultsChanged:(NSNotification *)notification {
+  textAssistEnabled_ = WWNSettings_GetEnableTextAssist();
+  [self.window invalidateCursorRectsForView:self];
+}
+
 - (CALayer *)contentLayer {
-  if (!_contentLayer) {
-    _contentLayer = [CALayer layer];
-    _contentLayer.contentsGravity = kCAGravityResize;
-    _contentLayer.masksToBounds = NO; // Allow subsurfaces to extend outside (Wayland spec)
-    _contentLayer.autoresizingMask =
+  if (!contentLayer_) {
+    contentLayer_ = [CALayer layer];
+    contentLayer_.contentsGravity = kCAGravityResize;
+    contentLayer_.masksToBounds =
+        NO; // Allow subsurfaces to extend outside (Wayland spec)
+    contentLayer_.autoresizingMask =
         kCALayerWidthSizable | kCALayerHeightSizable;
     if (self.layer) {
-      [self.layer addSublayer:_contentLayer];
+      [self.layer addSublayer:contentLayer_];
     }
   }
-  return _contentLayer;
+  return contentLayer_;
 }
 
 - (void)setFrame:(NSRect)frame {
   [super setFrame:frame];
-  _contentLayer.frame = self.bounds;
+  contentLayer_.frame = self.bounds;
 }
 
 - (void)setBounds:(NSRect)bounds {
   [super setBounds:bounds];
-  _contentLayer.frame = self.bounds;
+  contentLayer_.frame = self.bounds;
 }
 
 - (void)layout {
   [super layout];
-  _contentLayer.frame = self.bounds;
+  contentLayer_.frame = self.bounds;
 }
 
 - (void)updateLayer {
   [super updateLayer];
-  _contentLayer.frame = self.bounds;
+  contentLayer_.frame = self.bounds;
 }
 
 - (void)updateTrackingAreas {
   // Clear existing tracking areas
-  for (NSTrackingArea *area in self.trackingAreas) {
-    [self removeTrackingArea:area];
+  for (NSTrackingArea *area_to_remove in self.trackingAreas) {
+    [self removeTrackingArea:area_to_remove];
   }
 
   // Create new tracking area for entire bounds
@@ -181,8 +203,8 @@
 }
 
 // Helper to translate macOS keycodes to XKB/Evdev keycodes (offset by 8)
-static uint32_t macos_to_xkb_keycode(unsigned short mac_code) {
-  switch (mac_code) {
+static uint32_t MacosToXkbKeycode(unsigned short macCode) {
+  switch (macCode) {
   case 0:
     return 30; // A -> KEY_A
   case 1:
@@ -365,7 +387,7 @@ static uint32_t macos_to_xkb_keycode(unsigned short mac_code) {
 
   // First, try the raw keycode path for maximum compatibility with
   // Wayland clients that only support wl_keyboard (e.g. terminals).
-  uint32_t keycode = macos_to_xkb_keycode(event.keyCode);
+  uint32_t keycode = MacosToXkbKeycode(event.keyCode);
   if (keycode > 0) {
     [[WWNCompositorBridge sharedBridge]
         injectKeyWithKeycode:keycode
@@ -379,13 +401,13 @@ static uint32_t macos_to_xkb_keycode(unsigned short mac_code) {
   //  - IME composition works (e.g. Japanese input)
   // For ordinary characters this will call insertText:replacementRange:
   // which we use ONLY for text that can't be expressed as a keycode.
-  _handledByKeyEvent = (keycode > 0);
+  handledByKeyEvent_ = (keycode > 0);
   [self interpretKeyEvents:@[ event ]];
-  _handledByKeyEvent = NO;
+  handledByKeyEvent_ = NO;
 }
 
 - (void)keyUp:(NSEvent *)event {
-  uint32_t keycode = macos_to_xkb_keycode(event.keyCode);
+  uint32_t keycode = MacosToXkbKeycode(event.keyCode);
   if (keycode > 0) {
     [[WWNCompositorBridge sharedBridge]
         injectKeyWithKeycode:keycode
@@ -396,14 +418,14 @@ static uint32_t macos_to_xkb_keycode(unsigned short mac_code) {
 
 - (void)flagsChanged:(NSEvent *)event {
   WWNLog("INPUT", @"flagsChanged: keyCode=%hu flags=0x%lx", event.keyCode,
-        (unsigned long)event.modifierFlags);
+         (unsigned long)event.modifierFlags);
 
   static NSMutableSet *pressedModifiers = nil;
   if (!pressedModifiers) {
     pressedModifiers = [NSMutableSet set];
   }
 
-  uint32_t keycode = macos_to_xkb_keycode(event.keyCode);
+  uint32_t keycode = MacosToXkbKeycode(event.keyCode);
   if (keycode > 0) {
     // Track physical key state
     BOOL isPressed = NO;
@@ -418,7 +440,7 @@ static uint32_t macos_to_xkb_keycode(unsigned short mac_code) {
     }
 
     WWNLog("INPUT", @"Determined modifier key state: keycode=%u isPressed=%d",
-          keycode, isPressed);
+           keycode, isPressed);
 
     [[WWNCompositorBridge sharedBridge]
         injectKeyWithKeycode:keycode
@@ -446,13 +468,13 @@ static uint32_t macos_to_xkb_keycode(unsigned short mac_code) {
     locked |= 2;
   }
 
-  WWNLog("INPUT", @"Injecting modifiers state: depressed=%u locked=%u", depressed,
-        locked);
+  WWNLog("INPUT", @"Injecting modifiers state: depressed=%u locked=%u",
+         depressed, locked);
 
   [[WWNCompositorBridge sharedBridge] injectModifiersWithDepressed:depressed
-                                                              latched:0
-                                                               locked:locked
-                                                                group:0];
+                                                           latched:0
+                                                            locked:locked
+                                                             group:0];
 }
 
 // ---------------------------------------------------------------------------
@@ -470,40 +492,39 @@ static uint32_t macos_to_xkb_keycode(unsigned short mac_code) {
     return;
 
   // Clear any in-progress composition
-  _markedText = nil;
-  _markedRange = NSMakeRange(NSNotFound, 0);
+  markedText_ = nil;
+  markedRange_ = NSMakeRange(NSNotFound, 0);
 
   // Update the proxy text buffer for context (used by autocorrect)
-  if (_textAssistEnabled) {
+  if (textAssistEnabled_) {
     if (replacementRange.location != NSNotFound &&
-        replacementRange.location < _textBuffer.length) {
-      NSRange safeRange = NSMakeRange(
-          replacementRange.location,
-          MIN(replacementRange.length,
-              _textBuffer.length - replacementRange.location));
+        replacementRange.location < textBuffer_.length) {
+      NSRange safeRange =
+          NSMakeRange(replacementRange.location,
+                      MIN(replacementRange.length,
+                          textBuffer_.length - replacementRange.location));
 
       // Compute deletion needed before committing replacement text
       WWNCompositorBridge *bridge = [WWNCompositorBridge sharedBridge];
       if (safeRange.length > 0) {
         // Delete the text being replaced, then commit new text
         [bridge textInputDeleteSurrounding:(uint32_t)safeRange.length
-                                 afterLength:0];
+                               afterLength:0];
       }
-      [_textBuffer replaceCharactersInRange:safeRange withString:str];
-      _selectedRange = NSMakeRange(safeRange.location + str.length, 0);
+      [textBuffer_ replaceCharactersInRange:safeRange withString:str];
+      selectedRange_ = NSMakeRange(safeRange.location + str.length, 0);
       [bridge textInputCommitString:str];
       return;
-    } else {
-      [_textBuffer appendString:str];
-      _selectedRange = NSMakeRange(_textBuffer.length, 0);
     }
+    [textBuffer_ appendString:str];
+    selectedRange_ = NSMakeRange(textBuffer_.length, 0);
   }
 
   // If the raw keycode was already injected by keyDown:, we don't need
   // to send it again — the wl_keyboard path already delivered it.
   // We only fall through to text-input-v3 for text that CAN'T be
   // expressed as a keycode (emoji, accented chars from dead keys, CJK).
-  if (_handledByKeyEvent) {
+  if (handledByKeyEvent_) {
     return;
   }
 
@@ -522,60 +543,63 @@ static uint32_t macos_to_xkb_keycode(unsigned short mac_code) {
                       ? [(NSAttributedString *)string string]
                       : (NSString *)string;
 
-  _markedText = str.length > 0 ? [str copy] : nil;
-  _markedRange =
-      _markedText ? NSMakeRange(0, _markedText.length) : NSMakeRange(NSNotFound, 0);
-  _selectedRange = selectedRange;
+  markedText_ = str.length > 0 ? [str copy] : nil;
+  markedRange_ = markedText_ ? NSMakeRange(0, markedText_.length)
+                             : NSMakeRange(NSNotFound, 0);
+  selectedRange_ = selectedRange;
 
-  if (_markedText) {
+  if (markedText_) {
     [[WWNCompositorBridge sharedBridge]
-        textInputPreeditString:_markedText
+        textInputPreeditString:markedText_
                    cursorBegin:(int32_t)selectedRange.location
                      cursorEnd:(int32_t)(selectedRange.location +
                                          selectedRange.length)];
   } else {
     // Empty preedit → clear composition
     [[WWNCompositorBridge sharedBridge] textInputPreeditString:@""
-                                                  cursorBegin:0
-                                                    cursorEnd:0];
+                                                   cursorBegin:0
+                                                     cursorEnd:0];
   }
 }
 
 - (void)unmarkText {
-  if (_markedText) {
+  if (markedText_) {
     // Commit the marked text
-    [[WWNCompositorBridge sharedBridge] textInputCommitString:_markedText];
+    [[WWNCompositorBridge sharedBridge] textInputCommitString:markedText_];
   }
-  _markedText = nil;
-  _markedRange = NSMakeRange(NSNotFound, 0);
+  markedText_ = nil;
+  markedRange_ = NSMakeRange(NSNotFound, 0);
 }
 
 - (BOOL)hasMarkedText {
-  return _markedText != nil && _markedText.length > 0;
+  return markedText_ != nil && markedText_.length > 0;
 }
 
 - (NSRange)markedRange {
-  return _markedRange;
+  return markedRange_;
 }
 
 - (NSRange)selectedRange {
-  return _selectedRange;
+  return selectedRange_;
 }
 
 - (NSAttributedString *)attributedSubstringForProposedRange:(NSRange)range
-                                                actualRange:
-                                                    (NSRangePointer)actualRange {
-  if (!_textAssistEnabled || _textBuffer.length == 0)
+                                                actualRange:(NSRangePointer)
+                                                                actualRange {
+  if (!textAssistEnabled_ || textBuffer_.length == 0) {
     return nil;
+  }
 
-  NSRange safeRange = NSIntersectionRange(
-      range, NSMakeRange(0, _textBuffer.length));
-  if (safeRange.length == 0)
+  NSRange safeRange =
+      NSIntersectionRange(range, NSMakeRange(0, textBuffer_.length));
+  if (safeRange.length == 0) {
     return nil;
+  }
 
-  if (actualRange)
+  if (actualRange) {
     *actualRange = safeRange;
-  NSString *sub = [_textBuffer substringWithRange:safeRange];
+  }
+  NSString *sub = [textBuffer_ substringWithRange:safeRange];
   return [[NSAttributedString alloc] initWithString:sub];
 }
 
@@ -591,9 +615,9 @@ static uint32_t macos_to_xkb_keycode(unsigned short mac_code) {
   if (cursorRect.size.width > 0 || cursorRect.size.height > 0) {
     // The cursor rect is in surface-local coordinates.  Convert to
     // screen coordinates for the IME panel.
-    NSRect viewRect = NSMakeRect(cursorRect.origin.x, cursorRect.origin.y,
-                                 cursorRect.size.width,
-                                 MAX(cursorRect.size.height, 1));
+    NSRect viewRect =
+        NSMakeRect(cursorRect.origin.x, cursorRect.origin.y,
+                   cursorRect.size.width, MAX(cursorRect.size.height, 1));
     NSRect windowRect = [self convertRect:viewRect toView:nil];
     return [self.window convertRectToScreen:windowRect];
   }
@@ -605,16 +629,25 @@ static uint32_t macos_to_xkb_keycode(unsigned short mac_code) {
 }
 
 - (NSArray<NSAttributedStringKey> *)validAttributesForMarkedText {
-  return @[
-    NSMarkedClauseSegmentAttributeName,
-    NSGlyphInfoAttributeName
-  ];
+  return @[ NSMarkedClauseSegmentAttributeName, NSGlyphInfoAttributeName ];
 }
 
 // Override doCommandBySelector: to prevent macOS from beeping when a key
 // combination doesn't map to a text system command.
 - (void)doCommandBySelector:(SEL)selector {
   // Swallow unhandled commands silently
+}
+
+- (void)resetCursorRects {
+  [super resetCursorRects];
+  if (!WWNSettings_GetRenderMacOSPointer()) {
+    NSImage *emptyImage = [[NSImage alloc] initWithSize:NSMakeSize(1, 1)];
+    NSCursor *invisibleCursor =
+        [[NSCursor alloc] initWithImage:emptyImage hotSpot:NSZeroPoint];
+    [self addCursorRect:self.bounds cursor:invisibleCursor];
+  } else {
+    [self addCursorRect:self.bounds cursor:[NSCursor arrowCursor]];
+  }
 }
 
 @end
@@ -639,15 +672,14 @@ static uint32_t macos_to_xkb_keycode(unsigned short mac_code) {
 }
 
 - (void)windowDidResize:(NSNotification *)notification {
-  if (self.processingResize) {
+  if (self.processingResize || !self.isVisible) {
     return;
   }
 
   NSSize size = [self.contentView bounds].size;
-  [[WWNCompositorBridge sharedBridge]
-      injectWindowResize:self.wwnWindowId
-                   width:(uint32_t)size.width
-                  height:(uint32_t)size.height];
+  [[WWNCompositorBridge sharedBridge] injectWindowResize:self.wwnWindowId
+                                                   width:(uint32_t)size.width
+                                                  height:(uint32_t)size.height];
 }
 
 - (BOOL)canBecomeKeyWindow {
@@ -662,12 +694,12 @@ static uint32_t macos_to_xkb_keycode(unsigned short mac_code) {
   [super becomeKeyWindow];
 
   WWNLog("INPUT", @"Window %llu became key - setting keyboard focus",
-        self.wwnWindowId);
+         self.wwnWindowId);
 
   [self makeFirstResponder:self.contentView];
 
   [[WWNCompositorBridge sharedBridge] setWindowActivated:self.wwnWindowId
-                                                     active:YES];
+                                                  active:YES];
 
   [[WWNCompositorBridge sharedBridge]
       injectKeyboardEnterForWindow:self.wwnWindowId
@@ -678,10 +710,10 @@ static uint32_t macos_to_xkb_keycode(unsigned short mac_code) {
   [super resignKeyWindow];
 
   WWNLog("INPUT", @"Window %llu resigned key - removing keyboard focus",
-        self.wwnWindowId);
+         self.wwnWindowId);
 
   [[WWNCompositorBridge sharedBridge] setWindowActivated:self.wwnWindowId
-                                                     active:NO];
+                                                  active:NO];
 
   [[WWNCompositorBridge sharedBridge]
       injectKeyboardLeaveForWindow:self.wwnWindowId];

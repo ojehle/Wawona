@@ -109,6 +109,7 @@ let
       retag "${buildModule.ios.mbedtls}/lib"
       retag "${opensslIOS}/lib"
       retag "${buildModule.ios."epoll-shim"}/lib"
+      retag "${buildModule.ios."weston-simple-shm"}/lib"
       
       # Use native simulator build for waypipe (no retagging needed)
       cp "${buildModule.buildForIOS "waypipe" { simulator = true; }}/lib/libwaypipe.a" "$out/lib/"
@@ -137,7 +138,7 @@ let
   # src/stubs, src/compat, src/input depend on system headers (wayland, vulkan)
   #   only available in Nix — excluded from Xcode project
   # The Xcode build compiles only the platform ObjC layer and links libwawona.a
-  commonExcludes = ["**/*.rs" "**/*.toml" "**/*.md" "**/Cargo.lock" "**/.DS_Store"];
+  commonExcludes = ["**/*.rs" "**/*.toml" "**/*.md" "**/Cargo.lock" "**/.DS_Store" "**/renderer_android.*" "**/WWNSettings.c"];
 
   projectConfig = {
     name = "Wawona";
@@ -184,10 +185,10 @@ let
         sources = [
           {
             path = "src/platform/macos";
-            excludes = commonExcludes ++ ["*Window*" "*MacOS*"];
+            excludes = commonExcludes ++ ["*Window*" "*MacOS*" "*Popup*"];
           }
           { path = "src/platform/ios"; excludes = commonExcludes; }
-          { path = "src/ui"; excludes = commonExcludes; }
+          { path = "src/ui"; excludes = commonExcludes ++ ["About/**"]; }
           { path = "src/rendering"; excludes = commonExcludes; }
           { path = "src/apple_backend.h"; type = "file"; }
           { path = "src/config.h"; type = "file"; }
@@ -235,6 +236,7 @@ let
               "-L${opensslIOS}/lib"
               "-L${buildModule.ios."epoll-shim"}/lib"
               "-L${buildModule.ios.waypipe}/lib"
+              "-L${buildModule.ios."weston-simple-shm"}/lib"
               "-lxkbcommon"
               "-lwayland-client"
               "-lffi"
@@ -250,6 +252,7 @@ let
               "-lcrypto"
               "-lepoll-shim"
               "-lwaypipe"
+              "-lweston_simple_shm"
               "${rustBackendIOS}/lib/libwawona.a"
             ];
             "OTHER_LDFLAGS[sdk=iphonesimulator*]" = [
@@ -270,6 +273,7 @@ let
               "-lcrypto"
               "-lepoll-shim"
               "-lwaypipe"
+              "-lweston_simple_shm"
               "${iosSimLibs}/lib/libwawona.a"
             ];
             GCC_PREPROCESSOR_DEFINITIONS = [

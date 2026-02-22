@@ -56,7 +56,7 @@ impl DmabufBufferParamsData {
 
 #[derive(Debug, Default)]
 pub struct LinuxDmabufState {
-    pub pending_params: HashMap<u32, DmabufBufferParamsData>,
+    pub pending_params: HashMap<(wayland_server::backend::ClientId, u32), DmabufBufferParamsData>,
 }
 
 
@@ -182,7 +182,8 @@ impl Dispatch<zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1, BufferParams> 
                 tracing::debug!("linux-dmabuf: Received plane {} (modifier=0x{:016x})", plane_idx, modifier);
                 
                 let params_id = resource.id().protocol_id();
-                let p = state.ext.linux_dmabuf.pending_params.entry(params_id).or_default();
+                let client_id = _client.id();
+                let p = state.ext.linux_dmabuf.pending_params.entry((client_id, params_id)).or_default();
                 
                 // Store FD by converting to raw (we own it now)
 
@@ -194,7 +195,8 @@ impl Dispatch<zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1, BufferParams> 
             }
             zwp_linux_buffer_params_v1::Request::Create { width, height, format, flags: _ } => {
                 let params_id = resource.id().protocol_id();
-                if let Some(p) = state.ext.linux_dmabuf.pending_params.remove(&params_id) {
+                let client_id = _client.id();
+                if let Some(p) = state.ext.linux_dmabuf.pending_params.remove(&(client_id.clone(), params_id)) {
                     let modifier = p.modifiers.first().copied().unwrap_or(0);
 
                     let is_iosurface = (modifier & 0x8000_0000_0000_0000) != 0;
@@ -229,7 +231,7 @@ impl Dispatch<zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1, BufferParams> 
                             Some(buffer_resource.clone())
                         );
 
-                        state.buffers.insert(internal_id, std::sync::Arc::new(std::sync::RwLock::new(buffer)));
+                        state.buffers.insert((client_id, internal_id), std::sync::Arc::new(std::sync::RwLock::new(buffer)));
                     } else {
                         resource.failed();
                     }
@@ -238,7 +240,8 @@ impl Dispatch<zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1, BufferParams> 
             zwp_linux_buffer_params_v1::Request::CreateImmed { buffer_id, width, height, format, flags: _ } => {
                
                 let params_id = resource.id().protocol_id();
-                if let Some(p) = state.ext.linux_dmabuf.pending_params.remove(&params_id) {
+                let client_id = _client.id();
+                if let Some(p) = state.ext.linux_dmabuf.pending_params.remove(&(client_id.clone(), params_id)) {
                      let modifier = p.modifiers.first().copied().unwrap_or(0);
 
                      let is_iosurface = (modifier & 0x8000_0000_0000_0000) != 0;
@@ -264,7 +267,7 @@ impl Dispatch<zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1, BufferParams> 
                              Some(buffer_resource.clone())
                          );
                          
-                         state.buffers.insert(internal_id, std::sync::Arc::new(std::sync::RwLock::new(buffer)));
+                         state.buffers.insert((client_id, internal_id), std::sync::Arc::new(std::sync::RwLock::new(buffer)));
                          
                          // Note: We don't send 'created' event for CreateImmed.
                      } else {

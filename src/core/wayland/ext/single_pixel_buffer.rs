@@ -62,7 +62,7 @@ impl Dispatch<WpSinglePixelBufferManagerV1, ()> for CompositorState {
                     format: 0, // ARGB8888
                 };
 
-                state.add_buffer(crate::core::surface::Buffer::new(
+                state.add_buffer(_client.id(), crate::core::surface::Buffer::new(
                     buffer_id,
                     crate::core::surface::BufferType::Native(native_data),
                     Some(buffer_res),

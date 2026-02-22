@@ -63,8 +63,10 @@ use crate::core::wayland::wlr::{layer_shell, output_management, output_power_man
 /// Per-client data stored with each Wayland connection
 #[derive(Debug, Clone)]
 pub struct WawonaClientData {
-    /// Unique client identifier
+    /// Unique client identifier (internal)
     pub id: u32,
+    /// backend identifier
+    pub backend_id: ClientId,
     /// Process ID of the client (if available)
     pub pid: Option<u32>,
     /// Connection timestamp
@@ -72,9 +74,10 @@ pub struct WawonaClientData {
 }
 
 impl WawonaClientData {
-    pub fn new(id: u32) -> Self {
+    pub fn new(id: u32, backend_id: wayland_server::backend::ClientId) -> Self {
         Self {
             id,
+            backend_id,
             pid: None,
             connected_at: Instant::now(),
         }
@@ -141,11 +144,12 @@ impl Default for CompositorConfig {
 #[derive(Debug, Clone)]
 pub enum CompositorEvent {
     /// A new client connected
-    ClientConnected { client_id: u32, pid: Option<u32> },
+    ClientConnected { client_id: wayland_server::backend::ClientId, pid: Option<u32> },
     /// A client disconnected
-    ClientDisconnected { client_id: u32 },
+    ClientDisconnected { client_id: wayland_server::backend::ClientId },
     /// A new window was created
     WindowCreated {
+        client_id: ClientId,
         window_id: u32,
         surface_id: u32,
         title: String,
@@ -155,7 +159,7 @@ pub enum CompositorEvent {
         fullscreen_shell: bool,
     },
     /// A new popup was created
-    PopupCreated { window_id: u32, surface_id: u32, parent_id: u32, x: i32, y: i32, width: u32, height: u32 },
+    PopupCreated { client_id: ClientId, window_id: u32, surface_id: u32, parent_id: u32, x: i32, y: i32, width: u32, height: u32 },
     /// A popup was repositioned
     PopupRepositioned { window_id: u32, x: i32, y: i32, width: u32, height: u32 },
     /// A window was destroyed
@@ -177,15 +181,15 @@ pub enum CompositorEvent {
     /// Window requests interactive resize
     WindowResizeRequested { window_id: u32, seat_id: u32, serial: u32, edges: u32 },
     /// Surface committed with new buffer
-    SurfaceCommitted { surface_id: u32, buffer_id: Option<u64> },
+    SurfaceCommitted { client_id: ClientId, surface_id: u32, buffer_id: Option<u64> },
     /// Layer surface committed with new buffer (for wlr-layer-shell)
-    LayerSurfaceCommitted { surface_id: u32, buffer_id: Option<u64> },
+    LayerSurfaceCommitted { client_id: ClientId, surface_id: u32, buffer_id: Option<u64> },
     /// Cursor surface committed with hotspot info
-    CursorCommitted { surface_id: u32, buffer_id: Option<u64>, hotspot_x: i32, hotspot_y: i32 },
+    CursorCommitted { client_id: ClientId, surface_id: u32, buffer_id: Option<u64>, hotspot_x: i32, hotspot_y: i32 },
     /// Cursor shape changed via wp_cursor_shape protocol
     CursorShapeChanged { shape: u32 },
     /// System bell / notification requested by client
-    SystemBell { surface_id: u32 },
+    SystemBell { client_id: ClientId, surface_id: u32 },
     /// Redraw needed
     RedrawNeeded { window_id: u32 },
 }
@@ -414,23 +418,32 @@ impl Compositor {
     
     /// Accept pending client connections
     pub fn accept_connections(&mut self, _state: &mut CompositorState) {
+        let mut display_handle = self.display.handle();
         // Accept new client connections from all sockets
         while let Some((_socket_type, stream)) = self.socket_manager.accept_any() {
-            let client_id = self.next_client_id;
+            let next_id = self.next_client_id;
             self.next_client_id += 1;
             
-            let client_data = WawonaClientData::new(client_id);
+            // Use a temporary empty client data to insert
+            struct PlaceholderClientData;
+            impl ClientData for PlaceholderClientData {
+                fn initialized(&self, _client_id: ClientId) {}
+                fn disconnected(&self, _client_id: ClientId, _reason: DisconnectReason) {}
+            }
             
-            match self.display.handle().insert_client(stream, Arc::new(client_data.clone())) {
-                Ok(_) => {
-                    tracing::info!("Accepted client connection: {}", client_id);
+            match display_handle.insert_client(stream, Arc::new(PlaceholderClientData)) {
+                Ok(client) => {
+                    let backend_id = client.id();
+                    tracing::info!("Accepted client connection: {} (backend={:?})", next_id, backend_id);
+                    
+                    let client_data = WawonaClientData::new(next_id, backend_id.clone());
                     
                     // Track the client
-                    self.clients.insert(client_id, client_data.clone());
+                    self.clients.insert(next_id, client_data.clone());
                     
                     // Emit event
                     self.events.push(CompositorEvent::ClientConnected {
-                        client_id,
+                        client_id: backend_id,
                         pid: client_data.pid,
                     });
                 }
@@ -439,6 +452,21 @@ impl Compositor {
                 }
             }
         }
+    }
+
+    /// Convert backend ClientId to internal u32 (as used in FFI)
+    pub fn client_id_to_internal(&self, client_id: ClientId) -> u32 {
+        for (&id, data) in &self.clients {
+            if data.backend_id == client_id {
+                return id;
+            }
+        }
+        0
+    }
+    
+    /// Convert internal u32 back to backend ClientId
+    pub fn internal_to_client_id(&self, internal_id: u32) -> Option<ClientId> {
+        self.clients.get(&internal_id).map(|data| data.backend_id.clone())
     }
     
     /// Dispatch pending Wayland events
@@ -614,23 +642,23 @@ impl Compositor {
 
         // Check for timed-out pings (>10 seconds without pong)
         let timed_out: Vec<u32> = state.xdg.pending_pings.iter()
-            .filter(|(_, (_, ts))| now.duration_since(*ts).as_secs() > 10)
+            .filter(|(_, (_, _, ts))| now.duration_since(*ts).as_secs() > 10)
             .map(|(serial, _)| *serial)
             .collect();
 
         for stale_serial in timed_out {
-            if let Some((shell_id, ts)) = state.xdg.pending_pings.remove(&stale_serial) {
+            if let Some((client_id, shell_resource_id, ts)) = state.xdg.pending_pings.remove(&stale_serial) {
                 tracing::warn!(
-                    "xdg_wm_base ping timeout: serial={}, shell={}, elapsed={:.1}s — client may be unresponsive",
-                    stale_serial, shell_id, now.duration_since(ts).as_secs_f64()
+                    "xdg_wm_base ping timeout: serial={}, client={:?}, shell={}, elapsed={:.1}s — client may be unresponsive",
+                    stale_serial, client_id, shell_resource_id, now.duration_since(ts).as_secs_f64()
                 );
             }
         }
 
         // Send new pings
-        for (shell_id, shell) in state.xdg.shell_resources.iter() {
+        for ((client_id, resource_id), shell) in state.xdg.shell_resources.iter() {
             shell.ping(serial);
-            state.xdg.pending_pings.insert(serial, (*shell_id, now));
+            state.xdg.pending_pings.insert(serial, (client_id.clone(), *resource_id, now));
         }
 
         // Check idle timeouts and send idled/resumed events

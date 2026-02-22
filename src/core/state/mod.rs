@@ -731,8 +731,8 @@ pub struct SeatState {
     pub pointer: PointerState,
     /// Touch sub-state (active points, resources)
     pub touch: TouchState,
-    /// Active popup grab stack (protocol IDs)
-    pub popup_grab_stack: Vec<u32>,
+    /// Active popup grab stack (ClientId, protocol_id)
+    pub popup_grab_stack: Vec<(wayland_server::backend::ClientId, u32)>,
 }
 
 impl Clone for SeatState {
@@ -949,15 +949,15 @@ impl Default for DecorationPolicy {
 /// activation tokens, foreign toplevel export/import, decorations, outputs.
 pub struct XdgState {
     /// Active xdg_wm_base resources (for pinging)
-    pub shell_resources: HashMap<u32, xdg_wm_base::XdgWmBase>,
+    pub shell_resources: HashMap<(ClientId, u32), xdg_wm_base::XdgWmBase>,
     /// Mapping of xdg_surface IDs to their data
-    pub surfaces: HashMap<u32, XdgSurfaceData>,
+    pub surfaces: HashMap<(ClientId, u32), XdgSurfaceData>,
     /// Mapping of xdg_toplevel IDs to their data
-    pub toplevels: HashMap<u32, XdgToplevelData>,
+    pub toplevels: HashMap<(ClientId, u32), XdgToplevelData>,
     /// Mapping of xdg_popup IDs to their data
-    pub popups: HashMap<u32, XdgPopupData>,
+    pub popups: HashMap<(ClientId, u32), XdgPopupData>,
     /// Mapping of xdg_positioner IDs to their data
-    pub positioners: HashMap<u32, XdgPositionerData>,
+    pub positioners: HashMap<(ClientId, u32), XdgPositionerData>,
     /// Activation protocol state
     pub activation: ActivationState,
     /// Foreign toplevel (exporter/importer) state
@@ -966,8 +966,8 @@ pub struct XdgState {
     pub output: XdgOutputState,
     /// Decoration state
     pub decoration: DecorationState,
-    /// Ping tracking: maps serial → (shell_resource_id, timestamp)
-    pub pending_pings: HashMap<u32, (u32, Instant)>,
+    /// Ping tracking: maps serial → (client_id, shell_resource_id, timestamp)
+    pub pending_pings: HashMap<u32, (ClientId, u32, Instant)>,
     /// Toplevel drag state (xdg_toplevel_drag_v1)
     pub toplevel_drag: crate::core::wayland::xdg::xdg_toplevel_drag::ToplevelDragState,
     /// Toplevel icon state (xdg_toplevel_icon_v1)
@@ -1123,14 +1123,14 @@ impl Default for ExtProtocolState {
 /// wlroots protocol state — layer shell, virtual pointers/keyboards,
 /// data control (clipboard managers), output management.
 pub struct WlrState {
-    /// All active layer surfaces, keyed by surface ID
-    pub layer_surfaces: HashMap<u32, Arc<RwLock<LayerSurface>>>,
-    /// Surface ID to layer surface ID mapping (for buffer handling)
-    pub surface_to_layer: HashMap<u32, u32>,
-    /// Active virtual pointers (resource_id -> pointer_state)
-    pub virtual_pointers: HashMap<u32, VirtualPointerState>,
-    /// Active virtual keyboards (resource_id -> keyboard_state)
-    pub virtual_keyboards: HashMap<u32, VirtualKeyboardState>,
+    /// All active layer surfaces, keyed by (ClientId, surface_id)
+    pub layer_surfaces: HashMap<(ClientId, u32), Arc<RwLock<LayerSurface>>>,
+    /// Surface ID to layer surface ID mapping (for buffer handling), keyed by (ClientId, surface_id)
+    pub surface_to_layer: HashMap<(ClientId, u32), u32>,
+    /// Active virtual pointers (client_id, resource_id) -> pointer_state
+    pub virtual_pointers: HashMap<(ClientId, u32), VirtualPointerState>,
+    /// Active virtual keyboards (client_id, resource_id) -> keyboard_state
+    pub virtual_keyboards: HashMap<(ClientId, u32), VirtualKeyboardState>,
     /// Data control state
     pub data_control: DataControlState,
     /// Export DMABUF state
@@ -1230,14 +1230,14 @@ pub struct CompositorState {
     /// Parent to children mapping for subsurface hierarchy
     pub subsurface_children: HashMap<u32, Vec<u32>>,
     
-    /// Protocol surface ID to internal surface ID mapping
-    pub protocol_to_internal_surface: HashMap<u32, u32>,
+    /// Protocol surface ID to internal surface ID mapping, keyed by (ClientId, protocol_id)
+    pub protocol_to_internal_surface: HashMap<(wayland_server::backend::ClientId, u32), u32>,
     
-    /// All active buffers, keyed by their Wayland object ID.
-    pub buffers: HashMap<u32, Arc<RwLock<crate::core::surface::Buffer>>>,
+    /// All active buffers, keyed by their (ClientId, protocol_id).
+    pub buffers: HashMap<(ClientId, u32), Arc<RwLock<crate::core::surface::Buffer>>>,
 
     /// Buffers to be released after the next frame is presented
-    pub pending_buffer_releases: Vec<u32>,
+    pub pending_buffer_releases: Vec<(ClientId, u32)>,
 
     // =========================================================================
     // Focus & Input State
@@ -1328,11 +1328,11 @@ pub struct CompositorState {
     /// Pending compositor events (pushed by protocol handlers)
     pub pending_compositor_events: Vec<CompositorEvent>,
     
-    /// SHM pools for buffer pixel access (pool_id -> pool)
-    pub shm_pools: HashMap<u32, ShmPool>,
+    /// SHM pools for buffer pixel access ((client_id, pool_id) -> pool)
+    pub shm_pools: HashMap<(ClientId, u32), ShmPool>,
 
-    /// Regions for wl_region (region_id -> list of rects)
-    pub regions: HashMap<u32, Vec<crate::core::surface::damage::DamageRegion>>,
+    /// Regions for wl_region ((client_id, region_id) -> list of rects)
+    pub regions: HashMap<(ClientId, u32), Vec<crate::core::surface::damage::DamageRegion>>,
 
     // =========================================================================
     // Scene Graph

@@ -61,9 +61,10 @@ impl Dispatch<OrgKdeKwinServerDecorationManager, ()> for CompositorState {
                 
                 // Track the decoration in state
                 // We need to find the window ID first. Since this protocol uses surface, we look it up.
+                let client_id = _client.id();
                 if let Some(window_id) = state.surface_to_window.get(&surface_id).copied() {
                     let decoration_data = ToplevelDecorationData::new_kde(window_id, decoration.clone());
-                    state.xdg.decoration.decorations.insert(decoration.id().protocol_id(), decoration_data);
+                    state.xdg.decoration.decorations.insert((client_id, decoration.id().protocol_id()), decoration_data);
                     tracing::debug!("Registered KDE decoration for window {}", window_id);
                 } else {
                     tracing::warn!("Created KDE decoration for surface {} with no window", surface_id);
@@ -113,7 +114,8 @@ impl Dispatch<OrgKdeKwinServerDecoration, u32> for CompositorState {
                 // Update window state if we can find the window for this surface
                 let mut window_id_to_configure = None;
                 let mut new_decoration_mode = None;
-                if let Some(surface_data) = state.xdg.surfaces.get(&surface_id) {
+                let client_id = _client.id();
+                if let Some(surface_data) = state.xdg.surfaces.get(&(client_id.clone(), surface_id)) {
                     if let Some(window_id) = surface_data.window_id {
                         window_id_to_configure = Some(window_id);
                         let new_mode = if actual_mode == Mode::Server {
@@ -155,7 +157,9 @@ impl Dispatch<OrgKdeKwinServerDecoration, u32> for CompositorState {
             }
             org_kde_kwin_server_decoration::Request::Release => {
                 let dec_id = resource.id().protocol_id();
-                state.xdg.decoration.decorations.remove(&dec_id);
+                let client_id = _client.id();
+                let dec_id = resource.id().protocol_id();
+                state.xdg.decoration.decorations.remove(&(client_id, dec_id));
                 tracing::debug!("KDE decoration released for surface {}", surface_id);
             }
             _ => {}

@@ -91,8 +91,9 @@ impl Dispatch<zwlr_layer_shell_v1::ZwlrLayerShellV1, ()> for CompositorState {
                 let surface_protocol_id = surface.id().protocol_id();
                 
                 // Look up the internal surface ID from our mapping
+                let client_id = _client.id();
                 let surface_id = state.protocol_to_internal_surface
-                    .get(&surface_protocol_id)
+                    .get(&(client_id.clone(), surface_protocol_id))
                     .copied()
                     .unwrap_or_else(|| {
                         // Fallback: use protocol ID if no mapping exists
@@ -118,10 +119,10 @@ impl Dispatch<zwlr_layer_shell_v1::ZwlrLayerShellV1, ()> for CompositorState {
                 
                 // Create and store the layer surface state
                 let layer_surface = LayerSurface::new(surface_id, output_id, layer_val, namespace.clone());
-                state.add_layer_surface(layer_surface);
+                state.add_layer_surface(client_id.clone(), layer_surface);
                 
                 // Map surface to layer surface for buffer handling
-                state.wlr.surface_to_layer.insert(surface_id, surface_id);
+                state.wlr.surface_to_layer.insert((client_id.clone(), surface_id), surface_id);
                 
                 // Set the surface role to Layer
                 if let Some(surf) = state.get_surface(surface_id) {
@@ -153,7 +154,7 @@ impl Dispatch<zwlr_layer_shell_v1::ZwlrLayerShellV1, ()> for CompositorState {
                 let serial = state.next_serial();
                 
                 // Update layer surface state with resource and pending serial
-                if let Some(ls) = state.get_layer_surface(surface_id) {
+                if let Some(ls) = state.get_layer_surface(client_id.clone(), surface_id) {
                     let mut ls = ls.write().unwrap();
                     ls.pending_serial = serial;
                     ls.resource = Some(layer_surface_resource.clone());
@@ -191,11 +192,12 @@ impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, LayerSurfaceData> for C
     ) {
         // Use the surface ID from our stored data - THIS IS THE KEY FIX
         let surface_id = data.surface_id;
+        let client_id = _client.id();
         
         match request {
             zwlr_layer_surface_v1::Request::SetSize { width, height } => {
                 tracing::debug!("Layer surface {}: set_size {}x{}", surface_id, width, height);
-                if let Some(ls) = state.get_layer_surface(surface_id) {
+                if let Some(ls) = state.get_layer_surface(client_id.clone(), surface_id) {
                     let mut ls = ls.write().unwrap();
                     ls.width = width;
                     ls.height = height;
@@ -208,7 +210,7 @@ impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, LayerSurfaceData> for C
                     wayland_server::backend::protocol::WEnum::Unknown(v) => v,
                 };
                 tracing::debug!("Layer surface {}: set_anchor 0x{:x}", surface_id, anchor_val);
-                if let Some(ls) = state.get_layer_surface(surface_id) {
+                if let Some(ls) = state.get_layer_surface(client_id.clone(), surface_id) {
                     let mut ls = ls.write().unwrap();
                     ls.anchor = anchor_val;
                 }
@@ -216,7 +218,7 @@ impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, LayerSurfaceData> for C
             }
             zwlr_layer_surface_v1::Request::SetExclusiveZone { zone } => {
                 tracing::debug!("Layer surface {}: set_exclusive_zone {}", surface_id, zone);
-                if let Some(ls) = state.get_layer_surface(surface_id) {
+                if let Some(ls) = state.get_layer_surface(client_id.clone(), surface_id) {
                     let mut ls = ls.write().unwrap();
                     ls.exclusive_zone = zone;
                 }
@@ -225,7 +227,7 @@ impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, LayerSurfaceData> for C
             zwlr_layer_surface_v1::Request::SetMargin { top, right, bottom, left } => {
                 tracing::debug!("Layer surface {}: set_margin t={} r={} b={} l={}", 
                     surface_id, top, right, bottom, left);
-                if let Some(ls) = state.get_layer_surface(surface_id) {
+                if let Some(ls) = state.get_layer_surface(client_id.clone(), surface_id) {
                     let mut ls = ls.write().unwrap();
                     ls.margin = (top, right, bottom, left);
                 }
@@ -237,7 +239,7 @@ impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, LayerSurfaceData> for C
                     wayland_server::backend::protocol::WEnum::Unknown(v) => v,
                 };
                 tracing::debug!("Layer surface {}: set_keyboard_interactivity {}", surface_id, interactivity_val);
-                if let Some(ls) = state.get_layer_surface(surface_id) {
+                if let Some(ls) = state.get_layer_surface(client_id.clone(), surface_id) {
                     let mut ls = ls.write().unwrap();
                     ls.interactivity = interactivity_val;
                 }
@@ -248,15 +250,15 @@ impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, LayerSurfaceData> for C
             }
             zwlr_layer_surface_v1::Request::AckConfigure { serial } => {
                 tracing::info!("Layer surface {}: ack_configure serial={}", surface_id, serial);
-                if let Some(ls) = state.get_layer_surface(surface_id) {
+                if let Some(ls) = state.get_layer_surface(client_id.clone(), surface_id) {
                     let mut ls = ls.write().unwrap();
                     ls.configured = true;
                 }
             }
             zwlr_layer_surface_v1::Request::Destroy => {
                 tracing::info!("Layer surface {}: destroy", surface_id);
-                state.remove_layer_surface(surface_id);
-                state.wlr.surface_to_layer.remove(&surface_id);
+                state.remove_layer_surface(client_id.clone(), surface_id);
+                state.wlr.surface_to_layer.remove(&(client_id, surface_id));
             }
             zwlr_layer_surface_v1::Request::SetLayer { layer } => {
                 let layer_val = match layer {
@@ -264,7 +266,7 @@ impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, LayerSurfaceData> for C
                     wayland_server::backend::protocol::WEnum::Unknown(v) => v,
                 };
                 tracing::debug!("Layer surface {}: set_layer {}", surface_id, layer_val);
-                if let Some(ls) = state.get_layer_surface(surface_id) {
+                if let Some(ls) = state.get_layer_surface(client_id, surface_id) {
                     let mut ls = ls.write().unwrap();
                     ls.layer = layer_val;
                 }
@@ -282,7 +284,9 @@ impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, LayerSurfaceData> for C
 impl CompositorState {
     /// Send a configure event to a layer surface with new dimensions
     pub fn configure_layer_surface(&mut self, surface_id: u32, width: u32, height: u32) {
-        if let Some(ls) = self.get_layer_surface(surface_id) {
+        let client_id = self.surfaces.get(&surface_id).and_then(|s| s.read().unwrap().client_id.clone());
+        if let Some(cid) = client_id {
+            if let Some(ls) = self.get_layer_surface(cid, surface_id) {
             let serial = self.next_serial();
             let mut ls = ls.write().unwrap();
             ls.pending_serial = serial;
@@ -294,9 +298,11 @@ impl CompositorState {
                 "Layer surface {}: would send configure serial={} {}x{}",
                 surface_id, serial, width, height
             );
+            }
         }
     }
 }
+
 
 /// Register zwlr_layer_shell_v1 global
 pub fn register_layer_shell(display: &DisplayHandle) -> wayland_server::backend::GlobalId {

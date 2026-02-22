@@ -43,9 +43,9 @@ extern void wawona_window_info_free(CWindowInfo *info);
 // iOS Implementation
 //
 
+#import "../../launcher/WWNLauncherClient.h"
 #import "../../ui/Settings/WWNPreferences.h"
 #import "../../ui/Settings/WWNSettingsSplitViewController.h"
-#import "../../launcher/WWNLauncherClient.h"
 
 @interface WWNAppDelegate : NSObject <UIApplicationDelegate>
 @end
@@ -110,7 +110,7 @@ extern void wawona_window_info_free(CWindowInfo *info);
 
   // 3. Configure iOS UI -> MOVED TO SCENE DELEGATE
   WWNLog("MAIN", @"WWN iOS initialization complete (waiting for Scene "
-        @"connection)");
+                 @"connection)");
   return YES;
 }
 
@@ -213,7 +213,8 @@ static void setup_signal_sources(void) {
 }
 
 - (void)applicationWillTerminate:(NSNotification *)notification {
-  WWNLog("MAIN", @"macOS application will terminate - shutting down gracefully");
+  WWNLog("MAIN",
+         @"macOS application will terminate - shutting down gracefully");
   cleanup_on_exit();
 }
 
@@ -241,7 +242,8 @@ static void setup_signal_sources(void) {
 
 int main(int argc, char *argv[]) {
   @autoreleasepool {
-    // Overwrite argv[0] so macOS menu bar shows "Wawona" instead of the binary name
+    // Overwrite argv[0] so macOS menu bar shows "Wawona" instead of the binary
+    // name
     const char *desiredName = "Wawona";
     size_t maxLen = strlen(argv[0]);
     memset(argv[0], 0, maxLen);
@@ -379,12 +381,16 @@ int main(int argc, char *argv[]) {
                                               inDirectory:@"vulkan/icd.d"];
         if (bundleICD) {
           setenv("VK_DRIVER_FILES", [bundleICD UTF8String], 1);
-          WWNLog("MAIN", @"Vulkan: %s ICD from bundle: %@", vkDriver, bundleICD);
+          WWNLog("MAIN", @"Vulkan: %s ICD from bundle: %@", vkDriver,
+                 bundleICD);
         } else {
-          WWNLog("MAIN", @"Vulkan: %s ICD not found in bundle, using loader defaults", vkDriver);
+          WWNLog("MAIN",
+                 @"Vulkan: %s ICD not found in bundle, using loader defaults",
+                 vkDriver);
         }
       } else {
-        WWNLog("MAIN", @"Vulkan: Unknown driver '%s', using loader defaults", vkDriver);
+        WWNLog("MAIN", @"Vulkan: Unknown driver '%s', using loader defaults",
+               vkDriver);
       }
     } else {
       WWNLog("MAIN", @"Vulkan drivers disabled (driver selection: none)");
@@ -397,15 +403,13 @@ int main(int argc, char *argv[]) {
     CGSize screenSize = mainScreen.frame.size;
     CGFloat scale = mainScreen.backingScaleFactor;
 
-    WWNCompositorBridge *rustCompositor =
-        [WWNCompositorBridge sharedBridge];
+    WWNCompositorBridge *rustCompositor = [WWNCompositorBridge sharedBridge];
     [rustCompositor setOutputWidth:(uint32_t)screenSize.width
                             height:(uint32_t)screenSize.height
                              scale:(float)scale];
 
     // Set initial SSD state
-    BOOL forceSSD = [[NSUserDefaults standardUserDefaults]
-        boolForKey:@"ForceServerSideDecorations"];
+    BOOL forceSSD = WWNSettings_GetForceServerSideDecorations();
     [rustCompositor setForceSSD:forceSSD];
     WWNLog("MAIN", @"Initial Force SSD state: %d", forceSSD);
 
@@ -416,7 +420,8 @@ int main(int argc, char *argv[]) {
 
     setenv("WAYLAND_DISPLAY", [[rustCompositor socketName] UTF8String], 1);
     setup_signal_sources();
-    signal(SIGPIPE, SIG_IGN); // broken pipes from waypipe/SSH → EPIPE, not crash
+    signal(SIGPIPE,
+           SIG_IGN); // broken pipes from waypipe/SSH → EPIPE, not crash
     signal(SIGSEGV, crash_handler);
     signal(SIGABRT, crash_handler);
     signal(SIGBUS, crash_handler);

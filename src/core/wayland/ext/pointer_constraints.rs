@@ -58,12 +58,12 @@ pub enum ConstraintLifetime {
 /// State for pointer constraints
 #[derive(Debug, Default)]
 pub struct PointerConstraintsState {
-    pub locked_pointers: HashMap<u32, LockedPointerData>,
-    pub confined_pointers: HashMap<u32, ConfinedPointerData>,
+    pub locked_pointers: HashMap<(wayland_server::backend::ClientId, u32), LockedPointerData>,
+    pub confined_pointers: HashMap<(wayland_server::backend::ClientId, u32), ConfinedPointerData>,
 }
 
 impl PointerConstraintsState {
-    pub fn activate_constraints(&mut self, surface_id: u32) {
+    pub fn activate_constraints(&mut self, client_id: wayland_server::backend::ClientId, surface_id: u32) {
         for locked in self.locked_pointers.values_mut() {
             if locked.surface_id == surface_id && !locked.active {
                 locked.active = true;
@@ -78,7 +78,7 @@ impl PointerConstraintsState {
         }
     }
 
-    pub fn deactivate_constraints(&mut self, surface_id: u32) {
+    pub fn deactivate_constraints(&mut self, client_id: wayland_server::backend::ClientId, surface_id: u32) {
         for locked in self.locked_pointers.values_mut() {
             if locked.surface_id == surface_id && locked.active {
                 locked.active = false;
@@ -93,8 +93,8 @@ impl PointerConstraintsState {
         }
     }
 
-    pub fn is_pointer_locked(&self, surface_id: u32) -> bool {
-        self.locked_pointers.values().any(|l| l.surface_id == surface_id && l.active)
+    pub fn is_pointer_locked(&self, client_id: wayland_server::backend::ClientId, surface_id: u32) -> bool {
+        self.locked_pointers.iter().any(|((cid, _), l)| *cid == client_id && l.surface_id == surface_id && l.active)
     }
 }
 
@@ -157,13 +157,14 @@ impl Dispatch<ZwpPointerConstraintsV1, ()> for CompositorState {
             } => {
                 let surface_id = surface.id().protocol_id();
                 let pointer_id = pointer.id().protocol_id();
+                let client_id = _client.id();
                 
                 let locked = data_init.init(id, ());
                 let locked_id = locked.id().protocol_id();
                 
                 // Extract region data if provided
                 let constraint_region = region.as_ref().and_then(|r| {
-                    state.regions.get(&r.id().protocol_id()).cloned()
+                    state.regions.get(&(client_id.clone(), r.id().protocol_id())).cloned()
                 });
 
                 let data = LockedPointerData {
@@ -175,11 +176,11 @@ impl Dispatch<ZwpPointerConstraintsV1, ()> for CompositorState {
                     region: constraint_region.clone(),
                 };
                 
-                state.ext.pointer_constraints.locked_pointers.insert(locked_id, data);
+                state.ext.pointer_constraints.locked_pointers.insert((client_id.clone(), locked_id), data);
                 
                 // If the surface already has focus, activate immediately
                 if state.focus.pointer_focus == Some(surface_id) {
-                     state.ext.pointer_constraints.activate_constraints(surface_id);
+                     state.ext.pointer_constraints.activate_constraints(client_id, surface_id);
                 }
 
                 tracing::debug!(
@@ -196,13 +197,14 @@ impl Dispatch<ZwpPointerConstraintsV1, ()> for CompositorState {
             } => {
                 let surface_id = surface.id().protocol_id();
                 let pointer_id = pointer.id().protocol_id();
+                let client_id = _client.id();
                 
                 let confined = data_init.init(id, ());
                 let confined_id = confined.id().protocol_id();
 
                 // Extract region data if provided
                 let constraint_region = region.as_ref().and_then(|r| {
-                    state.regions.get(&r.id().protocol_id()).cloned()
+                    state.regions.get(&(client_id.clone(), r.id().protocol_id())).cloned()
                 });
 
                 let data = ConfinedPointerData {
@@ -214,11 +216,11 @@ impl Dispatch<ZwpPointerConstraintsV1, ()> for CompositorState {
                     region: constraint_region.clone(),
                 };
                 
-                state.ext.pointer_constraints.confined_pointers.insert(confined_id, data);
+                state.ext.pointer_constraints.confined_pointers.insert((client_id.clone(), confined_id), data);
                 
                 // If the surface already has focus, activate immediately
                 if state.focus.pointer_focus == Some(surface_id) {
-                     state.ext.pointer_constraints.activate_constraints(surface_id);
+                     state.ext.pointer_constraints.activate_constraints(client_id, surface_id);
                 }
 
                 tracing::debug!(
@@ -261,7 +263,7 @@ impl Dispatch<ZwpLockedPointerV1, ()> for CompositorState {
                 let _ = region;
             }
             zwp_locked_pointer_v1::Request::Destroy => {
-                state.ext.pointer_constraints.locked_pointers.remove(&resource.id().protocol_id());
+                state.ext.pointer_constraints.locked_pointers.remove(&(_client.id(), resource.id().protocol_id()));
                 tracing::debug!("Locked pointer destroyed");
             }
 
@@ -291,7 +293,7 @@ impl Dispatch<ZwpConfinedPointerV1, ()> for CompositorState {
                 let _ = region;
             }
             zwp_confined_pointer_v1::Request::Destroy => {
-                state.ext.pointer_constraints.confined_pointers.remove(&resource.id().protocol_id());
+                state.ext.pointer_constraints.confined_pointers.remove(&(_client.id(), resource.id().protocol_id()));
                 tracing::debug!("Confined pointer destroyed");
             }
 

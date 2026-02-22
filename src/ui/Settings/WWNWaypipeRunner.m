@@ -26,8 +26,12 @@ extern int weston_simple_shm_main(int argc, char **argv);
 @property(nonatomic, assign) BOOL stopping;
 
 @property(nonatomic, assign) BOOL westonSimpleSHMRunning;
+@property(nonatomic, assign) BOOL westonRunning;
+@property(nonatomic, assign) BOOL westonTerminalRunning;
 #if !TARGET_OS_IPHONE
 @property(nonatomic, strong) NSTask *westonSimpleSHMTask;
+@property(nonatomic, strong) NSTask *westonTask;
+@property(nonatomic, strong) NSTask *westonTerminalTask;
 #endif
 #if TARGET_OS_IPHONE
 @property(nonatomic, assign)
@@ -132,6 +136,41 @@ extern int weston_simple_shm_main(int argc, char **argv);
   NSString *bundlePath =
       [[NSBundle mainBundle].bundlePath stringByResolvingSymlinksInPath];
   path = [bundlePath stringByAppendingPathComponent:@"waypipe"];
+  if ([[NSFileManager defaultManager] isExecutableFileAtPath:path]) {
+    return path;
+  }
+#endif
+
+  return nil;
+}
+
+- (NSString *)findWestonSimpleSHMBinary {
+  // Resolve symlinks because Nix often launches via a symlink in bin/
+  NSString *realExecPath =
+      [[NSBundle mainBundle].executablePath stringByResolvingSymlinksInPath];
+  NSString *execDir = [realExecPath stringByDeletingLastPathComponent];
+  NSString *path =
+      [execDir stringByAppendingPathComponent:@"weston-simple-shm"];
+
+  if ([[NSFileManager defaultManager] isExecutableFileAtPath:path]) {
+    return path;
+  }
+
+  // Also check Resources/bin/weston-simple-shm as bundled by Nix macos.nix
+  NSString *resourcePath =
+      [[NSBundle mainBundle] pathForResource:@"weston-simple-shm"
+                                      ofType:nil
+                                 inDirectory:@"bin"];
+  if (resourcePath &&
+      [[NSFileManager defaultManager] isExecutableFileAtPath:resourcePath]) {
+    return resourcePath;
+  }
+
+#if TARGET_OS_IPHONE
+  // On iOS check bundle root
+  NSString *bundlePath =
+      [[NSBundle mainBundle].bundlePath stringByResolvingSymlinksInPath];
+  path = [bundlePath stringByAppendingPathComponent:@"weston-simple-shm"];
   if ([[NSFileManager defaultManager] isExecutableFileAtPath:path]) {
     return path;
   }
@@ -1104,15 +1143,10 @@ extern int weston_simple_shm_main(int argc, char **argv);
     self.westonSimpleSHMRunning = NO;
   });
 #else
-  NSString *binPath =
-      [[NSBundle mainBundle].executablePath stringByResolvingSymlinksInPath];
-  NSString *execDir = [binPath stringByDeletingLastPathComponent];
-  NSString *path =
-      [execDir stringByAppendingPathComponent:@"weston-simple-shm"];
-
-  if (![[NSFileManager defaultManager] isExecutableFileAtPath:path]) {
-    WWNLog("WESTON_SHM", @"Could not find weston-simple-shm executable at %@",
-           path);
+  NSString *path = [self findWestonSimpleSHMBinary];
+  if (!path) {
+    WWNLog("WESTON_SHM",
+           @"Could not find weston-simple-shm executable in app bundle.");
     self.westonSimpleSHMRunning = NO;
     return;
   }
@@ -1153,6 +1187,126 @@ extern int weston_simple_shm_main(int argc, char **argv);
     self.westonSimpleSHMTask = nil;
   }
   self.westonSimpleSHMRunning = NO;
+#endif
+}
+
+// MARK: - Generic Weston Launch Helpers
+#if !TARGET_OS_IPHONE
+- (NSString *)findBinaryNamed:(NSString *)name {
+  NSBundle *bundle = [NSBundle mainBundle];
+  NSString *resourcePath = [bundle pathForResource:name ofType:nil];
+  if (resourcePath &&
+      [[NSFileManager defaultManager] isExecutableFileAtPath:resourcePath]) {
+    return resourcePath;
+  }
+  NSString *auxPath = [bundle pathForAuxiliaryExecutable:name];
+  if (auxPath &&
+      [[NSFileManager defaultManager] isExecutableFileAtPath:auxPath]) {
+    return auxPath;
+  }
+  // Android specific fallback where executables are bundled as .so
+  NSString *androidSoPath = [[bundle bundlePath]
+      stringByAppendingPathComponent:
+          [NSString stringWithFormat:@"lib/arm64-v8a/lib%@.so", name]];
+  if ([[NSFileManager defaultManager] fileExistsAtPath:androidSoPath]) {
+    return androidSoPath;
+  }
+  return nil;
+}
+
+- (void)launchGenericWestonClient:(NSString *)name
+                        taskInOut:(NSTask *__strong *)taskPtr
+                    runningFlagIn:(BOOL *)runningFlag {
+  NSString *path = [self findBinaryNamed:name];
+  if (!path) {
+    WWNLog("WESTON", @"Could not find executable %@ in app bundle.", name);
+    *runningFlag = NO;
+    return;
+  }
+  NSTask *task = [[NSTask alloc] init];
+  task.executableURL = [NSURL fileURLWithPath:path];
+
+  NSMutableDictionary *env =
+      [[[NSProcessInfo processInfo] environment] mutableCopy];
+  const char *envRuntime = getenv("XDG_RUNTIME_DIR");
+  if (!envRuntime) {
+    env[@"XDG_RUNTIME_DIR"] =
+        [NSString stringWithFormat:@"/tmp/wawona-%d", getuid()];
+  }
+  task.environment = env;
+  NSError *err;
+  if ([task launchAndReturnError:&err]) {
+    *taskPtr = task;
+    WWNLog("WESTON", @"Launched %@ with PID %d", name, task.processIdentifier);
+  } else {
+    WWNLog("WESTON", @"Failed to launch %@: %@", name, err);
+    *runningFlag = NO;
+  }
+}
+#endif
+
+// MARK: - Native Weston Executable
+
+- (void)launchWeston {
+  if (self.westonRunning)
+    return;
+  self.westonRunning = YES;
+#if TARGET_OS_IPHONE
+  WWNLog("WESTON",
+         @"Native execution is isolated on iOS. Stubbing Weston spawn.");
+  self.westonRunning = NO;
+#else
+  NSTask *task = nil;
+  BOOL running = YES;
+  [self launchGenericWestonClient:@"weston"
+                        taskInOut:&task
+                    runningFlagIn:&running];
+  self.westonTask = task;
+  self.westonRunning = running;
+#endif
+}
+
+- (void)stopWeston {
+#if TARGET_OS_IPHONE
+  self.westonRunning = NO;
+#else
+  if (self.westonTask) {
+    [self.westonTask terminate];
+    self.westonTask = nil;
+  }
+  self.westonRunning = NO;
+#endif
+}
+
+// MARK: - Weston Terminal
+- (void)launchWestonTerminal {
+  if (self.westonTerminalRunning)
+    return;
+  self.westonTerminalRunning = YES;
+#if TARGET_OS_IPHONE
+  WWNLog("WESTON_TERM",
+         @"Native execution is isolated on iOS. Stubbing terminal spawn.");
+  self.westonTerminalRunning = NO;
+#else
+  NSTask *task = nil;
+  BOOL running = YES;
+  [self launchGenericWestonClient:@"weston-terminal"
+                        taskInOut:&task
+                    runningFlagIn:&running];
+  self.westonTerminalTask = task;
+  self.westonTerminalRunning = running;
+#endif
+}
+
+- (void)stopWestonTerminal {
+#if TARGET_OS_IPHONE
+  self.westonTerminalRunning = NO;
+#else
+  if (self.westonTerminalTask) {
+    [self.westonTerminalTask terminate];
+    self.westonTerminalTask = nil;
+  }
+  self.westonTerminalRunning = NO;
 #endif
 }
 

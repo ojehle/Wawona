@@ -24,13 +24,13 @@ impl CompositorState {
 
     /// Send a configure event to an xdg_toplevel and its associated xdg_surface.
     /// Size is clamped to the client's min/max constraints (unless fullscreen, which ignores constraints per spec).
-    pub fn send_toplevel_configure(&mut self, toplevel_id: u32, width: u32, height: u32) -> u32 {
+    pub fn send_toplevel_configure(&mut self, client_id: ClientId, toplevel_id: u32, width: u32, height: u32) -> u32 {
         let serial = self.next_serial();
-        crate::wlog!(crate::util::logging::COMPOSITOR, "send_toplevel_configure: tl_id={} size={}x{} serial={}", 
-            toplevel_id, width, height, serial);
+        crate::wlog!(crate::util::logging::COMPOSITOR, "send_toplevel_configure: client={:?} tl_id={} size={}x{} serial={}", 
+            client_id, toplevel_id, width, height, serial);
 
         let mut to_send = None;
-        if let Some(toplevel_data) = self.xdg.toplevels.get_mut(&toplevel_id) {
+        if let Some(toplevel_data) = self.xdg.toplevels.get_mut(&(client_id.clone(), toplevel_id)) {
             toplevel_data.pending_serial = serial;
             
             let (final_w, final_h) = if toplevel_data.pending_fullscreen || (width == 0 && height == 0) {
@@ -66,7 +66,7 @@ impl CompositorState {
         if let Some((toplevel, xdg_surface_id, states, final_w, final_h)) = to_send {
             toplevel.configure(final_w as i32, final_h as i32, states);
             
-            if let Some(surface_data) = self.xdg.surfaces.get_mut(&xdg_surface_id) {
+            if let Some(surface_data) = self.xdg.surfaces.get_mut(&(client_id, xdg_surface_id)) {
                 if let Some(resource) = &surface_data.resource {
                     crate::wlog!(crate::util::logging::COMPOSITOR, "Actually sending xdg_surface.configure(serial={}) to xdg_surface_id={}", serial, xdg_surface_id);
                     resource.configure(serial);
@@ -83,11 +83,12 @@ impl CompositorState {
 
     /// Dismiss the active popup grab and all its child popups
     pub fn dismiss_popup_grab(&mut self) {
-        while let Some(popup_id) = self.seat.popup_grab_stack.pop() {
-            if let Some(data) = self.xdg.popups.get(&popup_id) {
-                if let Some(resource) = &data.resource {
-                    tracing::debug!("Sending popup_done to popup {}", popup_id);
-                    resource.popup_done();
+        while let Some((cid, pid)) = self.seat.popup_grab_stack.pop() {
+            if let Some(data) = self.xdg.popups.get(&(cid.clone(), pid)) {
+                let resource = data.resource.clone();
+                if let Some(res) = resource {
+                    tracing::debug!("Dismissing popup {} for client {:?}", pid, cid);
+                    res.popup_done();
                 }
             }
         }
@@ -183,11 +184,11 @@ impl CompositorState {
             }
         }
         
-        let popup_data_list: Vec<_> = self.xdg.popups.values()
-            .map(|p| (p.surface_id, p.geometry, p.parent_id))
+        let popup_data_list: Vec<_> = self.xdg.popups.iter()
+            .map(|((cid, _), p)| (cid.clone(), p.surface_id, p.geometry, p.parent_id))
             .collect();
 
-        for (popup_surface_id, geometry, parent_window_id) in popup_data_list {
+        for (cid, popup_surface_id, geometry, parent_window_id) in popup_data_list {
             let node_id = self.next_node_id();
             let mut node = SceneNode::new(node_id)
                 .with_surface(popup_surface_id);

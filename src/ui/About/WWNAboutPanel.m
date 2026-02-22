@@ -16,29 +16,21 @@ static UIImage *WWNAboutLogoForStyle(UIUserInterfaceStyle style) {
 
   if (style == UIUserInterfaceStyleDark) {
     preferredNames = @[
-      @"Wawona-iOS-Light-1024x1024@1x.png",
-      @"Wawona-iOS-Light-1024x1024@1x",
-      @"Wawona-iOS-Light-1024x1024",
-      @"Wawona-iOS-Light"
+      @"Wawona-iOS-Light-1024x1024@1x.png", @"Wawona-iOS-Light-1024x1024@1x",
+      @"Wawona-iOS-Light-1024x1024", @"Wawona-iOS-Light"
     ];
     fallbackNames = @[
-      @"Wawona-iOS-Dark-1024x1024@1x.png",
-      @"Wawona-iOS-Dark-1024x1024@1x",
-      @"Wawona-iOS-Dark-1024x1024",
-      @"Wawona-iOS-Dark"
+      @"Wawona-iOS-Dark-1024x1024@1x.png", @"Wawona-iOS-Dark-1024x1024@1x",
+      @"Wawona-iOS-Dark-1024x1024", @"Wawona-iOS-Dark"
     ];
   } else {
     preferredNames = @[
-      @"Wawona-iOS-Dark-1024x1024@1x.png",
-      @"Wawona-iOS-Dark-1024x1024@1x",
-      @"Wawona-iOS-Dark-1024x1024",
-      @"Wawona-iOS-Dark"
+      @"Wawona-iOS-Dark-1024x1024@1x.png", @"Wawona-iOS-Dark-1024x1024@1x",
+      @"Wawona-iOS-Dark-1024x1024", @"Wawona-iOS-Dark"
     ];
     fallbackNames = @[
-      @"Wawona-iOS-Light-1024x1024@1x.png",
-      @"Wawona-iOS-Light-1024x1024@1x",
-      @"Wawona-iOS-Light-1024x1024",
-      @"Wawona-iOS-Light"
+      @"Wawona-iOS-Light-1024x1024@1x.png", @"Wawona-iOS-Light-1024x1024@1x",
+      @"Wawona-iOS-Light-1024x1024", @"Wawona-iOS-Light"
     ];
   }
 
@@ -104,9 +96,9 @@ static UIImage *WWNAboutLogoForStyle(UIUserInterfaceStyle style) {
   [scrollView addSubview:contentStack];
 
   // App Logo
-  UIImageView *logoView =
-      [[UIImageView alloc] initWithImage:WWNAboutLogoForStyle(
-                                              self.traitCollection.userInterfaceStyle)];
+  UIImageView *logoView = [[UIImageView alloc]
+      initWithImage:WWNAboutLogoForStyle(
+                        self.traitCollection.userInterfaceStyle)];
   logoView.contentMode = UIViewContentModeScaleAspectFit;
   self.logoImageView = logoView;
   [contentStack addArrangedSubview:logoView];
@@ -234,16 +226,19 @@ static UIImage *WWNAboutLogoForStyle(UIUserInterfaceStyle style) {
                            target:self
                            action:@selector(dismissAbout:)];
 
-  // Modern trait change observation (replaces deprecated traitCollectionDidChange:)
+  // Modern trait change observation (replaces deprecated
+  // traitCollectionDidChange:)
   __weak typeof(self) weakSelf = self;
-  [self registerForTraitChanges:@[[UITraitUserInterfaceStyle class]]
-                    withHandler:^(id<UITraitEnvironment> _Nonnull traitEnvironment,
-                                  UITraitCollection * _Nonnull previousCollection) {
-    __strong typeof(weakSelf) strongSelf = weakSelf;
-    if (!strongSelf) return;
-    strongSelf.logoImageView.image =
-        WWNAboutLogoForStyle(strongSelf.traitCollection.userInterfaceStyle);
-  }];
+  [self registerForTraitChanges:@[ [UITraitUserInterfaceStyle class] ]
+                    withHandler:^(
+                        id<UITraitEnvironment> _Nonnull traitEnvironment,
+                        UITraitCollection *_Nonnull previousCollection) {
+                      __strong typeof(weakSelf) strongSelf = weakSelf;
+                      if (!strongSelf)
+                        return;
+                      strongSelf.logoImageView.image = WWNAboutLogoForStyle(
+                          strongSelf.traitCollection.userInterfaceStyle);
+                    }];
 }
 
 - (void)addSocialButton:(NSString *)title
@@ -390,6 +385,29 @@ static UIImage *WWNAboutLogoForStyle(UIUserInterfaceStyle style) {
     [stack.bottomAnchor
         constraintLessThanOrEqualToAnchor:contentView.bottomAnchor
                                  constant:-30]
+  ]];
+
+  // App Logo
+  NSImageView *logoView = [[NSImageView alloc] init];
+  logoView.imageScaling = NSImageScaleProportionallyUpOrDown;
+  logoView.translatesAutoresizingMaskIntoConstraints = NO;
+
+  // Load adaptive icon (macOS 26+) or fallback to PNG
+  NSImage *logo = [NSImage imageNamed:@"Wawona"];
+  if (!logo) {
+    logo = [NSImage imageNamed:@"Wawona-iOS-Dark-1024x1024@1x.png"];
+  }
+  if (!logo) {
+    logo = [NSImage imageNamed:@"Wawona-iOS-Light-1024x1024@1x.png"];
+  }
+  if (logo) {
+    logoView.image = logo;
+  }
+
+  [stack addArrangedSubview:logoView];
+  [NSLayoutConstraint activateConstraints:@[
+    [logoView.widthAnchor constraintEqualToConstant:128],
+    [logoView.heightAnchor constraintEqualToConstant:128]
   ]];
 
   // App Name

@@ -77,14 +77,14 @@ impl Dispatch<zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1, u32>
                     window.maximized = true;
                 }
                 // Find the toplevel and send configure
-                if let Some((&tl_id, tl_data)) = state.xdg.toplevels.iter().find(|(_, t)| t.window_id == window_id) {
-                    let tl_id = tl_id;
+                if let Some((tl_id, tl_data)) = state.xdg.toplevels.iter().find(|(_, t)| t.window_id == window_id) {
+                    let tl_id = tl_id.clone();
                     let w = tl_data.width;
                     let h = tl_data.height;
                     if let Some(tl) = state.xdg.toplevels.get_mut(&tl_id) {
                         tl.pending_maximized = true;
                     }
-                    state.send_toplevel_configure(tl_id, w, h);
+                    state.send_toplevel_configure(tl_id.0.clone(), tl_id.1, w, h);
                 }
             }
             zwlr_foreign_toplevel_handle_v1::Request::UnsetMaximized => {
@@ -92,11 +92,12 @@ impl Dispatch<zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1, u32>
                     let mut window = window_lock.write().unwrap();
                     window.maximized = false;
                 }
-                if let Some((&tl_id, _)) = state.xdg.toplevels.iter().find(|(_, t)| t.window_id == window_id) {
+                if let Some((tl_id, _)) = state.xdg.toplevels.iter().find(|(_, t)| t.window_id == window_id) {
+                    let tl_id = tl_id.clone();
                     if let Some(tl) = state.xdg.toplevels.get_mut(&tl_id) {
                         tl.pending_maximized = false;
                     }
-                    state.send_toplevel_configure(tl_id, 0, 0);
+                    state.send_toplevel_configure(tl_id.0.clone(), tl_id.1, 0, 0);
                 }
             }
             zwlr_foreign_toplevel_handle_v1::Request::SetMinimized => {
@@ -128,14 +129,14 @@ impl Dispatch<zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1, u32>
                 state.set_focused_window(Some(window_id));
                 
                 // Send configure with activated state
-                if let Some((&tl_id, tl_data)) = state.xdg.toplevels.iter().find(|(_, t)| t.window_id == window_id) {
-                    let tl_id = tl_id;
+                if let Some((tl_id, tl_data)) = state.xdg.toplevels.iter().find(|(_, t)| t.window_id == window_id) {
+                    let tl_id = tl_id.clone();
                     let w = tl_data.width;
                     let h = tl_data.height;
                     if let Some(tl) = state.xdg.toplevels.get_mut(&tl_id) {
                         tl.activated = true;
                     }
-                    state.send_toplevel_configure(tl_id, w, h);
+                    state.send_toplevel_configure(tl_id.0.clone(), tl_id.1, w, h);
                 }
                 
                 state.pending_compositor_events.push(
@@ -158,11 +159,12 @@ impl Dispatch<zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1, u32>
                     let mut window = window_lock.write().unwrap();
                     window.fullscreen = true;
                 }
-                if let Some((&tl_id, _)) = state.xdg.toplevels.iter().find(|(_, t)| t.window_id == window_id) {
+                if let Some((tl_id, _)) = state.xdg.toplevels.iter().find(|(_, t)| t.window_id == window_id) {
+                    let tl_id = tl_id.clone();
                     if let Some(tl) = state.xdg.toplevels.get_mut(&tl_id) {
                         tl.pending_fullscreen = true;
                     }
-                    state.send_toplevel_configure(tl_id, 0, 0);
+                    state.send_toplevel_configure(tl_id.0.clone(), tl_id.1, 0, 0);
                 }
             }
             zwlr_foreign_toplevel_handle_v1::Request::UnsetFullscreen => {
@@ -170,11 +172,12 @@ impl Dispatch<zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1, u32>
                     let mut window = window_lock.write().unwrap();
                     window.fullscreen = false;
                 }
-                if let Some((&tl_id, _)) = state.xdg.toplevels.iter().find(|(_, t)| t.window_id == window_id) {
+                if let Some((tl_id, _)) = state.xdg.toplevels.iter().find(|(_, t)| t.window_id == window_id) {
+                    let tl_id = tl_id.clone();
                     if let Some(tl) = state.xdg.toplevels.get_mut(&tl_id) {
                         tl.pending_fullscreen = false;
                     }
-                    state.send_toplevel_configure(tl_id, 0, 0);
+                    state.send_toplevel_configure(tl_id.0.clone(), tl_id.1, 0, 0);
                 }
             }
             _ => {}

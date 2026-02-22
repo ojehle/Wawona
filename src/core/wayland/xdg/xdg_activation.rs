@@ -39,7 +39,7 @@ impl Default for ActivationTokenData {
 
 #[derive(Debug, Default)]
 pub struct ActivationState {
-    pub tokens: HashMap<u32, ActivationTokenData>,
+    pub tokens: HashMap<(wayland_server::backend::ClientId, u32), ActivationTokenData>,
 }
 
 
@@ -73,11 +73,10 @@ impl Dispatch<XdgActivationV1, ()> for CompositorState {
     ) {
         match request {
             xdg_activation_v1::Request::GetActivationToken { id } => {
-
                 let token_data = ActivationTokenData::default();
                 let token = data_init.init(id, ());
-                state.xdg.activation.tokens.insert(token.id().protocol_id(), token_data);
-
+                let client_id = _client.id();
+                state.xdg.activation.tokens.insert((client_id, token.id().protocol_id()), token_data);
                 
                 tracing::debug!("Created activation token");
             }
@@ -108,18 +107,19 @@ impl Dispatch<XdgActivationV1, ()> for CompositorState {
                         state.set_focused_window(Some(wid));
                         
                         // Mark the toplevel as activated and send configure
-                        for (tl_id, tl_data) in state.xdg.toplevels.iter() {
+                        let mut to_configure = None;
+                        for ((cid, tl_proto_id), tl_data) in state.xdg.toplevels.iter() {
                             if tl_data.window_id == wid {
-                                let tl_id = *tl_id;
-                                let w = tl_data.width;
-                                let h = tl_data.height;
-                                // Need to break to avoid borrow issues
-                                if let Some(tl) = state.xdg.toplevels.get_mut(&tl_id) {
-                                    tl.activated = true;
-                                }
-                                state.send_toplevel_configure(tl_id, w, h);
+                                to_configure = Some((cid.clone(), *tl_proto_id, tl_data.width, tl_data.height));
                                 break;
                             }
+                        }
+                        
+                        if let Some((cid, tl_id, w, h)) = to_configure {
+                            if let Some(tl) = state.xdg.toplevels.get_mut(&(cid.clone(), tl_id)) {
+                                tl.activated = true;
+                            }
+                            state.send_toplevel_configure(cid, tl_id, w, h);
                         }
                     } else {
                         tracing::warn!("Activation: no window found for surface {}", surface_id);
@@ -146,20 +146,21 @@ impl Dispatch<XdgActivationTokenV1, ()> for CompositorState {
         request: xdg_activation_token_v1::Request,
         _data: &(),
         _dhandle: &DisplayHandle,
-        _data_init: &mut DataInit<'_, Self>,
+        _data_init: &mut wayland_server::DataInit<'_, Self>,
     ) {
         let token_id = resource.id().protocol_id();
+        let client_id = _client.id();
         
         match request {
             xdg_activation_token_v1::Request::SetSerial { serial, seat: _ } => {
-                if let Some(data) = state.xdg.activation.tokens.get_mut(&token_id) {
+                if let Some(data) = state.xdg.activation.tokens.get_mut(&(client_id.clone(), token_id)) {
 
                     data.serial = Some(serial);
                     tracing::debug!("Set serial {} for activation token", serial);
                 }
             }
             xdg_activation_token_v1::Request::SetAppId { app_id } => {
-                if let Some(data) = state.xdg.activation.tokens.get_mut(&token_id) {
+                if let Some(data) = state.xdg.activation.tokens.get_mut(&(client_id.clone(), token_id)) {
 
                     data.app_id = Some(app_id.clone());
                     tracing::debug!("Set app_id {} for activation token", app_id);
@@ -167,7 +168,7 @@ impl Dispatch<XdgActivationTokenV1, ()> for CompositorState {
             }
             xdg_activation_token_v1::Request::SetSurface { surface } => {
                 let surface_id = surface.id().protocol_id();
-                if let Some(data) = state.xdg.activation.tokens.get_mut(&token_id) {
+                if let Some(data) = state.xdg.activation.tokens.get_mut(&(client_id.clone(), token_id)) {
 
                     data.surface_id = Some(surface_id);
                     tracing::debug!("Set surface {} for activation token", surface_id);
@@ -175,16 +176,15 @@ impl Dispatch<XdgActivationTokenV1, ()> for CompositorState {
             }
             xdg_activation_token_v1::Request::Commit => {
                 // Send the token back to the client
-                if let Some(data) = state.xdg.activation.tokens.get(&token_id) {
+                if let Some(data) = state.xdg.activation.tokens.get(&(client_id.clone(), token_id)) {
 
                     resource.done(data.token.clone());
                     tracing::debug!("Committed activation token: {}", data.token);
                 }
             }
             xdg_activation_token_v1::Request::Destroy => {
-                state.xdg.activation.tokens.remove(&token_id);
+                state.xdg.activation.tokens.remove(&(client_id, token_id));
                 tracing::debug!("xdg_activation_token_v1 destroyed");
-
             }
             _ => {}
         }

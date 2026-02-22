@@ -33,6 +33,16 @@ pub struct FullscreenShellState {
     pub presented_surface: Option<u32>,
     /// Synthetic window ID created for the presented surface
     pub presented_window_id: Option<u32>,
+    /// Pending mode feedback objects waiting for safe destructor dispatch
+    pub pending_mode_feedbacks: Vec<ZwpFullscreenShellModeFeedbackV1>,
+}
+
+impl FullscreenShellState {
+    pub fn flush_pending_mode_feedbacks(&mut self) {
+        for fb in self.pending_mode_feedbacks.drain(..) {
+            fb.mode_successful();
+        }
+    }
 }
 
 impl GlobalDispatch<ZwpFullscreenShellV1, ()> for CompositorState {
@@ -81,6 +91,15 @@ impl Dispatch<ZwpFullscreenShellV1, ()> for CompositorState {
 
                 // Create a synthetic window for the new surface
                 if let Some(sid) = new_surface_id {
+                    // Tear down any existing window (e.g. xdg_toplevel fallback) mapped to this surface
+                    if let Some(existing_wid) = state.surface_to_window.remove(&sid) {
+                        state.windows.remove(&existing_wid);
+                        state.pending_compositor_events.push(
+                            crate::core::compositor::CompositorEvent::WindowDestroyed { window_id: existing_wid }
+                        );
+                        tracing::debug!("Fullscreen shell: destroyed pre-existing window {} for surface {}", existing_wid, sid);
+                    }
+
                     let (width, height) = if let Some(output) = state.outputs.get(state.primary_output) {
                         (output.width, output.height)
                     } else {
@@ -102,6 +121,7 @@ impl Dispatch<ZwpFullscreenShellV1, ()> for CompositorState {
 
                     state.pending_compositor_events.push(
                         crate::core::compositor::CompositorEvent::WindowCreated {
+                            client_id: _client.id(),
                             window_id,
                             surface_id: sid,
                             title: "Fullscreen Shell".to_string(),
@@ -120,7 +140,11 @@ impl Dispatch<ZwpFullscreenShellV1, ()> for CompositorState {
             }
             zwp_fullscreen_shell_v1::Request::PresentSurfaceForMode { surface, output: _, framerate: _, feedback } => {
                 let fb = data_init.init(feedback, ());
-                fb.mode_successful();
+                
+                // DEFER DESTRUCTOR: Do NOT call fb.mode_successful() here synchronously.
+                // Doing so will provoke a wayland-backend panic because the resource
+                // maps are not yet fully initialized for this object during dispatch.
+                state.ext.fullscreen_shell.pending_mode_feedbacks.push(fb);
 
                 // Also create a window for the surface (same as PresentSurface)
                 let new_surface_id = Some(surface.id().protocol_id());
@@ -138,6 +162,15 @@ impl Dispatch<ZwpFullscreenShellV1, ()> for CompositorState {
                 state.ext.fullscreen_shell.presented_surface = new_surface_id;
 
                 if let Some(sid) = new_surface_id {
+                    // Tear down any existing window (e.g. xdg_toplevel fallback) mapped to this surface
+                    if let Some(existing_wid) = state.surface_to_window.remove(&sid) {
+                        state.windows.remove(&existing_wid);
+                        state.pending_compositor_events.push(
+                            crate::core::compositor::CompositorEvent::WindowDestroyed { window_id: existing_wid }
+                        );
+                        tracing::debug!("Fullscreen shell: destroyed pre-existing window {} for surface {}", existing_wid, sid);
+                    }
+
                     let (width, height) = if let Some(output) = state.outputs.get(state.primary_output) {
                         (output.width, output.height)
                     } else {
@@ -158,6 +191,7 @@ impl Dispatch<ZwpFullscreenShellV1, ()> for CompositorState {
 
                     state.pending_compositor_events.push(
                         crate::core::compositor::CompositorEvent::WindowCreated {
+                            client_id: _client.id(),
                             window_id,
                             surface_id: sid,
                             title: String::new(),

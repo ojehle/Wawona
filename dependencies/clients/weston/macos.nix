@@ -57,10 +57,10 @@ stdenv.mkDerivation rec {
     "-Dbackend-rdp=false"
     "-Dbackend-vnc=false"
     "-Dbackend-pipewire=false"
-    "-Dbackend-wayland=false"
+    "-Dbackend-wayland=true"
     "-Dbackend-x11=false"
     "-Dxwayland=false"
-    "-Dbackend-default=headless"
+    "-Dbackend-default=wayland"
     "-Drenderer-gl=false"
     "-Dimage-jpeg=true"
     "-Dimage-webp=false"
@@ -97,6 +97,8 @@ struct itimerspec {
 };
 
 #define WESTON_HOWMANY(x, y) (((int)(x) + (int)(y) - 1) / (int)(y))
+#define SOCK_CLOEXEC 0
+#define SOCK_NONBLOCK 0
 
 static inline int pipe2(int fds[2], int flags) {
     if (pipe(fds) != 0) return -1;
@@ -118,7 +120,7 @@ char *strchrnul(const char *s, int c);
 EOF
 
     mesonFlagsArray+=(
-      "-Dc_args=-I${epoll-shim}/include/libepoll-shim -I$PWD/include -include $PWD/include/weston-macos-polyfills.h -Dprogram_invocation_short_name=getprogname() -DCLOCK_MONOTONIC_COARSE=CLOCK_MONOTONIC"
+      "-Dc_args=-I${epoll-shim}/include/libepoll-shim -I$PWD/include -include $PWD/include/weston-macos-polyfills.h -Dprogram_invocation_short_name=getprogname() -DCLOCK_MONOTONIC_COARSE=CLOCK_MONOTONIC -DCLOCK_REALTIME_COARSE=CLOCK_REALTIME"
       "-Dc_link_args=-L${epoll-shim}/lib -lepoll-shim"
       "-Dcpp_link_args=-L${epoll-shim}/lib -lepoll-shim"
       "-Ddemo-clients=false"
@@ -129,10 +131,8 @@ EOF
   NIX_LDFLAGS = "-L${epoll-shim}/lib -lepoll-shim";
 
   postPatch = lib.optionalString stdenv.isDarwin ''
-    # Skip building problematic subdirectories
-    sed -i "/subdir('compositor')/d" meson.build
+    # Skip building problematic subdirectories (keeping compositor and shells)
     sed -i "/subdir('tests')/d" meson.build
-    sed -i "/subdir('desktop-shell')/d" meson.build
     
     # Remove subsurfaces client which depends heavily on GLES2
     sed -i "/'subsurfaces.c'/d" clients/meson.build
@@ -265,6 +265,16 @@ struct udev_list_entry;
 #endif
 EOF
 
+    # Create libevdev/libevdev.h shim
+    cat > include/libevdev/libevdev.h <<'EOF'
+#ifndef _LIBEVDEV_H
+#define _LIBEVDEV_H
+struct libevdev;
+#define EV_KEY 1
+static inline int libevdev_event_code_from_name(unsigned int type, const char *name) { return -1; }
+#endif
+EOF
+
     # Create libinput.h shim
     cat > include/libinput.h <<'EOF'
 #ifndef _LIBINPUT_H
@@ -276,9 +286,19 @@ struct libinput_event;
 struct libinput_event_keyboard;
 struct libinput_event_pointer;
 struct libinput_seat;
+
 enum libinput_led { LIBINPUT_LED_NUM_LOCK, LIBINPUT_LED_CAPS_LOCK, LIBINPUT_LED_SCROLL_LOCK };
 enum libinput_key_state { LIBINPUT_KEY_STATE_RELEASED, LIBINPUT_KEY_STATE_PRESSED };
-enum libinput_device_capability { LIBINPUT_DEVICE_CAP_POINTER };
+enum libinput_device_capability { LIBINPUT_DEVICE_CAP_POINTER, LIBINPUT_DEVICE_CAP_KEYBOARD, LIBINPUT_DEVICE_CAP_TOUCH };
+
+enum libinput_config_scroll_method { LIBINPUT_CONFIG_SCROLL_NO_SCROLL, LIBINPUT_CONFIG_SCROLL_2FG, LIBINPUT_CONFIG_SCROLL_EDGE, LIBINPUT_CONFIG_SCROLL_ON_BUTTON_DOWN };
+enum libinput_config_click_method { LIBINPUT_CONFIG_CLICK_METHOD_NONE, LIBINPUT_CONFIG_CLICK_METHOD_BUTTON_AREAS, LIBINPUT_CONFIG_CLICK_METHOD_CLICKFINGER };
+enum libinput_config_tap_state { LIBINPUT_CONFIG_TAP_DISABLED, LIBINPUT_CONFIG_TAP_ENABLED };
+enum libinput_config_tap_button_map { LIBINPUT_CONFIG_TAP_MAP_LRM, LIBINPUT_CONFIG_TAP_MAP_LMR };
+enum libinput_config_send_events_mode { LIBINPUT_CONFIG_SEND_EVENTS_ENABLED, LIBINPUT_CONFIG_SEND_EVENTS_DISABLED, LIBINPUT_CONFIG_SEND_EVENTS_DISABLED_ON_EXTERNAL_MOUSE };
+enum libinput_config_accel_profile { LIBINPUT_CONFIG_ACCEL_PROFILE_NONE, LIBINPUT_CONFIG_ACCEL_PROFILE_FLAT, LIBINPUT_CONFIG_ACCEL_PROFILE_ADAPTIVE };
+
+static inline const char* libinput_device_get_name(struct libinput_device *d) { return "macos-input"; }
 static inline void* libinput_device_get_user_data(struct libinput_device *d) { return (void*)0; }
 static inline int libinput_device_has_capability(struct libinput_device *d, int c) { return 0; }
 static inline int libinput_event_keyboard_get_key_state(struct libinput_event_keyboard *e) { return 0; }
@@ -287,6 +307,35 @@ static inline uint64_t libinput_event_keyboard_get_time_usec(struct libinput_eve
 static inline uint32_t libinput_event_keyboard_get_key(struct libinput_event_keyboard *e) { return 0; }
 static inline void libinput_device_led_update(struct libinput_device *d, int l) {}
 static inline void* libinput_event_keyboard_get_device(struct libinput_event_keyboard *e) { return (void*)0; }
+
+static inline uint32_t libinput_device_config_scroll_get_methods(struct libinput_device *d) { return 0; }
+static inline void libinput_device_config_scroll_set_method(struct libinput_device *d, int m) {}
+static inline int libinput_device_config_scroll_set_button(struct libinput_device *d, uint32_t b) { return 0; }
+static inline uint32_t libinput_device_config_click_get_methods(struct libinput_device *d) { return 0; }
+static inline void libinput_device_config_click_set_method(struct libinput_device *d, int m) {}
+static inline int libinput_device_config_tap_get_finger_count(struct libinput_device *d) { return 0; }
+static inline void libinput_device_config_tap_set_enabled(struct libinput_device *d, int e) {}
+static inline void libinput_device_config_tap_set_button_map(struct libinput_device *d, int m) {}
+static inline void libinput_device_config_tap_set_drag_enabled(struct libinput_device *d, int e) {}
+static inline void libinput_device_config_tap_set_drag_lock_enabled(struct libinput_device *d, int e) {}
+static inline void libinput_device_config_send_events_set_mode(struct libinput_device *d, int m) {}
+static inline int libinput_device_config_accel_is_available(struct libinput_device *d) { return 0; }
+static inline void libinput_device_config_accel_set_speed(struct libinput_device *d, double s) {}
+static inline void libinput_device_config_accel_set_profile(struct libinput_device *d, int p) {}
+static inline uint32_t libinput_device_config_accel_get_profiles(struct libinput_device *d) { return 0; }
+static inline int libinput_device_config_left_handed_is_available(struct libinput_device *d) { return 0; }
+static inline void libinput_device_config_left_handed_set(struct libinput_device *d, int e) {}
+static inline int libinput_device_config_middle_emulation_is_available(struct libinput_device *d) { return 0; }
+static inline void libinput_device_config_middle_emulation_set_enabled(struct libinput_device *d, int e) {}
+static inline int libinput_device_config_natural_scroll_is_available(struct libinput_device *d) { return 0; }
+static inline int libinput_device_config_scroll_has_natural_scroll(struct libinput_device *d) { return 0; }
+static inline void libinput_device_config_scroll_set_natural_scroll_enabled(struct libinput_device *d, int e) {}
+static inline int libinput_device_config_rotation_is_available(struct libinput_device *d) { return 0; }
+static inline void libinput_device_config_rotation_set_angle(struct libinput_device *d, double a) {}
+static inline void libinput_device_config_calibration_set_matrix(struct libinput_device *d, const float m[6]) {}
+static inline int libinput_device_config_tap_is_available(struct libinput_device *d) { return 0; }
+static inline int libinput_device_config_dwt_is_available(struct libinput_device *d) { return 0; }
+static inline void libinput_device_config_dwt_set_enabled(struct libinput_device *d, int e) {}
 #endif
 EOF
 
@@ -371,6 +420,14 @@ typedef uint64_t __be64;
 #endif
 EOF
     
+    # Create linux/limits.h shim
+    cat > include/linux/limits.h <<'EOF'
+#ifndef _LINUX_LIMITS_H
+#define _LINUX_LIMITS_H
+#include <limits.h>
+#endif
+EOF
+    
     # Inject DRM and xf86drm shims
     cp ${libdrm_fourcc_h} include/drm_fourcc.h
     cp ${libdrm_h} include/drm.h
@@ -384,6 +441,16 @@ EOF
 #define drmGetFormatModifierVendor(m) "INVALID"
 #endif
 EOF
+  '';
+
+  postInstall = ''
+    # Weston's module loader on macOS/Darwin still expects .so extensions for backends
+    # naturally built as .dylib. Symlink them recursively to ensure they can be loaded.
+    find "$out/lib" -name "*.dylib" | while read f; do
+      if [ -f "$f" ]; then
+        ln -s "$(basename "$f")" "''${f%.dylib}.so"
+      fi
+    done
   '';
 
   meta = with lib; {

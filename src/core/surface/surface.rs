@@ -2,6 +2,7 @@
 use super::buffer::BufferType;
 use super::role::SurfaceRole;
 use super::damage::DamageRegion;
+use wayland_server::backend::ClientId;
 
 /// Represents the state of a surface at a point in time.
 /// Used for double-buffering (pending vs current).
@@ -23,6 +24,7 @@ pub struct SurfaceState {
 /// Represents a Wayland Surface.
 pub struct Surface {
     pub id: u32,
+    pub client_id: Option<ClientId>,
     pub role: SurfaceRole,
     
     /// The Wayland resource handle
@@ -37,9 +39,10 @@ pub struct Surface {
 }
 
 impl Surface {
-    pub fn new(id: u32, resource: Option<wayland_server::protocol::wl_surface::WlSurface>) -> Self {
+    pub fn new(id: u32, client_id: Option<ClientId>, resource: Option<wayland_server::protocol::wl_surface::WlSurface>) -> Self {
         Self {
             id,
+            client_id,
             role: SurfaceRole::None,
             resource,
             current: SurfaceState::default(),

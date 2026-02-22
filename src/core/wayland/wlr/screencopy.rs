@@ -108,7 +108,8 @@ impl Dispatch<zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1, ()> for Composito
             zwlr_screencopy_frame_v1::Request::Copy { buffer }
             | zwlr_screencopy_frame_v1::Request::CopyWithDamage { buffer } => {
                 let buffer_id = buffer.id().protocol_id();
-                let buffer_guard = match state.buffers.get(&buffer_id) {
+                let client_id = _client.id();
+                let buffer_guard = match state.buffers.get(&(client_id.clone(), buffer_id)) {
                     Some(b) => b.read().unwrap().clone(),
                     None => {
                         tracing::warn!("screencopy Copy: unknown buffer {}", buffer_id);
@@ -118,7 +119,7 @@ impl Dispatch<zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1, ()> for Composito
                 };
                 let (width, height, stride, ptr, size) = match &buffer_guard.buffer_type {
                     BufferType::Shm(shm) => {
-                        let pool = match state.shm_pools.get_mut(&shm.pool_id) {
+                        let pool = match state.shm_pools.get_mut(&(client_id, shm.pool_id)) {
                             Some(p) => p,
                             None => {
                                 tracing::warn!("screencopy Copy: unknown pool {}", shm.pool_id);

@@ -70,11 +70,12 @@ impl Dispatch<XdgDialogV1, u32> for CompositorState {
         _data_init: &mut DataInit<'_, Self>,
     ) {
         let toplevel_id = *data;
+        let client_id = _client.id();
         match request {
             xdg_dialog_v1::Request::SetModal => {
                 tracing::debug!("Dialog for toplevel {} set as modal", toplevel_id);
                 // Find the window and mark it as modal
-                if let Some(tl_data) = state.xdg.toplevels.get(&toplevel_id) {
+                if let Some(tl_data) = state.xdg.toplevels.get(&(client_id, toplevel_id)) {
                     let window_id = tl_data.window_id;
                     if let Some(window) = state.get_window(window_id) {
                         if let Ok(mut w) = window.write() {
@@ -85,7 +86,7 @@ impl Dispatch<XdgDialogV1, u32> for CompositorState {
             }
             xdg_dialog_v1::Request::UnsetModal => {
                 tracing::debug!("Dialog for toplevel {} unset modal", toplevel_id);
-                if let Some(tl_data) = state.xdg.toplevels.get(&toplevel_id) {
+                if let Some(tl_data) = state.xdg.toplevels.get(&(client_id.clone(), toplevel_id)) {
                     let window_id = tl_data.window_id;
                     if let Some(window) = state.get_window(window_id) {
                         if let Ok(mut w) = window.write() {
@@ -96,7 +97,7 @@ impl Dispatch<XdgDialogV1, u32> for CompositorState {
             }
             xdg_dialog_v1::Request::Destroy => {
                 // Clear modal state on destroy
-                if let Some(tl_data) = state.xdg.toplevels.get(&toplevel_id) {
+                if let Some(tl_data) = state.xdg.toplevels.get(&(client_id, toplevel_id)) {
                     let window_id = tl_data.window_id;
                     if let Some(window) = state.get_window(window_id) {
                         if let Ok(mut w) = window.write() {

@@ -9,8 +9,8 @@
 #import "WWNCompositorView_ios.h"
 #import "WWNPopupHost.h"
 #endif
-#import "WWNPlatformCallbacks.h"
 #import "../../util/WWNLog.h"
+#import "WWNPlatformCallbacks.h"
 #if !TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
 #import "WWNWindow.h"
 #endif
@@ -20,11 +20,11 @@
 #import <Cocoa/Cocoa.h>
 #endif
 #import <IOSurface/IOSurfaceRef.h>
-#import <QuartzCore/QuartzCore.h>  // For CALayer
+#import <QuartzCore/QuartzCore.h> // For CALayer
 #if !TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
-#import <ApplicationServices/ApplicationServices.h>  // CGSetDisplayTransferByTable, etc.
+#import <ApplicationServices/ApplicationServices.h> // CGSetDisplayTransferByTable, etc.
 #endif
-#include <string.h>                // For strdup
+#include <string.h> // For strdup
 
 // Plain C FFI functions exported from Rust with #[no_mangle]
 extern void *WWNCoreNew(void);
@@ -241,7 +241,8 @@ static void handle_cursor_shape_update(uint32_t shape) {
   NSMutableDictionary<NSNumber *, id> *_windows;
   NSMutableDictionary<NSNumber *, id> *_popups;
 #else
-  NSMutableDictionary<NSNumber *, id> *_windows;  /* WWNWindow or NSWindow (popup) */
+  NSMutableDictionary<NSNumber *, id>
+      *_windows; /* WWNWindow or NSWindow (popup) */
   NSMutableDictionary<NSNumber *, id<WWNPopupHost>> *_popups;
 #endif
   // Scene Graph caches
@@ -282,8 +283,7 @@ static void handle_cursor_shape_update(uint32_t shape) {
     // keeping the main thread free for UI.
     dispatch_queue_attr_t attr = dispatch_queue_attr_make_with_qos_class(
         DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0);
-    _compositorQueue =
-        dispatch_queue_create("com.wawona.compositor", attr);
+    _compositorQueue = dispatch_queue_create("com.wawona.compositor", attr);
 
     WWNLog("BRIDGE", @"WWNCore created successfully via C API!");
     _windows = [NSMutableDictionary dictionary];
@@ -315,7 +315,8 @@ static void handle_cursor_shape_update(uint32_t shape) {
   // Simulator: use a short path to stay within the 104-byte Unix socket
   // sun_path limit.  NSTemporaryDirectory() on the simulator maps to the
   // host's CoreSimulator container which can be 150+ chars.
-  runtimeDir = [NSString stringWithFormat:@"/tmp/wawona_sim_%u", (unsigned)getuid()];
+  runtimeDir =
+      [NSString stringWithFormat:@"/tmp/wawona_sim_%u", (unsigned)getuid()];
 #else
   // Device: NSTemporaryDirectory()/w — matches WWNPreferredSharedRuntimeDir()
   // in WWNPreferencesManager.m so the waypipe runner finds the socket.
@@ -326,7 +327,8 @@ static void handle_cursor_shape_update(uint32_t shape) {
   runtimeDir = [runtimeDir stringByAppendingPathComponent:@"w"];
 #endif
 #else
-  // macOS: use /tmp/wawona-<uid> matching the client wrapper scripts in flake.nix
+  // macOS: use /tmp/wawona-<uid> matching the client wrapper scripts in
+  // flake.nix
   uid_t uid = getuid();
   runtimeDir = [NSString stringWithFormat:@"/tmp/wawona-%u", uid];
 #endif
@@ -340,7 +342,7 @@ static void handle_cursor_shape_update(uint32_t shape) {
                             error:&dirError];
   if (dirError) {
     WWNLog("BRIDGE", @"Warning: Could not create runtime dir %@: %@",
-          runtimeDir, dirError);
+           runtimeDir, dirError);
   }
 
   // Important: overwrite=1 to ensure Rust sees the new path
@@ -361,8 +363,8 @@ static void handle_cursor_shape_update(uint32_t shape) {
       NSError *error = nil;
       [[NSFileManager defaultManager] removeItemAtPath:filePath error:&error];
       if (error) {
-        WWNLog("BRIDGE", @"Warning: Failed to remove stale file %@: %@", filePath,
-              error);
+        WWNLog("BRIDGE", @"Warning: Failed to remove stale file %@: %@",
+               filePath, error);
       } else {
         WWNLog("BRIDGE", @"Cleaned up stale file: %@", filePath);
       }
@@ -393,9 +395,9 @@ static void handle_cursor_shape_update(uint32_t shape) {
       WWNLog("BRIDGE", @"Compositor started — socket: %s", socketPath);
       WWNLog("BRIDGE", @"Connect clients with:");
       WWNLog("BRIDGE", @"  export XDG_RUNTIME_DIR=%s",
-            getenv("XDG_RUNTIME_DIR"));
+             getenv("XDG_RUNTIME_DIR"));
       WWNLog("BRIDGE", @"  export WAYLAND_DISPLAY=%s",
-            [displayName UTF8String]);
+             [displayName UTF8String]);
       free(socketPath);
     } else {
       WWNLog("BRIDGE", @"Compositor started successfully!");
@@ -582,8 +584,7 @@ static void handle_cursor_shape_update(uint32_t shape) {
     CBufferData *buffer;
     while ((buffer = WWNCorePopPendingBuffer(self->_rustCore)) != NULL) {
       [self cacheBuffer:buffer];
-      uint32_t ts =
-          (uint32_t)([[NSDate date] timeIntervalSince1970] * 1000.0);
+      uint32_t ts = (uint32_t)([[NSDate date] timeIntervalSince1970] * 1000.0);
       WWNCoreNotifyFramePresented(self->_rustCore, buffer->surface_id,
                                   buffer->buffer_id, ts);
       WWNBufferDataFree(buffer);
@@ -618,15 +619,18 @@ static void handle_cursor_shape_update(uint32_t shape) {
 
 #if !TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
       // Screencopy: capture window and write to client buffer
-      CScreencopyRequest screencopy = WWNCoreGetPendingScreencopy(self->_rustCore);
-      if (screencopy.capture_id != 0 && screencopy.ptr != NULL && screencopy.width > 0 &&
-          screencopy.height > 0) {
+      CScreencopyRequest screencopy =
+          WWNCoreGetPendingScreencopy(self->_rustCore);
+      if (screencopy.capture_id != 0 && screencopy.ptr != NULL &&
+          screencopy.width > 0 && screencopy.height > 0) {
         [self _fulfillScreencopy:&screencopy];
       }
-      // Image copy capture (ext-image-copy-capture-v1): same pixel path as screencopy
-      CScreencopyRequest imageCopy = WWNCoreGetPendingImageCopyCapture(self->_rustCore);
-      if (imageCopy.capture_id != 0 && imageCopy.ptr != NULL && imageCopy.width > 0 &&
-          imageCopy.height > 0) {
+      // Image copy capture (ext-image-copy-capture-v1): same pixel path as
+      // screencopy
+      CScreencopyRequest imageCopy =
+          WWNCoreGetPendingImageCopyCapture(self->_rustCore);
+      if (imageCopy.capture_id != 0 && imageCopy.ptr != NULL &&
+          imageCopy.width > 0 && imageCopy.height > 0) {
         [self _fulfillImageCopyCapture:&imageCopy];
       } else if (imageCopy.capture_id != 0) {
         WWNCoreImageCopyCaptureFailed(self->_rustCore, imageCopy.capture_id);
@@ -769,6 +773,15 @@ static void handle_cursor_shape_update(uint32_t shape) {
 #endif
   }
 
+#if !TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+  if (node->buffer_id != 0) {
+    id w = _windows[winId];
+    if (w && [w isKindOfClass:[NSWindow class]] && ![(NSWindow *)w isVisible]) {
+      [(NSWindow *)w makeKeyAndOrderFront:nil];
+    }
+  }
+#endif
+
   // 2. Update Geometry — use anchor for window-local coords (subsurfaces)
   float localX = node->x - node->anchor_output_x;
   float localY = node->y - node->anchor_output_y;
@@ -818,7 +831,8 @@ static void handle_cursor_shape_update(uint32_t shape) {
 #else
   (void)windowID;
   (void)bounds;
-  /* CGWindowListCreateImage obsoleted in macOS 15 - ScreenCaptureKit required */
+  /* CGWindowListCreateImage obsoleted in macOS 15 - ScreenCaptureKit required
+   */
 #endif
   if (!cap)
     return NO;
@@ -833,8 +847,8 @@ static void handle_cursor_shape_update(uint32_t shape) {
   CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
   CGBitmapInfo bmpInfo =
       kCGBitmapByteOrder32Little | kCGImageAlphaPremultipliedFirst;
-  CGContextRef ctx = CGBitmapContextCreate(
-      req->ptr, req->width, req->height, 8, req->stride, cs, bmpInfo);
+  CGContextRef ctx = CGBitmapContextCreate(req->ptr, req->width, req->height, 8,
+                                           req->stride, cs, bmpInfo);
   if (!ctx) {
     CGColorSpaceRelease(cs);
     CGImageRelease(cap);
@@ -866,7 +880,8 @@ static void handle_cursor_shape_update(uint32_t shape) {
 }
 
 - (void)_applyGamma:(const CGammaApply *)apply {
-  if (!apply || apply->size == 0 || !apply->red || !apply->green || !apply->blue)
+  if (!apply || apply->size == 0 || !apply->red || !apply->green ||
+      !apply->blue)
     return;
 
   CGDirectDisplayID displayId = CGMainDisplayID();
@@ -895,10 +910,9 @@ static void handle_cursor_shape_update(uint32_t shape) {
     _savedGammaBlue = (CGGammaValue *)malloc(n * sizeof(CGGammaValue));
     if (_savedGammaRed && _savedGammaGreen && _savedGammaBlue) {
       uint32_t sampleCount = n;
-      CGGetDisplayTransferByTable(
-          displayId, n,
-          _savedGammaRed, _savedGammaGreen, _savedGammaBlue,
-          &sampleCount);
+      CGGetDisplayTransferByTable(displayId, n, _savedGammaRed,
+                                  _savedGammaGreen, _savedGammaBlue,
+                                  &sampleCount);
       _savedGammaSize = sampleCount;
     } else {
       free(_savedGammaRed);
@@ -917,10 +931,11 @@ static void handle_cursor_shape_update(uint32_t shape) {
 }
 
 - (void)_restoreGamma {
-  if (_savedGammaRed && _savedGammaGreen && _savedGammaBlue && _savedGammaSize > 0) {
-    CGSetDisplayTransferByTable(
-        CGMainDisplayID(), _savedGammaSize,
-        _savedGammaRed, _savedGammaGreen, _savedGammaBlue);
+  if (_savedGammaRed && _savedGammaGreen && _savedGammaBlue &&
+      _savedGammaSize > 0) {
+    CGSetDisplayTransferByTable(CGMainDisplayID(), _savedGammaSize,
+                                _savedGammaRed, _savedGammaGreen,
+                                _savedGammaBlue);
     free(_savedGammaRed);
     free(_savedGammaGreen);
     free(_savedGammaBlue);
@@ -1192,9 +1207,10 @@ extern void WWNCoreInjectTouchCancel(void *core);
     return;
   }
   [self _dispatchToRust:^{
-    WWNLog("BRIDGE", @"Injecting modifiers: depressed=0x%x latched=0x%x "
-          @"locked=0x%x",
-          depressed, latched, locked);
+    WWNLog("BRIDGE",
+           @"Injecting modifiers: depressed=0x%x latched=0x%x "
+           @"locked=0x%x",
+           depressed, latched, locked);
     WWNCoreInjectModifiers(self->_rustCore, depressed, latched, locked, group);
   }];
 }
@@ -1220,8 +1236,8 @@ extern void WWNCoreInjectTouchCancel(void *core);
   }
   [self _dispatchToRust:^{
     WWNCoreSetSafeAreaInsets(self->_rustCore, top, right, bottom, left);
-    WWNLog("BRIDGE", @"Safe area insets: top=%d right=%d bottom=%d left=%d", top,
-          right, bottom, left);
+    WWNLog("BRIDGE", @"Safe area insets: top=%d right=%d bottom=%d left=%d",
+           top, right, bottom, left);
   }];
 }
 
@@ -1229,10 +1245,8 @@ extern void WWNCoreInjectTouchCancel(void *core);
   if (!_rustCore) {
     return;
   }
-  [self _dispatchToRust:^{
-    WWNCoreSetForceSSD(self->_rustCore, enabled);
-    WWNLog("BRIDGE", @"Force SSD set to: %d", enabled);
-  }];
+  WWNCoreSetForceSSD(_rustCore, enabled);
+  WWNLog("BRIDGE", @"Force SSD set to: %d", enabled);
 }
 - (void)setKeyboardRepeatRate:(int32_t)rate delay:(int32_t)delay {
 }
@@ -1276,8 +1290,8 @@ typedef struct CWindowEvent {
   uint64_t parent_id;
   int32_t x;
   int32_t y;
-  uint8_t decoration_mode;   // 0 = ClientSide, 1 = ServerSide
-  uint8_t fullscreen_shell;   // 0 = no, 1 = yes (kiosk - no host chrome)
+  uint8_t decoration_mode;  // 0 = ClientSide, 1 = ServerSide
+  uint8_t fullscreen_shell; // 0 = no, 1 = yes (kiosk - no host chrome)
   uint16_t padding;
 } CWindowEvent;
 
@@ -1368,9 +1382,11 @@ extern void WWNWindowInfoFree(CWindowInfo *info);
 #if !TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
 
 - (void)handleWindowCreated:(CWindowEvent *)event {
-  WWNLog("BRIDGE", @"handleWindowCreated: id=%llu size=%ux%u decoration_mode=%u fullscreen_shell=%u",
-        event->window_id, event->width, event->height,
-        event->decoration_mode, event->fullscreen_shell);
+  WWNLog("BRIDGE",
+         @"handleWindowCreated: id=%llu size=%ux%u decoration_mode=%u "
+         @"fullscreen_shell=%u",
+         event->window_id, event->width, event->height, event->decoration_mode,
+         event->fullscreen_shell);
 
   NSRect contentRect;
   if (event->fullscreen_shell) {
@@ -1410,11 +1426,12 @@ extern void WWNWindowInfoFree(CWindowInfo *info);
   [window makeFirstResponder:contentView];
 
   [window center];
-  [window makeKeyAndOrderFront:nil];
+  // Deferred: Window remains hidden until a buffer is attached (xdg-shell
+  // semantics)
 
   [_windows setObject:window forKey:@(event->window_id)];
   WWNLog("BRIDGE", @"Created window %llu: %@ (total windows: %lu)",
-        event->window_id, title, (unsigned long)[_windows count]);
+         event->window_id, title, (unsigned long)[_windows count]);
 }
 
 - (void)handleWindowMoveRequested:(CWindowEvent *)event {
@@ -1446,8 +1463,9 @@ extern void WWNWindowInfoFree(CWindowInfo *info);
     styleMask = NSWindowStyleMaskBorderless | NSWindowStyleMaskResizable;
   }
   [window setStyleMask:styleMask];
-  WWNLog("BRIDGE", @"Decoration mode changed for window %llu: %s", event->window_id,
-        event->decoration_mode == 1 ? "ServerSide" : "ClientSide");
+  WWNLog("BRIDGE", @"Decoration mode changed for window %llu: %s",
+         event->window_id,
+         event->decoration_mode == 1 ? "ServerSide" : "ClientSide");
 }
 
 - (void)handleWindowResizeRequested:(CWindowEvent *)event {
@@ -1505,10 +1523,11 @@ extern void WWNWindowInfoFree(CWindowInfo *info);
   if (window) {
     [window setTitle:newTitle];
     WWNLog("BRIDGE", @"Updated title for window %llu to '%@'", event->window_id,
-          newTitle);
+           newTitle);
   } else {
-    WWNLog("BRIDGE", @"Warning: handleWindowTitleChanged for unknown window %llu",
-          event->window_id);
+    WWNLog("BRIDGE",
+           @"Warning: handleWindowTitleChanged for unknown window %llu",
+           event->window_id);
   }
 }
 
@@ -1534,8 +1553,9 @@ extern void WWNWindowInfoFree(CWindowInfo *info);
   NSView *parentView = nil;
   NSWindow *parentWindow = [self.windows objectForKey:@(event->parent_id)];
 
-  WWNLog("BRIDGE", @"Popup create request: surface %u, window %llu, parent %llu",
-        event->surface_id, event->window_id, event->parent_id);
+  WWNLog("BRIDGE",
+         @"Popup create request: surface %u, window %llu, parent %llu",
+         event->surface_id, event->window_id, event->parent_id);
 
   if (parentWindow) {
     WWNLog("BRIDGE", @"Found parent as Window: %p", parentWindow);
@@ -1547,26 +1567,29 @@ extern void WWNWindowInfoFree(CWindowInfo *info);
       parentView = parentPopup.contentView;
     } else {
       WWNLog("BRIDGE", @"Parent %llu NOT found in windows or popups",
-            event->parent_id);
+             event->parent_id);
     }
   }
 
   if (!parentView) {
-    WWNLog("BRIDGE", @"Warning: Popup created for unknown parent %llu, falling "
-          @"back to key "
-          @"window",
-          event->parent_id);
+    WWNLog("BRIDGE",
+           @"Warning: Popup created for unknown parent %llu, falling "
+           @"back to key "
+           @"window",
+           event->parent_id);
     parentWindow = [NSApp keyWindow];
     parentView = parentWindow.contentView;
   }
 
   if (parentView) {
-    WWNLog("BRIDGE", @"Creating popup (NSWindow) for surface %u (window %llu) "
-          @"anchored to parent %llu at %d,%d (%ux%u)",
-          event->surface_id, event->window_id, event->parent_id, event->x,
-          event->y, event->width, event->height);
+    WWNLog("BRIDGE",
+           @"Creating popup (NSWindow) for surface %u (window %llu) "
+           @"anchored to parent %llu at %d,%d (%ux%u)",
+           event->surface_id, event->window_id, event->parent_id, event->x,
+           event->y, event->width, event->height);
 
-    id<WWNPopupHost> popup = [[WWNPopupWindow alloc] initWithParentView:parentView];
+    id<WWNPopupHost> popup =
+        [[WWNPopupWindow alloc] initWithParentView:parentView];
 
     [popup setContentSize:CGSizeMake(event->width, event->height)];
     [popup setWindowId:event->window_id];
@@ -1581,8 +1604,9 @@ extern void WWNWindowInfoFree(CWindowInfo *info);
     };
 
     // Compute screen point for popup top-left (Wayland x,y is parent-relative)
-    NSRect windowRect = [parentView convertRect:CGRectMake(event->x, event->y, 1, 1)
-                                         toView:nil];
+    NSRect windowRect =
+        [parentView convertRect:CGRectMake(event->x, event->y, 1, 1)
+                         toView:nil];
     NSRect screenRect = [parentView.window convertRectToScreen:windowRect];
     CGPoint topLeft =
         CGPointMake(screenRect.origin.x, screenRect.origin.y - event->height);
@@ -1602,12 +1626,12 @@ extern void WWNWindowInfoFree(CWindowInfo *info);
   id<WWNPopupHost> popup = [_popups objectForKey:@(event->window_id)];
   if (!popup) {
     WWNLog("BRIDGE", @"Warning: PopupRepositioned for unknown window %llu",
-          event->window_id);
+           event->window_id);
     return;
   }
 
-  WWNLog("BRIDGE", @"Repositioning popup %llu to %d,%d (%ux%u)", event->window_id,
-        event->x, event->y, event->width, event->height);
+  WWNLog("BRIDGE", @"Repositioning popup %llu to %d,%d (%ux%u)",
+         event->window_id, event->x, event->y, event->width, event->height);
 
   [popup setContentSize:CGSizeMake(event->width, event->height)];
 
@@ -1672,8 +1696,9 @@ extern void WWNWindowInfoFree(CWindowInfo *info);
 }
 
 - (void)handleWindowCreated:(CWindowEvent *)event {
-  WWNLog("BRIDGE", @"iOS handleWindowCreated: id=%llu %ux%u fullscreen_shell=%u", event->window_id,
-        event->width, event->height, event->fullscreen_shell);
+  WWNLog(
+      "BRIDGE", @"iOS handleWindowCreated: id=%llu %ux%u fullscreen_shell=%u",
+      event->window_id, event->width, event->height, event->fullscreen_shell);
 
   // Use the container's current bounds so the surface fills it edge-to-edge.
   // fullscreen_shell (kiosk) and normal toplevels both fill the container;
@@ -1692,10 +1717,10 @@ extern void WWNWindowInfoFree(CWindowInfo *info);
   if (self.containerView) {
     [self.containerView insertSubview:view atIndex:0];
     WWNLog("BRIDGE", @"Added window %llu to container (%.0fx%.0f)",
-          event->window_id, frame.size.width, frame.size.height);
+           event->window_id, frame.size.width, frame.size.height);
   } else {
     WWNLog("BRIDGE", @"Warning: No containerView set, window %llu not visible",
-          event->window_id);
+           event->window_id);
   }
 
   [_windows setObject:view forKey:@(event->window_id)];
@@ -1716,9 +1741,8 @@ extern void WWNWindowInfoFree(CWindowInfo *info);
 
     // 3. Send pointer enter so the client knows a pointer is present
     //    and can set a cursor surface (critical for touchpad mode).
-    CGRect viewFrame = self.containerView
-                           ? self.containerView.bounds
-                           : CGRectMake(0, 0, 800, 600);
+    CGRect viewFrame = self.containerView ? self.containerView.bounds
+                                          : CGRectMake(0, 0, 800, 600);
     double cx = viewFrame.size.width / 2.0;
     double cy = viewFrame.size.height / 2.0;
     [self injectPointerEnterForWindow:windowId x:cx y:cy timestamp:0];
@@ -1770,16 +1794,18 @@ extern void WWNWindowInfoFree(CWindowInfo *info);
 }
 
 - (void)handlePopupCreated:(CWindowEvent *)event {
-  WWNLog("BRIDGE", @"iOS handlePopupCreated: id=%llu parent=%llu at (%d,%d) "
-        @"size=%ux%u",
-        event->window_id, event->parent_id, event->x, event->y, event->width,
-        event->height);
+  WWNLog("BRIDGE",
+         @"iOS handlePopupCreated: id=%llu parent=%llu at (%d,%d) "
+         @"size=%ux%u",
+         event->window_id, event->parent_id, event->x, event->y, event->width,
+         event->height);
 
   // Find the parent view -- it can be a window or another popup
   UIView *parentView = nil;
   UIView *parentWindowView =
       (UIView *)[_windows objectForKey:@(event->parent_id)];
-  UIView *parentPopupView = (UIView *)[_popups objectForKey:@(event->parent_id)];
+  UIView *parentPopupView =
+      (UIView *)[_popups objectForKey:@(event->parent_id)];
 
   if (parentWindowView) {
     parentView = parentWindowView;
@@ -1788,18 +1814,20 @@ extern void WWNWindowInfoFree(CWindowInfo *info);
   }
 
   if (!parentView) {
-    WWNLog("BRIDGE", @"Warning: Popup parent %llu not found, using first window",
-          event->parent_id);
+    WWNLog("BRIDGE",
+           @"Warning: Popup parent %llu not found, using first window",
+           event->parent_id);
     parentView = [_windows allValues].firstObject;
   }
 
   if (!parentView) {
     WWNLog("BRIDGE", @"Error: No parent view available for popup %llu",
-          event->window_id);
+           event->window_id);
     return;
   }
 
-  // Create popup view as subview of parent; clamp to containerView bounds (iOS kiosk)
+  // Create popup view as subview of parent; clamp to containerView bounds (iOS
+  // kiosk)
   CGRect containerBounds =
       self.containerView ? self.containerView.bounds : parentView.bounds;
   CGFloat x = (CGFloat)event->x;
@@ -1822,10 +1850,11 @@ extern void WWNWindowInfoFree(CWindowInfo *info);
   [_popups setObject:popupView forKey:@(event->window_id)];
   [_windows setObject:popupView forKey:@(event->window_id)];
 
-  WWNLog("BRIDGE", @"iOS popup %llu added as subview of parent (frame: "
-        @"%.0f,%.0f %.0fx%.0f)",
-        event->window_id, popupFrame.origin.x, popupFrame.origin.y,
-        popupFrame.size.width, popupFrame.size.height);
+  WWNLog("BRIDGE",
+         @"iOS popup %llu added as subview of parent (frame: "
+         @"%.0f,%.0f %.0fx%.0f)",
+         event->window_id, popupFrame.origin.x, popupFrame.origin.y,
+         popupFrame.size.width, popupFrame.size.height);
 
   // Send keyboard enter to popup so it can receive input
   uint64_t windowId = event->window_id;
@@ -1836,13 +1865,13 @@ extern void WWNWindowInfoFree(CWindowInfo *info);
   UIView *popupView = (UIView *)[_popups objectForKey:@(event->window_id)];
   if (!popupView) {
     WWNLog("BRIDGE", @"Warning: PopupRepositioned for unknown popup %llu",
-          event->window_id);
+           event->window_id);
     return;
   }
 
   // Clamp to container bounds (iOS kiosk)
-  CGRect containerBounds =
-      self.containerView ? self.containerView.bounds : popupView.superview.bounds;
+  CGRect containerBounds = self.containerView ? self.containerView.bounds
+                                              : popupView.superview.bounds;
   CGFloat x = (CGFloat)event->x;
   CGFloat y = (CGFloat)event->y;
   CGFloat w = (CGFloat)event->width;
@@ -1853,8 +1882,8 @@ extern void WWNWindowInfoFree(CWindowInfo *info);
   popupView.frame = newFrame;
 
   WWNLog("BRIDGE", @"iOS popup %llu repositioned to (%.0f,%.0f %.0fx%.0f)",
-        event->window_id, newFrame.origin.x, newFrame.origin.y,
-        newFrame.size.width, newFrame.size.height);
+         event->window_id, newFrame.origin.x, newFrame.origin.y,
+         newFrame.size.width, newFrame.size.height);
 }
 
 - (void)handlePopupDismissed:(uint64_t)windowId {

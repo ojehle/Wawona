@@ -101,53 +101,114 @@ let
     "src/platform/macos/WWNPopupWindow.h"
   ];
 
+  # Mirror iOS Wawona icon installation: same sources (AppIcon.appiconset,
+  # Wawona.icon, About PNGs). macOS uses Contents/Resources; iOS uses app root.
+  # Tahoe can use the Icon Composer .icon bundle; optionally compile to Assets.car
+  # when actool is available for the dock icon.
+  installMacOSIcons = ''
+    RESOURCES="$out/Applications/Wawona.app/Contents/Resources"
+    mkdir -p "$RESOURCES"
+    APPICONSET="$src/src/resources/Assets.xcassets/AppIcon.appiconset"
+    ICON_BUNDLE="$src/src/resources/Wawona.icon"
+
+    # Same as iOS: app icons (light + dark) from AppIcon.appiconset
+    if [ -d "$APPICONSET" ] && [ -f "$APPICONSET/AppIcon-Light-1024.png" ]; then
+      cp "$APPICONSET/AppIcon-Light-1024.png" "$RESOURCES/AppIcon.png"
+      echo "Installed AppIcon.png (light, opaque)"
+    fi
+    if [ -d "$APPICONSET" ] && [ -f "$APPICONSET/AppIcon-Dark-1024.png" ]; then
+      cp "$APPICONSET/AppIcon-Dark-1024.png" "$RESOURCES/AppIcon-Dark.png"
+      echo "Installed AppIcon-Dark.png (dark)"
+    fi
+
+    # Same as iOS: modern Wawona.icon bundle (Tahoe/iOS 26+ Icon Composer format)
+    if [ -d "$ICON_BUNDLE" ]; then
+      cp -R "$ICON_BUNDLE" "$RESOURCES/"
+      echo "Installed Wawona.icon bundle"
+    fi
+
+    # Same as iOS: bundle logo PNGs for Settings About header
+    if [ -f "$src/src/resources/Wawona-iOS-Dark-1024x1024@1x.png" ]; then
+      cp "$src/src/resources/Wawona-iOS-Dark-1024x1024@1x.png" "$RESOURCES/"
+      echo "Bundled Wawona-iOS-Dark-1024x1024@1x.png"
+    fi
+    if [ -f "$src/src/resources/Wawona-iOS-Light-1024x1024@1x.png" ]; then
+      cp "$src/src/resources/Wawona-iOS-Light-1024x1024@1x.png" "$RESOURCES/"
+      echo "Bundled Wawona-iOS-Light-1024x1024@1x.png"
+    fi
+
+    # Standard macOS ICNS generation using iconutil
+    if [ -d "$APPICONSET" ] && command -v iconutil >/dev/null 2>&1; then
+      ICON_TMP="$TMPDIR/wawona-iconutil"
+      rm -rf "$ICON_TMP"
+      mkdir -p "$ICON_TMP/AppIcon.iconset"
+      
+      # Copy light icons into the .iconset format
+      if [ -f "$APPICONSET/AppIcon-16.png" ]; then cp "$APPICONSET/AppIcon-16.png" "$ICON_TMP/AppIcon.iconset/icon_16x16.png"; fi
+      if [ -f "$APPICONSET/AppIcon-32.png" ]; then cp "$APPICONSET/AppIcon-32.png" "$ICON_TMP/AppIcon.iconset/icon_16x16@2x.png"; cp "$APPICONSET/AppIcon-32.png" "$ICON_TMP/AppIcon.iconset/icon_32x32.png"; fi
+      if [ -f "$APPICONSET/AppIcon-64.png" ]; then cp "$APPICONSET/AppIcon-64.png" "$ICON_TMP/AppIcon.iconset/icon_32x32@2x.png"; fi
+      if [ -f "$APPICONSET/AppIcon-128.png" ]; then cp "$APPICONSET/AppIcon-128.png" "$ICON_TMP/AppIcon.iconset/icon_128x128.png"; fi
+      if [ -f "$APPICONSET/AppIcon-256.png" ]; then cp "$APPICONSET/AppIcon-256.png" "$ICON_TMP/AppIcon.iconset/icon_128x128@2x.png"; cp "$APPICONSET/AppIcon-256.png" "$ICON_TMP/AppIcon.iconset/icon_256x256.png"; fi
+      if [ -f "$APPICONSET/AppIcon-512.png" ]; then cp "$APPICONSET/AppIcon-512.png" "$ICON_TMP/AppIcon.iconset/icon_256x256@2x.png"; cp "$APPICONSET/AppIcon-512.png" "$ICON_TMP/AppIcon.iconset/icon_512x512.png"; fi
+      if [ -f "$APPICONSET/AppIcon-Light-1024.png" ]; then
+         cp "$APPICONSET/AppIcon-Light-1024.png" "$ICON_TMP/AppIcon.iconset/icon_512x512@2x.png"
+      elif [ -f "$APPICONSET/AppIcon-1024.png" ]; then
+         cp "$APPICONSET/AppIcon-1024.png" "$ICON_TMP/AppIcon.iconset/icon_512x512@2x.png"
+      fi
+      
+      iconutil -c icns "$ICON_TMP/AppIcon.iconset" -o "$RESOURCES/AppIcon.icns"
+      echo "Installed AppIcon.icns (compiled via iconutil)"
+    fi
+
+    # Tahoe: compile .icon to Assets.car when actool available (dock icon)
+    if [ -d "$ICON_BUNDLE" ]; then
+      if [ -z "''${DEVELOPER_DIR:-}" ]; then
+        XCODE_APP=$(${xcodeUtils.findXcodeScript}/bin/find-xcode 2>/dev/null || true)
+        if [ -n "$XCODE_APP" ]; then
+          export DEVELOPER_DIR="$XCODE_APP/Contents/Developer"
+          export PATH="$DEVELOPER_DIR/usr/bin:$PATH"
+        fi
+      fi
+      if command -v actool >/dev/null 2>&1; then
+        ICON_TMP="$TMPDIR/wawona-icon-compile"
+        rm -rf "$ICON_TMP"
+        mkdir -p "$ICON_TMP"
+        cp -R "$ICON_BUNDLE" "$ICON_TMP/Wawona.icon"
+        if [ -f "$src/src/resources/wayland.png" ] && [ ! -f "$ICON_TMP/Wawona.icon/wayland.png" ]; then
+          cp "$src/src/resources/wayland.png" "$ICON_TMP/Wawona.icon/"
+        fi
+        OUT_CAR="$ICON_TMP/icons"
+        mkdir -p "$OUT_CAR"
+        if actool "$ICON_TMP/Wawona.icon" --compile "$OUT_CAR" \
+            --platform macosx --target-device mac \
+            --minimum-deployment-target 26.0 \
+            --app-icon Wawona --include-all-app-icons \
+            --output-format human-readable-text --notices --warnings \
+            --development-region en --enable-on-demand-resources NO; then
+          if [ -f "$OUT_CAR/Assets.car" ]; then
+            cp "$OUT_CAR/Assets.car" "$RESOURCES/"
+            echo "Installed Assets.car (Tahoe app icon)"
+          fi
+        fi
+      fi
+    fi
+
+    # [NSImage imageNamed:@"Wawona"] for About panel and Settings > About
+    for candidate in "Assets.xcassets/AppIcon.appiconset/AppIcon-Light-1024.png" \
+                     "Assets.xcassets/AppIcon.appiconset/AppIcon-Dark-1024.png" \
+                     "Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png" \
+                     "Wawona-iOS-Light-1024x1024@1x.png" \
+                     "Wawona-iOS-Dark-1024x1024@1x.png"; do
+      if [ -f "$src/src/resources/$candidate" ]; then
+        cp "$src/src/resources/$candidate" "$RESOURCES/Wawona.png"
+        echo "Installed Wawona.png for About/Settings"
+        break
+      fi
+    done
+  '';
+
   generateIcons = platform: ''
-        mkdir -p "$out/Applications/Wawona.app/Contents/Resources"
-
-        # --- Generate a traditional .icns from the asset catalog PNGs ---
-        APPICONSET="$src/src/resources/Assets.xcassets/AppIcon.appiconset"
-        if [ -d "$APPICONSET" ] && [ -f "$APPICONSET/AppIcon-1024.png" ]; then
-          echo "Generating AppIcon.icns from asset catalog PNGs..."
-          ICONSET="$out/Applications/Wawona.app/Contents/Resources/AppIcon.iconset"
-          mkdir -p "$ICONSET"
-          cp "$APPICONSET/AppIcon-16.png"   "$ICONSET/icon_16x16.png"
-          cp "$APPICONSET/AppIcon-32.png"   "$ICONSET/icon_16x16@2x.png"
-          cp "$APPICONSET/AppIcon-32.png"   "$ICONSET/icon_32x32.png"
-          cp "$APPICONSET/AppIcon-64.png"   "$ICONSET/icon_32x32@2x.png"
-          cp "$APPICONSET/AppIcon-128.png"  "$ICONSET/icon_128x128.png"
-          cp "$APPICONSET/AppIcon-256.png"  "$ICONSET/icon_128x128@2x.png"
-          cp "$APPICONSET/AppIcon-256.png"  "$ICONSET/icon_256x256.png"
-          cp "$APPICONSET/AppIcon-512.png"  "$ICONSET/icon_256x256@2x.png"
-          cp "$APPICONSET/AppIcon-512.png"  "$ICONSET/icon_512x512.png"
-          cp "$APPICONSET/AppIcon-1024.png" "$ICONSET/icon_512x512@2x.png"
-          ICONUTIL=""
-          if command -v iconutil >/dev/null 2>&1; then
-            ICONUTIL="iconutil"
-          elif [ -x "/usr/bin/iconutil" ]; then
-            ICONUTIL="/usr/bin/iconutil"
-          fi
-          if [ -n "$ICONUTIL" ]; then
-            "$ICONUTIL" -c icns "$ICONSET" \
-              -o "$out/Applications/Wawona.app/Contents/Resources/AppIcon.icns" \
-              && echo "Successfully created AppIcon.icns" \
-              || echo "Warning: iconutil failed"
-          else
-            echo "Warning: iconutil not found, .icns not created"
-          fi
-          rm -rf "$ICONSET"
-        else
-          echo "Warning: Asset catalog PNGs not found at $APPICONSET"
-        fi
-
-        # --- Also install the modern Tahoe icon bundle for macOS 26+ ---
-        ICON_BUNDLE="$src/src/resources/Wawona.icon"
-        if [ -d "$ICON_BUNDLE" ]; then
-          echo "Installing Wawona.icon bundle for ${platform}..."
-          cp -R "$ICON_BUNDLE" "$out/Applications/Wawona.app/Contents/Resources/"
-          echo "Successfully installed Wawona.icon"
-        fi
-
-        # (dark logo PNG is bundled separately in installPhase)
+    mkdir -p "$out/Applications/Wawona.app/Contents/Resources"
   '';
 
 in
@@ -382,7 +443,8 @@ GEN_HEADER
       # Now _GEN-wawona-Swift.h is available in current directory
       echo "🔨 Phase 2: Compiling Objective-C and C files..."
       OBJ_FILES="$SWIFT_OBJ"
-      ALL_SOURCES="${lib.concatStringsSep " " macosSourcesFiltered} ${lib.concatStringsSep " " macosPrePatchSources}"
+      # Deduplicate to prevent double-building if files exist in both repo and prePatchSources
+      ALL_SOURCES="${lib.concatStringsSep " " (lib.unique (macosSourcesFiltered ++ macosPrePatchSources))}"
       for src_file in $ALL_SOURCES; do
         if [[ "$src_file" == *.c ]] || [[ "$src_file" == *.m ]]; then
           obj_file="''${src_file//\//_}.o"
@@ -469,6 +531,7 @@ GEN_HEADER
          $OPENSSL_LIBS \
          $ZLIB_LIBS \
          ${rustBackend}/lib/libwawona.a \
+         ${lib.concatStringsSep " " common.appleCFlags} \
          -fobjc-arc -flto -O3 \
          -ObjC \
          -Wl,-rpath,\$PWD/macos-dependencies/lib \
@@ -681,7 +744,7 @@ MVK_ICD_EOF
               </dict>
           </dict>
           <key>CFBundleIconName</key>
-          <string>Wawona</string>
+          <string>AppIcon</string>
           <key>CFBundleIconFile</key>
           <string>AppIcon</string>
           <key>NSLocalNetworkUsageDescription</key>
@@ -696,19 +759,9 @@ MVK_ICD_EOF
       </dict>
       </plist>
       PLIST_EOF
-            
-            ${generateIcons "macos"}
 
-            # Bundle the Wawona dark logo PNG for the Settings About header
-            if [ -f "$src/src/resources/Wawona-iOS-Dark-1024x1024@1x.png" ]; then
-              cp "$src/src/resources/Wawona-iOS-Dark-1024x1024@1x.png" \
-                "$out/Applications/Wawona.app/Contents/Resources/"
-              echo "Bundled Wawona-iOS-Dark-1024x1024@1x.png"
-            else
-              echo "WARNING: Wawona-iOS-Dark-1024x1024@1x.png not found in source"
-              ls "$src/src/resources/" || true
-            fi
-            
+            ${installMacOSIcons}
+
             runHook postInstall
     '';
 

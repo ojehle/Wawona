@@ -22,16 +22,17 @@ impl Dispatch<xdg_popup::XdgPopup, u32> for CompositorState {
         _data_init: &mut wayland_server::DataInit<'_, Self>,
     ) {
         let popup_id = resource.id().protocol_id();
+        let client_id = _client.id();
         
         match request {
             xdg_popup::Request::Destroy => {
                 tracing::debug!("xdg_popup destroyed: {}", popup_id);
-                if let Some(data) = state.xdg.popups.remove(&popup_id) {
+                if let Some(data) = state.xdg.popups.remove(&(client_id.clone(), popup_id)) {
                     // Clean up surface_to_window mapping
                     state.surface_to_window.remove(&data.surface_id);
                     
                     // Remove from grab stack if present
-                    state.seat.popup_grab_stack.retain(|&id| id != popup_id);
+                    state.seat.popup_grab_stack.retain(|(ref cid, ref pid)| cid != &client_id || *pid != popup_id);
                     
                     // CRITICAL: Emit event for FFI layer cleanup
                     state.pending_compositor_events.push(crate::core::compositor::CompositorEvent::WindowDestroyed {
@@ -41,11 +42,11 @@ impl Dispatch<xdg_popup::XdgPopup, u32> for CompositorState {
             }
             xdg_popup::Request::Grab { seat: _, serial: _ } => {
                 tracing::debug!("xdg_popup.grab requested for popup {}", popup_id);
-                if let Some(data) = state.xdg.popups.get_mut(&popup_id) {
+                if let Some(data) = state.xdg.popups.get_mut(&(client_id.clone(), popup_id)) {
                     data.grabbed = true;
                     // Push to grab stack
-                    if !state.seat.popup_grab_stack.contains(&popup_id) {
-                        state.seat.popup_grab_stack.push(popup_id);
+                    if !state.seat.popup_grab_stack.contains(&(client_id.clone(), popup_id)) {
+                        state.seat.popup_grab_stack.push((client_id.clone(), popup_id));
                     }
                     tracing::debug!("Popup {} added to grab stack", popup_id);
                 }
@@ -55,7 +56,7 @@ impl Dispatch<xdg_popup::XdgPopup, u32> for CompositorState {
                 
                 // Get positioner data
                 let positioner_data = state.xdg.positioners
-                    .get(&positioner.id().protocol_id())
+                    .get(&(client_id.clone(), positioner.id().protocol_id()))
                     .cloned()
                     .unwrap_or_default();
                     
@@ -66,7 +67,7 @@ impl Dispatch<xdg_popup::XdgPopup, u32> for CompositorState {
                 };
                 let output_rect = crate::util::geometry::Rect::new(ox, oy, initial_width, initial_height);
 
-                let surface_id = if let Some(data) = state.xdg.popups.get_mut(&popup_id) {
+                let surface_id = if let Some(data) = state.xdg.popups.get_mut(&(client_id.clone(), popup_id)) {
                     // Calculate new position using anchor/gravity rules
                     let (px, py) = positioner_data.calculate_position(output_rect);
                     
@@ -83,7 +84,7 @@ impl Dispatch<xdg_popup::XdgPopup, u32> for CompositorState {
                         width: data.geometry.2 as u32,
                         height: data.geometry.3 as u32,
                     });
-
+ 
                     // Send repositioned event
                     resource.repositioned(token);
                     
@@ -98,7 +99,7 @@ impl Dispatch<xdg_popup::XdgPopup, u32> for CompositorState {
                 // Trigger surface configure to apply changes
                 if let Some(sid) = surface_id {
                      let serial = state.next_serial();
-                     if let Some(surface_data) = state.xdg.surfaces.get(&sid) {
+                     if let Some(surface_data) = state.xdg.surfaces.get(&(client_id, sid)) {
                         if let Some(surface_resource) = &surface_data.resource {
                              surface_resource.configure(serial);
                         }

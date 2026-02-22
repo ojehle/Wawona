@@ -50,7 +50,9 @@ impl Platform for StubPlatform {
     }
 
     fn run(&mut self) -> Result<()> {
-        tracing::info!("StubPlatform run (no-op)");
-        Ok(())
+        tracing::info!("StubPlatform run (blocking)");
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
     }
 }

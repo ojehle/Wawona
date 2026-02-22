@@ -35,21 +35,22 @@ impl Dispatch<wl_compositor::WlCompositor, ()> for CompositorState {
         data_init: &mut wayland_server::DataInit<'_, Self>,
     ) {
         match request {
-            wl_compositor::Request::CreateSurface { id: new_id } => {
-                // Generate a globally unique surface ID (not dependent on client's protocol IDs)
+            wl_compositor::Request::CreateSurface { id } => {
                 let internal_id = state.next_surface_id();
-                let surface: wl_surface::WlSurface = data_init.init(new_id, internal_id);
+                let surface = data_init.init(id, internal_id);
                 let protocol_id = surface.id().protocol_id();
                 
-                // Map protocol ID to internal ID for cross-reference (used by layer_shell, etc.)
-                state.protocol_to_internal_surface.insert(protocol_id, internal_id);
+                // Scoped by client ID to prevent collisions between clients
+                let client_id = _client.id();
+                state.protocol_to_internal_surface.insert((client_id.clone(), protocol_id), internal_id);
                 
-                state.add_surface(Surface::new(internal_id, Some(surface.clone())));
+                state.add_surface(Surface::new(internal_id, Some(client_id), Some(surface.clone())));
             }
             wl_compositor::Request::CreateRegion { id } => {
                 let region: wl_region::WlRegion = data_init.init(id, ());
                 let region_id = region.id().protocol_id();
-                state.regions.insert(region_id, Vec::new());
+                let client_id = _client.id();
+                state.regions.insert((client_id, region_id), Vec::new());
             }
             _ => {}
         }
@@ -77,7 +78,8 @@ impl Dispatch<wl_surface::WlSurface, u32> for CompositorState {
                     let mut surface = surface.write().unwrap();
                     if let Some(buffer_res) = buffer {
                         let buffer_id = buffer_res.id().protocol_id();
-                        if let Some(b) = state.get_buffer(buffer_id) {
+                        let client_id = _client.id();
+                        if let Some(b) = state.get_buffer(client_id, buffer_id) {
                             let mut b = b.write().unwrap();
                             // Reset released flag - client is reusing this buffer
                             b.released = false;
@@ -153,7 +155,8 @@ impl Dispatch<wl_surface::WlSurface, u32> for CompositorState {
                     let mut surface = surface.write().unwrap();
                     if let Some(region_res) = region {
                         let region_id = region_res.id().protocol_id();
-                        if let Some(rects) = state.regions.get(&region_id) {
+                        let client_id = _client.id();
+                        if let Some(rects) = state.regions.get(&(client_id, region_id)) {
                             surface.pending.input_region = Some(rects.clone());
                         }
                     } else {
@@ -167,7 +170,8 @@ impl Dispatch<wl_surface::WlSurface, u32> for CompositorState {
                     let mut surface = surface.write().unwrap();
                     if let Some(region_res) = region {
                         let region_id = region_res.id().protocol_id();
-                        if let Some(rects) = state.regions.get(&region_id) {
+                        let client_id = _client.id();
+                        if let Some(rects) = state.regions.get(&(client_id, region_id)) {
                             surface.pending.opaque_region = Some(rects.clone());
                         }
                     } else {
@@ -214,15 +218,16 @@ impl Dispatch<wl_region::WlRegion, ()> for CompositorState {
         _dhandle: &DisplayHandle,
         _data_init: &mut wayland_server::DataInit<'_, Self>,
     ) {
-        let id = resource.id().protocol_id();
+        let region_id = resource.id().protocol_id();
+        let client_id = _client.id();
         match request {
             wl_region::Request::Add { x, y, width, height } => {
-                if let Some(region) = state.regions.get_mut(&id) {
+                if let Some(region) = state.regions.get_mut(&(client_id, region_id)) {
                     region.push(crate::core::surface::damage::DamageRegion::new(x, y, width, height));
                 }
             }
             wl_region::Request::Subtract { x: sx, y: sy, width: sw, height: sh } => {
-                if let Some(region) = state.regions.get_mut(&id) {
+                if let Some(region) = state.regions.get_mut(&(client_id, region_id)) {
                     // Subtract rect (sx,sy,sw,sh) from each existing rect in the region.
                     // Each rect that intersects the subtract area is split into up to 4 pieces.
                     let sub = crate::core::surface::damage::DamageRegion::new(sx, sy, sw, sh);
@@ -269,7 +274,7 @@ impl Dispatch<wl_region::WlRegion, ()> for CompositorState {
                 }
             }
             wl_region::Request::Destroy => {
-                state.regions.remove(&id);
+                state.regions.remove(&(client_id, region_id));
             }
             _ => {}
         }
@@ -307,9 +312,10 @@ impl Dispatch<wayland_server::protocol::wl_shm::WlShm, ()> for CompositorState {
             wayland_server::protocol::wl_shm::Request::CreatePool { id, fd, size } => {
                 let pool = data_init.init(id, ());
                 let pool_id = pool.id().protocol_id();
+                let client_id = _client.id();
                 
                 // Store the pool for later mmap access to pixel data
-                state.shm_pools.insert(pool_id, crate::core::state::ShmPool::new(fd, size));
+                state.shm_pools.insert((client_id, pool_id), crate::core::state::ShmPool::new(fd, size));
                 tracing::debug!("wl_shm.create_pool: id={}, size={}", pool_id, size);
             }
             _ => {}
@@ -347,7 +353,8 @@ impl Dispatch<wayland_server::protocol::wl_shm_pool::WlShmPool, ()> for Composit
                     pool_id: resource.id().protocol_id(),
                 };
                 
-                state.add_buffer(crate::core::surface::Buffer::new(
+                let client_id = _client.id();
+                state.add_buffer(client_id.clone(), crate::core::surface::Buffer::new(
                     buffer_id,
                     crate::core::surface::BufferType::Shm(shm_data),
                     Some(buffer_res.clone())
@@ -358,7 +365,8 @@ impl Dispatch<wayland_server::protocol::wl_shm_pool::WlShmPool, ()> for Composit
             }
             wayland_server::protocol::wl_shm_pool::Request::Resize { size } => {
                 let pool_id = resource.id().protocol_id();
-                if let Some(pool) = state.shm_pools.get_mut(&pool_id) {
+                let client_id = _client.id();
+                if let Some(pool) = state.shm_pools.get_mut(&(client_id, pool_id)) {
                     pool.resize(size);
                 }
             }
@@ -380,7 +388,8 @@ impl Dispatch<wayland_server::protocol::wl_buffer::WlBuffer, ()> for CompositorS
         match request {
             wayland_server::protocol::wl_buffer::Request::Destroy => {
                 let id = resource.id().protocol_id();
-                state.remove_buffer(id);
+                let client_id = _client.id();
+                state.remove_buffer(client_id, id);
                 tracing::debug!("wl_buffer.destroy: removed buffer {}", id);
             }
             _ => {}

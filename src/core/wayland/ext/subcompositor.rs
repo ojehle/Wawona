@@ -82,12 +82,14 @@ impl Dispatch<WlSubcompositor, ()> for CompositorState {
                 let parent_protocol_id = parent.id().protocol_id();
                 
                 // Translate protocol IDs to internal IDs for proper lookup
+                // Scoped by client ID to prevent collisions
+                let client_id = _client.id();
                 let surface_id = state.protocol_to_internal_surface
-                    .get(&surface_protocol_id)
+                    .get(&(client_id.clone(), surface_protocol_id))
                     .copied()
                     .unwrap_or(surface_protocol_id);
                 let parent_id = state.protocol_to_internal_surface
-                    .get(&parent_protocol_id)
+                    .get(&(client_id, parent_protocol_id))
                     .copied()
                     .unwrap_or(parent_protocol_id);
                 
@@ -164,7 +166,7 @@ impl Dispatch<WlSubsurface, u32> for CompositorState {
                 // Reorder this subsurface to be above sibling
                 let sibling_protocol_id = sibling.id().protocol_id();
                 let sibling_id = state.protocol_to_internal_surface
-                    .get(&sibling_protocol_id)
+                    .get(&(_client.id(), sibling_protocol_id))
                     .copied()
                     .unwrap_or(sibling_protocol_id);
                 state.place_subsurface_above(surface_id, sibling_id);
@@ -175,7 +177,7 @@ impl Dispatch<WlSubsurface, u32> for CompositorState {
                 // Reorder this subsurface to be below sibling
                 let sibling_protocol_id = sibling.id().protocol_id();
                 let sibling_id = state.protocol_to_internal_surface
-                    .get(&sibling_protocol_id)
+                    .get(&(_client.id(), sibling_protocol_id))
                     .copied()
                     .unwrap_or(sibling_protocol_id);
                 state.place_subsurface_below(surface_id, sibling_id);

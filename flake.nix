@@ -92,8 +92,17 @@
 
     macosWrapper = pkgs: wawona: pkgs.writeShellScriptBin "wawona" ''
       ${macosEnv}
-      # Launch via the .app bundle so macOS picks up the icon
-      exec open -W "${wawona}/Applications/Wawona.app" --args "$@"
+      echo "[DEBUG] Starting Wawona directly under LLDB..."
+      echo "[DEBUG] Logs will appear in this terminal (stdout/stderr)."
+      
+      # Path to the actual binary inside the app bundle
+      BINARY="${wawona}/Applications/Wawona.app/Contents/MacOS/Wawona"
+      
+      # Run under LLDB. 
+      # -o run: start execution immediately
+      # -o "bt all": print backtrace of all threads on crash/signal
+      # --batch: non-interactive mode (or omit for interactive)
+      exec ${pkgs.lldb}/bin/lldb -o run -o "bt all" -- "$BINARY" "$@"
     '';
 
     waypipeWrapper = pkgs: waypipe: pkgs.writeShellScriptBin "waypipe" ''
@@ -487,6 +496,26 @@ EOF
         weston-simple-shm = {
           type = "app";
           program = "${self.packages.${system}.weston-simple-shm}/bin/weston-simple-shm";
+        };
+
+        weston = {
+          type = "app";
+          program = let
+            pkg = self.packages.${system}.weston;
+            wrapper = pkgs.writeShellScriptBin "weston-run" ''
+              if [ -z "$XDG_RUNTIME_DIR" ]; then
+                export XDG_RUNTIME_DIR="/tmp/wawona-$(id -u)"
+                mkdir -p "$XDG_RUNTIME_DIR"
+                chmod 700 "$XDG_RUNTIME_DIR"
+              fi
+              exec ${pkg}/bin/weston "$@"
+            '';
+          in "${wrapper}/bin/weston-run";
+        };
+        
+        keyboard-test-client = {
+          type = "app";
+          program = "${self.packages.${system}.keyboard-test-client}/bin/keyboard-test-client";
         };
 
         vulkan-cts = {

@@ -128,15 +128,16 @@ impl Default for ClientId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, uniffi::Record)]
 pub struct TextureHandle {
     pub handle: u64,
+    pub client_id: ClientId,
 }
 
 impl TextureHandle {
-    pub fn new(handle: u64) -> Self {
-        Self { handle }
+    pub fn new(handle: u64, client_id: ClientId) -> Self {
+        Self { handle, client_id }
     }
     
     pub fn null() -> Self {
-        Self { handle: 0 }
+        Self { handle: 0, client_id: ClientId::default() }
     }
     
     pub fn is_null(&self) -> bool {

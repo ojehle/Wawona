@@ -31,7 +31,7 @@ impl CompositorState {
         let mut internal_surface_id = 0;
         let mut current_states = Vec::new();
         
-        for tl in self.xdg.toplevels.values() {
+        for ((client_id, _), tl) in self.xdg.toplevels.iter() {
             if tl.window_id == window_id {
                 internal_surface_id = tl.surface_id;
                 toplevel_res = tl.resource.clone();
@@ -40,13 +40,13 @@ impl CompositorState {
                     use crate::core::wayland::protocol::server::xdg::shell::server::xdg_toplevel::State;
                     current_states.push(State::Activated);
                 }
+                
+                if internal_surface_id != 0 {
+                    if let Some(surf) = self.xdg.surfaces.get(&(client_id.clone(), internal_surface_id)) {
+                        surface_res = surf.resource.clone();
+                    }
+                }
                 break;
-            }
-        }
-        
-        if internal_surface_id != 0 {
-            if let Some(surf) = self.xdg.surfaces.get(&internal_surface_id) {
-                surface_res = surf.resource.clone();
             }
         }
         
@@ -81,11 +81,25 @@ impl CompositorState {
         self.window_tree.insert(window_id);
         
         self.focus.set_keyboard_focus(Some(window_id));
-        if let Some(old_focus) = self.focus.pointer_focus {
-            self.ext.pointer_constraints.deactivate_constraints(old_focus);
+        if let Some(old_focus_wid) = self.focus.pointer_focus {
+            if let Some(old_window) = self.windows.get(&old_focus_wid) {
+                let (sid, cid) = {
+                    let w = old_window.read().unwrap();
+                    let sid = w.surface_id;
+                    let cid = self.get_surface(sid).and_then(|s| s.read().unwrap().client_id.clone());
+                    (sid, cid)
+                };
+                if let Some(cid) = cid {
+                    self.ext.pointer_constraints.deactivate_constraints(cid, sid);
+                }
+            }
         }
         self.focus.set_pointer_focus(Some(window_id));
-        self.ext.pointer_constraints.activate_constraints(window_id);
+        
+        let client_id = self.get_surface(surface_id).and_then(|s| s.read().unwrap().client_id.clone());
+        if let Some(cid) = client_id {
+            self.ext.pointer_constraints.activate_constraints(cid, surface_id);
+        }
         self.window_tree.bring_to_front(window_id);
         
         tracing::info!("Registered window {} for surface {}", window_id, surface_id);
@@ -114,9 +128,17 @@ impl CompositorState {
                 let next = self.focus.focus_history.first().copied();
                 self.focus.set_keyboard_focus(next);
             }
-            if let Some(old_focus) = self.focus.pointer_focus {
-                if old_focus == window_id {
-                    self.ext.pointer_constraints.deactivate_constraints(old_focus);
+            if let Some(old_focus_wid) = self.focus.pointer_focus {
+                if old_focus_wid == window_id {
+                    let (sid, cid) = {
+                        let w = window.read().unwrap(); // window is already removed from map but we have Arc
+                        let sid = w.surface_id;
+                        let cid = self.get_surface(sid).and_then(|s| s.read().unwrap().client_id.clone());
+                        (sid, cid)
+                    };
+                    if let Some(cid) = cid {
+                        self.ext.pointer_constraints.deactivate_constraints(cid, sid);
+                    }
                     self.focus.set_pointer_focus(None);
                 }
             }
@@ -307,14 +329,14 @@ impl CompositorState {
     // =========================================================================
 
     /// Add a virtual pointer
-    pub fn add_virtual_pointer(&mut self, resource_id: u32, pointer: VirtualPointerState) {
-        self.wlr.virtual_pointers.insert(resource_id, pointer);
+    pub fn add_virtual_pointer(&mut self, client_id: ClientId, resource_id: u32, pointer: VirtualPointerState) {
+        self.wlr.virtual_pointers.insert((client_id, resource_id), pointer);
         tracing::debug!("Added virtual pointer device for resource {}", resource_id);
     }
 
     /// Remove a virtual pointer
-    pub fn remove_virtual_pointer(&mut self, resource_id: u32) {
-        self.wlr.virtual_pointers.remove(&resource_id);
+    pub fn remove_virtual_pointer(&mut self, client_id: ClientId, resource_id: u32) {
+        self.wlr.virtual_pointers.remove(&(client_id, resource_id));
         tracing::debug!("Removed virtual pointer device for resource {}", resource_id);
     }
 
@@ -323,14 +345,14 @@ impl CompositorState {
     // =========================================================================
 
     /// Add a virtual keyboard
-    pub fn add_virtual_keyboard(&mut self, resource_id: u32, keyboard: VirtualKeyboardState) {
-        self.wlr.virtual_keyboards.insert(resource_id, keyboard);
+    pub fn add_virtual_keyboard(&mut self, client_id: ClientId, resource_id: u32, keyboard: VirtualKeyboardState) {
+        self.wlr.virtual_keyboards.insert((client_id, resource_id), keyboard);
         tracing::debug!("Added virtual keyboard device for resource {}", resource_id);
     }
 
     /// Remove a virtual keyboard
-    pub fn remove_virtual_keyboard(&mut self, resource_id: u32) {
-        self.wlr.virtual_keyboards.remove(&resource_id);
+    pub fn remove_virtual_keyboard(&mut self, client_id: ClientId, resource_id: u32) {
+        self.wlr.virtual_keyboards.remove(&(client_id, resource_id));
         tracing::debug!("Removed virtual keyboard device for resource {}", resource_id);
     }
 
@@ -419,22 +441,22 @@ impl CompositorState {
     // =========================================================================
     
     /// Add a layer surface
-    pub fn add_layer_surface(&mut self, surface: LayerSurface) -> u32 {
+    pub fn add_layer_surface(&mut self, client_id: ClientId, surface: LayerSurface) -> u32 {
         let id = surface.surface_id;
-        self.wlr.layer_surfaces.insert(id, Arc::new(RwLock::new(surface)));
+        self.wlr.layer_surfaces.insert((client_id.clone(), id), Arc::new(RwLock::new(surface)));
         tracing::debug!("Added layer surface {}", id);
         id
     }
     
     /// Remove a layer surface
-    pub fn remove_layer_surface(&mut self, surface_id: u32) {
-        self.wlr.layer_surfaces.remove(&surface_id);
+    pub fn remove_layer_surface(&mut self, client_id: ClientId, surface_id: u32) {
+        self.wlr.layer_surfaces.remove(&(client_id, surface_id));
         tracing::debug!("Removed layer surface {}", surface_id);
     }
     
     /// Get a layer surface
-    pub fn get_layer_surface(&self, surface_id: u32) -> Option<Arc<RwLock<LayerSurface>>> {
-        self.wlr.layer_surfaces.get(&surface_id).cloned()
+    pub fn get_layer_surface(&self, client_id: ClientId, surface_id: u32) -> Option<Arc<RwLock<LayerSurface>>> {
+        self.wlr.layer_surfaces.get(&(client_id, surface_id)).cloned()
     }
     
     /// Get all layer surfaces for an output

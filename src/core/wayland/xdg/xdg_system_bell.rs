@@ -36,11 +36,13 @@ impl Dispatch<XdgSystemBellV1, ()> for CompositorState {
         _data_init: &mut DataInit<'_, Self>,
     ) {
         match request {
-            xdg_system_bell_v1::Request::Ring { surface } => {
+            wayland_protocols::xdg::system_bell::v1::server::xdg_system_bell_v1::Request::Ring { surface } => {
                 let surface_id = surface.as_ref().map(|s| s.id().protocol_id());
+                let client_id = _client.id();
                 tracing::debug!("System bell requested (surface={:?})", surface_id);
                 state.pending_compositor_events.push(
                     crate::core::compositor::CompositorEvent::SystemBell {
+                        client_id,
                         surface_id: surface_id.unwrap_or(0),
                     }
                 );

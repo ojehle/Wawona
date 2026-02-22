@@ -56,7 +56,7 @@ impl Dispatch<zwlr_virtual_pointer_manager_v1::ZwlrVirtualPointerManagerV1, ()> 
                 let resource_id = pointer_res.id().protocol_id();
                 
                 let pointer_state = VirtualPointerState::new(seat_name, None);
-                state.wlr.virtual_pointers.insert(resource_id, pointer_state);
+                state.add_virtual_pointer(_client.id(), resource_id, pointer_state);
             }
             zwlr_virtual_pointer_manager_v1::Request::CreateVirtualPointerWithOutput { seat, output: _, id } => {
                 let seat_name = seat.as_ref().map(|s| s.data::<String>().cloned().unwrap_or_default());
@@ -66,7 +66,7 @@ impl Dispatch<zwlr_virtual_pointer_manager_v1::ZwlrVirtualPointerManagerV1, ()> 
                 let resource_id = pointer_res.id().protocol_id();
                 
                 let pointer_state = VirtualPointerState::new(seat_name, Some(output_id));
-                state.wlr.virtual_pointers.insert(resource_id, pointer_state);
+                state.add_virtual_pointer(_client.id(), resource_id, pointer_state);
             }
             zwlr_virtual_pointer_manager_v1::Request::Destroy => {
                 // Destructor

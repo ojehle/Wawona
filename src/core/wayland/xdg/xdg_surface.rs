@@ -22,7 +22,8 @@ impl Dispatch<xdg_surface::XdgSurface, u32> for CompositorState {
         data_init: &mut wayland_server::DataInit<'_, Self>,
     ) {
         let surface_id = resource.id().protocol_id();
-        let data = state.xdg.surfaces.get(&surface_id).cloned();
+        let client_id = _client.id();
+        let data = state.xdg.surfaces.get(&(client_id.clone(), surface_id)).cloned();
         
         match request {
             xdg_surface::Request::GetToplevel { id } => {
@@ -30,13 +31,16 @@ impl Dispatch<xdg_surface::XdgSurface, u32> for CompositorState {
                 if let Some(data) = data {
                     // Create a new window for this toplevel
                     let window_id = state.next_window_id();
-                    let window = Window::new(window_id, data.surface_id);
+                    let mut window = Window::new(window_id, data.surface_id);
                     
                      // Get output dimensions for initial size
                     let (initial_width, initial_height, scale) = {
                         let output = state.primary_output();
                         (output.width, output.height, output.scale)
                     };
+
+                    window.width = initial_width as i32;
+                    window.height = initial_height as i32;
                     
                     // Create toplevel data (wl_surface_id, xdg_surface_id)
                     let mut toplevel_data = XdgToplevelData::new(window_id, data.surface_id, surface_id);
@@ -44,10 +48,10 @@ impl Dispatch<xdg_surface::XdgSurface, u32> for CompositorState {
                     let toplevel: wayland_protocols::xdg::shell::server::xdg_toplevel::XdgToplevel = data_init.init(id, window_id);
                     toplevel_data.resource = Some(toplevel.clone());
                     
-                    state.xdg.toplevels.insert(toplevel.id().protocol_id(), toplevel_data);
+                    state.xdg.toplevels.insert((client_id.clone(), toplevel.id().protocol_id()), toplevel_data);
                     
                     // Update surface data with window_id
-                    if let Some(surface_data) = state.xdg.surfaces.get_mut(&surface_id) {
+                    if let Some(surface_data) = state.xdg.surfaces.get_mut(&(client_id.clone(), surface_id)) {
                         surface_data.window_id = Some(window_id);
                     }
                     
@@ -91,13 +95,14 @@ impl Dispatch<xdg_surface::XdgSurface, u32> for CompositorState {
                     // CRITICAL: Push WindowCreated event for FFI layer to create platform window
                     state.pending_compositor_events.push(
                         crate::core::compositor::CompositorEvent::WindowCreated {
+                            client_id: client_id.clone(),
                             window_id,
                             surface_id: data.surface_id,
                             title: String::new(),  // Title will be set via set_title later
                             width: initial_width,
                             height: initial_height,
                             decoration_mode: state.decoration_mode_for_new_window(),
-                            fullscreen_shell: false,
+                            fullscreen_shell: state.decoration_mode_for_new_window() == crate::core::window::DecorationMode::ServerSide,
                         }
                     );
                 }
@@ -115,7 +120,7 @@ impl Dispatch<xdg_surface::XdgSurface, u32> for CompositorState {
 
                     // Get positioner data
                     let positioner_data = state.xdg.positioners
-                        .remove(&positioner.id().protocol_id())
+                        .remove(&(client_id.clone(), positioner.id().protocol_id()))
                         .unwrap_or_default();
 
                     // Get output dimensions for initial size
@@ -149,13 +154,13 @@ impl Dispatch<xdg_surface::XdgSurface, u32> for CompositorState {
                     let mut popup_data = popup_data;
                     popup_data.resource = Some(popup.clone());
                     
-                    state.xdg.popups.insert(popup.id().protocol_id(), popup_data);
+                    state.xdg.popups.insert((client_id.clone(), popup.id().protocol_id()), popup_data);
                     
                     // CRITICAL: Register in surface_to_window for buffer routing
                     state.surface_to_window.insert(surface_id, window_id);
                     
                     // Update surface data with window_id
-                    if let Some(surface_data) = state.xdg.surfaces.get_mut(&surface_id) {
+                    if let Some(surface_data) = state.xdg.surfaces.get_mut(&(client_id.clone(), surface_id)) {
                         surface_data.window_id = Some(window_id);
                     }
                     
@@ -168,7 +173,7 @@ impl Dispatch<xdg_surface::XdgSurface, u32> for CompositorState {
                         // This logic is simplified; parent could be xdg_surface or xdg_toplevel
                         // Typically it's the xdg_surface ID. We need its window ID.
                         // Assuming parent is XdgSurface resource:
-                        state.xdg.surfaces.get(&parent_obj.id().protocol_id())
+                        state.xdg.surfaces.get(&(client_id.clone(), parent_obj.id().protocol_id()))
                              .and_then(|d| d.window_id)
                              .unwrap_or(0)
                     } else {
@@ -193,6 +198,7 @@ impl Dispatch<xdg_surface::XdgSurface, u32> for CompositorState {
 
                     state.pending_compositor_events.push(
                         crate::core::compositor::CompositorEvent::PopupCreated {
+                            client_id: client_id.clone(),
                             window_id,
                             surface_id,
                             parent_id: parent_window_id,
@@ -226,16 +232,16 @@ impl Dispatch<xdg_surface::XdgSurface, u32> for CompositorState {
                             
                             // Check for toplevel state transitions
                             let mut to_finalize = None;
-                            for (tl_id, tl_data) in state.xdg.toplevels.iter() {
-                                if tl_data.xdg_surface_id == surface_id && tl_data.pending_serial == serial {
-                                    to_finalize = Some(*tl_id);
+                            for ((cid, tl_proto_id), tl_data) in state.xdg.toplevels.iter() {
+                                if *cid == client_id && tl_data.xdg_surface_id == surface_id && tl_data.pending_serial == serial {
+                                    to_finalize = Some((cid.clone(), *tl_proto_id));
                                     break;
                                 }
                             }
                             
-                            if let Some(tl_id) = to_finalize {
+                            if let Some(key) = to_finalize {
                                 let mut window = window.write().unwrap();
-                                if let Some(tl_data) = state.xdg.toplevels.get_mut(&tl_id) {
+                                if let Some(tl_data) = state.xdg.toplevels.get_mut(&key) {
                                     tl_data.maximized = tl_data.pending_maximized;
                                     tl_data.fullscreen = tl_data.pending_fullscreen;
                                     
@@ -256,12 +262,12 @@ impl Dispatch<xdg_surface::XdgSurface, u32> for CompositorState {
                     "xdg_surface.set_window_geometry: ({}, {}) {}x{}",
                     x, y, width, height
                 );
-                if let Some(surface_data) = state.xdg.surfaces.get_mut(&surface_id) {
+                if let Some(surface_data) = state.xdg.surfaces.get_mut(&(client_id.clone(), surface_id)) {
                     surface_data.geometry = Some((x, y, width, height));
                 }
             }
             xdg_surface::Request::Destroy => {
-                state.xdg.surfaces.remove(&surface_id);
+                state.xdg.surfaces.remove(&(client_id, surface_id));
                 tracing::debug!("xdg_surface destroyed");
             }
             _ => {}

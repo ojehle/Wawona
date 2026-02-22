@@ -54,7 +54,7 @@ impl Dispatch<zwp_virtual_keyboard_manager_v1::ZwpVirtualKeyboardManagerV1, ()> 
                 let resource_id = keyboard_res.id().protocol_id();
                 
                 let keyboard_state = VirtualKeyboardState::new(Some(seat_name));
-                state.wlr.virtual_keyboards.insert(resource_id, keyboard_state);
+                state.add_virtual_keyboard(_client.id(), resource_id, keyboard_state);
             }
             _ => {}
         }
@@ -94,7 +94,7 @@ impl Dispatch<zwp_virtual_keyboard_v1::ZwpVirtualKeyboardV1, ()> for CompositorS
             }
             zwp_virtual_keyboard_v1::Request::Destroy => {
                 let resource_id = resource.id().protocol_id();
-                state.wlr.virtual_keyboards.remove(&resource_id);
+                state.remove_virtual_keyboard(_client.id(), resource_id);
             }
             _ => {}
         }

@@ -34,4 +34,10 @@ typedef void (^WaypipeOutputHandler)(NSString *output);
 - (void)launchWestonSimpleSHM;
 - (void)stopWestonSimpleSHM;
 
+- (void)launchWeston;
+- (void)stopWeston;
+
+- (void)launchWestonTerminal;
+- (void)stopWestonTerminal;
+
 @end

@@ -30,10 +30,10 @@ impl XdgOutputData {
 /// Tracks all bound xdg_output resources for update notifications.
 #[derive(Debug, Default)]
 pub struct XdgOutputState {
-    pub outputs: HashMap<u32, XdgOutputData>,
-    /// All active xdg_output resources, keyed by xdg_output protocol ID.
+    pub outputs: HashMap<(wayland_server::backend::ClientId, u32), XdgOutputData>,
+    /// All active xdg_output resources, keyed by client and xdg_output protocol ID.
     /// Used to send updates when output configuration changes.
-    pub resources: HashMap<u32, ZxdgOutputV1>,
+    pub resources: HashMap<(wayland_server::backend::ClientId, u32), ZxdgOutputV1>,
 }
 
 
@@ -72,8 +72,8 @@ impl Dispatch<ZxdgOutputManagerV1, ()> for CompositorState {
                 let xdg_output = data_init.init(id, ());
 
                 let xdg_output_id = xdg_output.id().protocol_id();
-                state.xdg.output.outputs.insert(xdg_output_id, xdg_output_data);
-                state.xdg.output.resources.insert(xdg_output_id, xdg_output.clone());
+                state.xdg.output.outputs.insert((_client.id().clone(), xdg_output_id), xdg_output_data);
+                state.xdg.output.resources.insert((_client.id().clone(), xdg_output_id), xdg_output.clone());
 
                 
                 // Send output information
@@ -134,8 +134,8 @@ impl Dispatch<ZxdgOutputV1, ()> for CompositorState {
         match request {
             zxdg_output_v1::Request::Destroy => {
                 let id = resource.id().protocol_id();
-                state.xdg.output.outputs.remove(&id);
-                state.xdg.output.resources.remove(&id);
+                state.xdg.output.outputs.remove(&(_client.id().clone(), id));
+                state.xdg.output.resources.remove(&(_client.id().clone(), id));
                 tracing::debug!("zxdg_output_v1 destroyed");
             }
 

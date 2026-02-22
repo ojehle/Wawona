@@ -74,8 +74,11 @@ impl CompositorState {
         self.ext.relative_pointers.broadcast_relative_motion(0, 0, time, dx, dy, dx, dy);
 
         if let Some(surface_id) = self.focus.pointer_focus {
-            if self.ext.pointer_constraints.is_pointer_locked(surface_id) {
-                return;
+            let client_id = self.surfaces.get(&surface_id).and_then(|s| s.read().unwrap().client_id.clone());
+            if let Some(cid) = client_id {
+                if self.ext.pointer_constraints.is_pointer_locked(cid, surface_id) {
+                    return;
+                }
             }
         }
 
@@ -243,8 +246,8 @@ impl CompositorState {
             if !self.seat.popup_grab_stack.is_empty() {
                 let mut on_grab_tree = false;
                 if let Some(focus_id) = self.seat.pointer.focus {
-                    for &popup_id in &self.seat.popup_grab_stack {
-                        if let Some(popup) = self.xdg.popups.get(&popup_id) {
+                    for &(ref cid, popup_id) in &self.seat.popup_grab_stack {
+                        if let Some(popup) = self.xdg.popups.get(&(cid.clone(), popup_id)) {
                             if popup.surface_id == focus_id {
                                 on_grab_tree = true;
                                 break;
@@ -466,7 +469,12 @@ impl CompositorState {
                         self.seat.pointer.x = x;
                         self.seat.pointer.y = y;
 
-                        let locked = self.ext.pointer_constraints.is_pointer_locked(surface_id);
+                        let client_id = self.surfaces.get(&surface_id).and_then(|s| s.read().unwrap().client_id.clone());
+                        let locked = if let Some(cid) = client_id {
+                             self.ext.pointer_constraints.is_pointer_locked(cid, surface_id)
+                        } else {
+                             false
+                        };
                         if !locked {
                              let lx = x - win_geo.x as f64;
                              let ly = y - win_geo.y as f64;

@@ -21,8 +21,9 @@ impl Dispatch<xdg_toplevel::XdgToplevel, u32> for CompositorState {
         _data_init: &mut wayland_server::DataInit<'_, Self>,
     ) {
         let toplevel_id = resource.id().protocol_id();
+        let client_id = _client.id();
         let _window_id = *_data;
-        let data = state.xdg.toplevels.get(&toplevel_id).cloned();
+        let data = state.xdg.toplevels.get(&(client_id.clone(), toplevel_id)).cloned();
         
         match request {
             xdg_toplevel::Request::SetTitle { title } => {
@@ -50,14 +51,14 @@ impl Dispatch<xdg_toplevel::XdgToplevel, u32> for CompositorState {
             }
             xdg_toplevel::Request::SetMaxSize { width, height } => {
                 tracing::trace!("xdg_toplevel.set_max_size: {}x{}", width, height);
-                if let Some(tl_data) = state.xdg.toplevels.get_mut(&toplevel_id) {
+                if let Some(tl_data) = state.xdg.toplevels.get_mut(&(client_id.clone(), toplevel_id)) {
                     tl_data.max_width = width;
                     tl_data.max_height = height;
                 }
             }
             xdg_toplevel::Request::SetMinSize { width, height } => {
                 tracing::trace!("xdg_toplevel.set_min_size: {}x{}", width, height);
-                if let Some(tl_data) = state.xdg.toplevels.get_mut(&toplevel_id) {
+                if let Some(tl_data) = state.xdg.toplevels.get_mut(&(client_id.clone(), toplevel_id)) {
                     tl_data.min_width = width;
                     tl_data.min_height = height;
                 }
@@ -67,7 +68,7 @@ impl Dispatch<xdg_toplevel::XdgToplevel, u32> for CompositorState {
                 
                 // 1. Determine target output and calculate geometry
                 let (output_id, width, height) = {
-                    let output_id = if let Some(tl_data) = state.xdg.toplevels.get(&toplevel_id) {
+                    let output_id = if let Some(tl_data) = state.xdg.toplevels.get(&(client_id.clone(), toplevel_id)) {
                          if let Some(window) = state.get_window(tl_data.window_id) {
                              let window = window.read().unwrap();
                              window.outputs.first().copied().unwrap_or(
@@ -89,12 +90,12 @@ impl Dispatch<xdg_toplevel::XdgToplevel, u32> for CompositorState {
                 };
 
                 // 2. Save current geometry and update Window state
-                let window_id = state.xdg.toplevels.get(&toplevel_id).map(|t| t.window_id);
+                let window_id = state.xdg.toplevels.get(&(client_id.clone(), toplevel_id)).map(|t| t.window_id);
                 if let Some(wid) = window_id {
                     if let Some(window) = state.get_window(wid) {
                         if let Ok(mut w) = window.write() {
                             // Save geometry before maximizing (only if not already saved)
-                            if let Some(tl_data) = state.xdg.toplevels.get_mut(&toplevel_id) {
+                            if let Some(tl_data) = state.xdg.toplevels.get_mut(&(client_id.clone(), toplevel_id)) {
                                 if tl_data.saved_geometry.is_none() {
                                     tl_data.saved_geometry = Some((w.x, w.y, w.width as u32, w.height as u32));
                                 }
@@ -105,7 +106,7 @@ impl Dispatch<xdg_toplevel::XdgToplevel, u32> for CompositorState {
                 }
 
                 // 3. Update Toplevel state and clamp to size constraints
-                let (clamped_w, clamped_h) = if let Some(tl_data) = state.xdg.toplevels.get_mut(&toplevel_id) {
+                let (clamped_w, clamped_h) = if let Some(tl_data) = state.xdg.toplevels.get_mut(&(client_id.clone(), toplevel_id)) {
                     tl_data.pending_maximized = true;
                     tl_data.clamp_size(width as u32, height as u32)
                 } else {
@@ -114,20 +115,20 @@ impl Dispatch<xdg_toplevel::XdgToplevel, u32> for CompositorState {
 
                 // 4. Send configure
                 tracing::debug!("Maximized to {}x{} on output {}", clamped_w, clamped_h, output_id);
-                state.send_toplevel_configure(toplevel_id, clamped_w, clamped_h);
+                state.send_toplevel_configure(client_id.clone(), toplevel_id, clamped_w, clamped_h);
             }
             xdg_toplevel::Request::UnsetMaximized => {
                 tracing::debug!("xdg_toplevel.unset_maximized for toplevel {}", toplevel_id);
                 
                 // Restore saved geometry
-                let saved = state.xdg.toplevels.get_mut(&toplevel_id).and_then(|tl| {
+                let saved = state.xdg.toplevels.get_mut(&(client_id.clone(), toplevel_id)).and_then(|tl| {
                     tl.pending_maximized = false;
                     tl.saved_geometry.take()
                 });
 
                 let (restore_w, restore_h) = if let Some((x, y, w, h)) = saved {
                     // Restore window position
-                    let window_id = state.xdg.toplevels.get(&toplevel_id).map(|t| t.window_id);
+                    let window_id = state.xdg.toplevels.get(&(client_id.clone(), toplevel_id)).map(|t| t.window_id);
                     if let Some(wid) = window_id {
                         if let Some(window) = state.get_window(wid) {
                             if let Ok(mut win) = window.write() {
@@ -139,7 +140,7 @@ impl Dispatch<xdg_toplevel::XdgToplevel, u32> for CompositorState {
                     }
                     (w, h)
                 } else {
-                    let window_id = state.xdg.toplevels.get(&toplevel_id).map(|t| t.window_id);
+                    let window_id = state.xdg.toplevels.get(&(client_id.clone(), toplevel_id)).map(|t| t.window_id);
                     if let Some(wid) = window_id {
                         if let Some(window) = state.get_window(wid) {
                             if let Ok(mut win) = window.write() {
@@ -150,7 +151,7 @@ impl Dispatch<xdg_toplevel::XdgToplevel, u32> for CompositorState {
                     (0, 0)
                 };
                 
-                state.send_toplevel_configure(toplevel_id, restore_w, restore_h);
+                state.send_toplevel_configure(client_id.clone(), toplevel_id, restore_w, restore_h);
             }
             xdg_toplevel::Request::SetFullscreen { output } => {
                 tracing::debug!("xdg_toplevel.set_fullscreen for toplevel {}", toplevel_id);
@@ -160,7 +161,7 @@ impl Dispatch<xdg_toplevel::XdgToplevel, u32> for CompositorState {
                     let output_id = if let Some(o) = output {
                         o.id().protocol_id()
                     } else {
-                         if let Some(tl_data) = state.xdg.toplevels.get(&toplevel_id) {
+                         if let Some(tl_data) = state.xdg.toplevels.get(&(client_id.clone(), toplevel_id)) {
                              if let Some(window) = state.get_window(tl_data.window_id) {
                                  let window = window.read().unwrap();
                                  window.outputs.first().copied().unwrap_or(
@@ -183,11 +184,11 @@ impl Dispatch<xdg_toplevel::XdgToplevel, u32> for CompositorState {
                 };
 
                 // 2. Save geometry and update Window state
-                let window_id = state.xdg.toplevels.get(&toplevel_id).map(|t| t.window_id);
+                let window_id = state.xdg.toplevels.get(&(client_id.clone(), toplevel_id)).map(|t| t.window_id);
                 if let Some(wid) = window_id {
                     if let Some(window) = state.get_window(wid) {
                         if let Ok(mut w) = window.write() {
-                            if let Some(tl_data) = state.xdg.toplevels.get_mut(&toplevel_id) {
+                            if let Some(tl_data) = state.xdg.toplevels.get_mut(&(client_id.clone(), toplevel_id)) {
                                 if tl_data.saved_geometry.is_none() {
                                     tl_data.saved_geometry = Some((w.x, w.y, w.width as u32, w.height as u32));
                                 }
@@ -198,24 +199,24 @@ impl Dispatch<xdg_toplevel::XdgToplevel, u32> for CompositorState {
                 }
 
                 // 3. Update Toplevel state (fullscreen ignores min/max per spec)
-                if let Some(tl_data) = state.xdg.toplevels.get_mut(&toplevel_id) {
+                if let Some(tl_data) = state.xdg.toplevels.get_mut(&(client_id.clone(), toplevel_id)) {
                     tl_data.pending_fullscreen = true;
                 }
 
                 tracing::debug!("Fullscreen to {}x{} on output {}", width, height, output_id);
-                state.send_toplevel_configure(toplevel_id, width as u32, height as u32);
+                state.send_toplevel_configure(client_id.clone(), toplevel_id, width as u32, height as u32);
             }
             xdg_toplevel::Request::UnsetFullscreen => {
                 tracing::debug!("xdg_toplevel.unset_fullscreen for toplevel {}", toplevel_id);
 
                 // Restore saved geometry
-                let saved = state.xdg.toplevels.get_mut(&toplevel_id).and_then(|tl| {
+                let saved = state.xdg.toplevels.get_mut(&(client_id.clone(), toplevel_id)).and_then(|tl| {
                     tl.pending_fullscreen = false;
                     tl.saved_geometry.take()
                 });
 
                 let (restore_w, restore_h) = if let Some((x, y, w, h)) = saved {
-                    let window_id = state.xdg.toplevels.get(&toplevel_id).map(|t| t.window_id);
+                    let window_id = state.xdg.toplevels.get(&(client_id.clone(), toplevel_id)).map(|t| t.window_id);
                     if let Some(wid) = window_id {
                         if let Some(window) = state.get_window(wid) {
                             if let Ok(mut win) = window.write() {
@@ -227,7 +228,7 @@ impl Dispatch<xdg_toplevel::XdgToplevel, u32> for CompositorState {
                     }
                     (w, h)
                 } else {
-                    let window_id = state.xdg.toplevels.get(&toplevel_id).map(|t| t.window_id);
+                    let window_id = state.xdg.toplevels.get(&(client_id.clone(), toplevel_id)).map(|t| t.window_id);
                     if let Some(wid) = window_id {
                         if let Some(window) = state.get_window(wid) {
                             if let Ok(mut win) = window.write() {
@@ -238,7 +239,7 @@ impl Dispatch<xdg_toplevel::XdgToplevel, u32> for CompositorState {
                     (0, 0)
                 };
                 
-                state.send_toplevel_configure(toplevel_id, restore_w, restore_h);
+                state.send_toplevel_configure(client_id, toplevel_id, restore_w, restore_h);
             }
             xdg_toplevel::Request::SetMinimized => {
                 tracing::debug!("xdg_toplevel.set_minimized");
@@ -296,7 +297,7 @@ impl Dispatch<xdg_toplevel::XdgToplevel, u32> for CompositorState {
                     tracing::debug!("xdg_toplevel destroyed: window_id={}", data.window_id);
                     state.remove_window(data.window_id);
                 }
-                state.xdg.toplevels.remove(&toplevel_id);
+                state.xdg.toplevels.remove(&(client_id, toplevel_id));
             }
             _ => {}
         }

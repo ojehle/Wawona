@@ -22,7 +22,8 @@ impl GlobalDispatch<xdg_wm_base::XdgWmBase, ()> for CompositorState {
         data_init: &mut wayland_server::DataInit<'_, Self>,
     ) {
         let xdg_wm_base = data_init.init(resource, ());
-        state.xdg.shell_resources.insert(xdg_wm_base.id().protocol_id(), xdg_wm_base.clone());
+        let client_id = _client.id();
+        state.xdg.shell_resources.insert((client_id, xdg_wm_base.id().protocol_id()), xdg_wm_base.clone());
         crate::wlog!(crate::util::logging::COMPOSITOR, "Bound xdg_wm_base version {}", xdg_wm_base.version());
         tracing::debug!("Bound xdg_wm_base");
     }
@@ -41,13 +42,31 @@ impl Dispatch<xdg_wm_base::XdgWmBase, ()> for CompositorState {
         match request {
             xdg_wm_base::Request::GetXdgSurface { id, surface } => {
                 // Get the compositor-generated surface ID from user data (globally unique)
-                let surface_id = *surface.data::<u32>().expect("WlSurface missing internal ID user data");
+                let surface_id = match surface.data::<u32>() {
+                    Some(id) => *id,
+                    None => {
+                        // Diagnostic logging for the crash
+                        let protocol_id = surface.id().protocol_id();
+                        let client_id = _client.id();
+                        let internal_id = state.protocol_to_internal_surface.get(&(client_id.clone(), protocol_id)).copied();
+                        
+                        crate::wlog!(crate::util::logging::COMPOSITOR, 
+                            "WARNING: WlSurface {} missing u32 user data! Client={:?}. Fallback internal_id={:?}", 
+                            protocol_id, client_id, internal_id);
+                        
+                        internal_id.unwrap_or_else(|| {
+                            tracing::error!("CRITICAL: No mapping found for surface {} for client {:?}", protocol_id, client_id);
+                            protocol_id // Last resort fallback
+                        })
+                    }
+                };
                 let mut xdg_surface_data = XdgSurfaceData::new(surface_id);
                 // Store the surface ID (u32) as user data for the resource
                 let xdg_surface: crate::core::wayland::protocol::server::xdg::shell::server::xdg_surface::XdgSurface = data_init.init(id, surface_id);
                 xdg_surface_data.resource = Some(xdg_surface.clone());
                 
-                state.xdg.surfaces.insert(xdg_surface.id().protocol_id(), xdg_surface_data);
+                let client_id = _client.id();
+                state.xdg.surfaces.insert((client_id, xdg_surface.id().protocol_id()), xdg_surface_data);
                 
                 crate::wlog!(crate::util::logging::COMPOSITOR, "Created xdg_surface version {} for wl_surface {}", xdg_surface.version(), surface_id);
             }
@@ -58,13 +77,14 @@ impl Dispatch<xdg_wm_base::XdgWmBase, ()> for CompositorState {
             xdg_wm_base::Request::Pong { serial } => {
                 crate::wlog!(crate::util::logging::COMPOSITOR, "Received xdg_wm_base.pong for serial {}", serial);
                 // Clear the pending ping record — client is responsive
-                if let Some((shell_id, ts)) = state.xdg.pending_pings.remove(&serial) {
+                if let Some((_client_id, shell_id, ts)) = state.xdg.pending_pings.remove(&serial) {
                     let latency_ms = ts.elapsed().as_millis();
                     tracing::trace!("xdg_wm_base pong: serial={}, shell={}, latency={}ms", serial, shell_id, latency_ms);
                 }
             }
             xdg_wm_base::Request::Destroy => {
-                state.xdg.shell_resources.remove(&_resource.id().protocol_id());
+                let client_id = _client.id();
+                state.xdg.shell_resources.remove(&(client_id, _resource.id().protocol_id()));
                 tracing::debug!("xdg_wm_base destroyed");
             }
             _ => {}

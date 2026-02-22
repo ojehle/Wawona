@@ -138,6 +138,18 @@ let
             buildPackages
             ;
         }
+      else if name == "weston" then
+        (import ../clients/weston/android.nix) {
+          inherit lib stdenv pkgs;
+          fetchurl = pkgs.fetchurl;
+          meson = pkgs.meson;
+          ninja = pkgs.ninja;
+          pkg-config = pkgs.pkg-config;
+          wayland = androidModuleSelf.buildForAndroid "libwayland" {};
+          wayland-scanner = pkgs.wayland-scanner;
+          wayland-protocols = pkgs.wayland-protocols;
+          python3 = pkgs.python3;
+        }
       else
         (import ../platforms/android.nix {
           inherit
@@ -299,6 +311,29 @@ let
             ;
           buildModule = iosModuleSelf;
         }
+      else if name == "weston-simple-shm" then
+        (import ../libs/weston-simple-shm/ios.nix) {
+          inherit
+            lib
+            pkgs
+            buildPackages
+            common
+            simulator
+            ;
+          buildModule = iosModuleSelf;
+        }
+      else if name == "weston" then
+        (import ../clients/weston/ios.nix) {
+          inherit lib stdenv pkgs;
+          fetchurl = pkgs.fetchurl;
+          meson = pkgs.meson;
+          ninja = pkgs.ninja;
+          pkg-config = pkgs.pkg-config;
+          wayland = iosModuleSelf.buildForIOS "libwayland" {};
+          wayland-scanner = pkgs.wayland-scanner;
+          wayland-protocols = pkgs.wayland-protocols;
+          python3 = pkgs.python3;
+        }
       else
         (import ../platforms/ios.nix {
           inherit
@@ -447,6 +482,8 @@ let
             mbedtls = iosModule.buildForIOS "mbedtls" { };
             libssh2 = iosModule.buildForIOS "libssh2" { };
             xkbcommon = iosModule.buildForIOS "xkbcommon" { };
+            "weston-simple-shm" = iosModule.buildForIOS "weston-simple-shm" { };
+            "weston" = iosModule.buildForIOS "weston" { };
             "vulkan-cts" = iosModule.buildForIOS "vulkan-cts" { };
             test-toolchain = pkgs.callPackage ../utils/test-ios-toolchain.nix { };
             test-toolchain-cross = pkgs.callPackage ../utils/test-ios-toolchain-cross.nix { };
@@ -496,6 +533,7 @@ let
             openssl = androidModule.buildForAndroid "openssl" { };
             libssh2 = androidModule.buildForAndroid "libssh2" { };
             mbedtls = androidModule.buildForAndroid "mbedtls" { };
+            weston = androidModule.buildForAndroid "weston" { };
             "vulkan-cts" = androidModule.buildForAndroid "vulkan-cts" { };
           }
         else

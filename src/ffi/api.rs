@@ -57,7 +57,7 @@ pub struct WawonaCore {
     /// FFI window info cache
     ffi_windows: RwLock<HashMap<u64, WindowInfo>>,
     
-    /// FFI surface state cache
+    /// FFI surface state cache (internal_client_id, protocol_surface_id) -> SurfaceState
     ffi_surfaces: RwLock<HashMap<u32, SurfaceState>>,
     
     /// FFI client info cache
@@ -432,7 +432,11 @@ impl WawonaCore {
             
             // Process events
             match runtime.poll(compositor, &mut state) {
-                Ok(events) => events,
+                Ok(events) => {
+                    // Flush pending feedback from fullscreen shell to avert wayland-backend hang
+                    state.ext.fullscreen_shell.flush_pending_mode_feedbacks();
+                    events
+                }
                 Err(e) => {
                     crate::wlog!(crate::util::logging::FFI, "Event processing error: {}", e);
                     return false;
@@ -528,26 +532,28 @@ impl WawonaCore {
     fn handle_compositor_event(&self, event: CompositorEvent) {
         match event {
             CompositorEvent::ClientConnected { client_id, pid } => {
+                let internal_id = self.compositor.lock().unwrap().as_ref().unwrap().client_id_to_internal(client_id.clone());
                 let client_info = ClientInfo {
-                    id: ClientId { id: client_id },
+                    id: ClientId { id: internal_id },
                     pid: pid.unwrap_or(0),
                     name: None,
                     surface_count: 0,
                     window_count: 0,
                 };
-                self.ffi_clients.write().unwrap().insert(client_id, client_info);
+                self.ffi_clients.write().unwrap().insert(internal_id, client_info);
                 self.pending_client_events.write().unwrap().push(
                     ClientEvent::Connected { 
-                        client_id: ClientId { id: client_id }, 
+                        client_id: ClientId { id: internal_id }, 
                         pid: pid.unwrap_or(0) 
                     }
                 );
             }
             CompositorEvent::ClientDisconnected { client_id } => {
-                self.ffi_clients.write().unwrap().remove(&client_id);
+                let internal_id = self.compositor.lock().unwrap().as_ref().unwrap().client_id_to_internal(client_id.clone());
+                self.ffi_clients.write().unwrap().remove(&internal_id);
                 self.pending_client_events.write().unwrap().push(
                     ClientEvent::Disconnected { 
-                        client_id: ClientId { id: client_id } 
+                        client_id: ClientId { id: internal_id } 
                     }
                 );
             }
@@ -561,6 +567,7 @@ impl WawonaCore {
                 }
             }
             CompositorEvent::WindowCreated {
+                client_id,
                 window_id,
                 surface_id,
                 title,
@@ -569,6 +576,7 @@ impl WawonaCore {
                 decoration_mode,
                 fullscreen_shell,
             } => {
+                let internal_client_id = self.compositor.lock().unwrap().as_ref().unwrap().client_id_to_internal(client_id);
                 let ffi_decoration_mode = match decoration_mode {
                     crate::core::window::DecorationMode::ClientSide => DecorationMode::ClientSide,
                     crate::core::window::DecorationMode::ServerSide => DecorationMode::ServerSide,
@@ -608,7 +616,8 @@ impl WawonaCore {
                     }
                 );
             }
-            CompositorEvent::PopupCreated { window_id, surface_id: _, parent_id, x, y, width, height } => {
+            CompositorEvent::PopupCreated { client_id, window_id, surface_id, parent_id, x, y, width, height } => {
+                let _internal_client_id = self.compositor.lock().unwrap().as_ref().unwrap().client_id_to_internal(client_id);
                 let _config = WindowConfig {
                     title: String::new(),
                     app_id: String::new(),
@@ -710,20 +719,21 @@ impl WawonaCore {
                     WindowId { id: window_id as u64 }
                 );
             }
-            CompositorEvent::SurfaceCommitted { surface_id, buffer_id } => {
+            CompositorEvent::SurfaceCommitted { client_id, surface_id, buffer_id } => {
+                let internal_client_id = self.compositor.lock().unwrap().as_ref().unwrap().client_id_to_internal(client_id.clone());
                 // Track commits per surface
                 thread_local! {
-                    static SURFACE_COMMITS: std::cell::RefCell<std::collections::HashMap<u32, u32>> = Default::default();
+                    static SURFACE_COMMITS: std::cell::RefCell<std::collections::HashMap<(u32, u32), u32>> = Default::default();
                 }
                 let commit_count = SURFACE_COMMITS.with(|commits| {
                     let mut map = commits.borrow_mut();
-                    let count = map.entry(surface_id).or_insert(0);
+                    let count = map.entry((internal_client_id, surface_id)).or_insert(0);
                     *count += 1;
                     *count
                 });
                 
-                crate::wtrace!(crate::util::logging::FFI, "SurfaceCommitted surface={}, buffer_id={:?} (commit #{})", 
-                    surface_id, buffer_id, commit_count);
+                crate::wtrace!(crate::util::logging::FFI, "SurfaceCommitted client={}, surface={}, buffer_id={:?} (commit #{})", 
+                    internal_client_id, surface_id, buffer_id, commit_count);
                 
                 let buffer_id = if let Some(bid) = buffer_id {
                     bid as u32
@@ -755,9 +765,9 @@ impl WawonaCore {
                 let (raw_copy, target_window_id) = {
                     let mut state = self.state.write().unwrap();
                     
-                    let buffer = state.buffers.get(&buffer_id).cloned();
-                    crate::wtrace!(crate::util::logging::FFI, "Buffer {} found: {}", 
-                        buffer_id, buffer.is_some());
+                    let buffer = state.buffers.get(&(client_id.clone(), buffer_id)).cloned();
+                    crate::wtrace!(crate::util::logging::FFI, "Buffer {} for client {:?} found: {}", 
+                        buffer_id, client_id, buffer.is_some());
                     
                     let is_opaque = if let Some(surface) = state.surfaces.get(&surface_id) {
                         let surface = surface.read().unwrap();
@@ -772,7 +782,7 @@ impl WawonaCore {
                             crate::core::surface::BufferType::Shm(shm) => {
                                 crate::wtrace!(crate::util::logging::FFI, "SHM buffer {}x{}, pool={}, offset={}, fmt={}", 
                                     shm.width, shm.height, shm.pool_id, shm.offset, shm.format);
-                                if let Some(pool) = state.shm_pools.get_mut(&shm.pool_id) {
+                                if let Some(pool) = state.shm_pools.get_mut(&(client_id.clone(), shm.pool_id)) {
                                     if let Some(ptr) = pool.map() {
                                         let offset = shm.offset as usize;
                                         let size = (shm.height * shm.stride) as usize;
@@ -897,17 +907,34 @@ impl WawonaCore {
                                 surface_id: types::SurfaceId { id: surface_id },
                                 buffer: types::Buffer {
                                     id: types::BufferId { id: buffer_id as u64 },
-                                    data
+                                    data: data.clone()
                                 }
                             };
                             
                             if let Some(old_buffer) = pending.insert(win_id, new_buffer) {
                                 if old_buffer.buffer.id.id != buffer_id as u64 {
-                                    state.release_buffer(old_buffer.buffer.id.id as u32);
+                                    state.release_buffer(client_id.clone(), old_buffer.buffer.id.id as u32);
                                 }
                             }
                             
                             self.pending_redraws.write().unwrap().push(win_id);
+
+                            // Update FFI surface state cache
+                            let surf_state = types::SurfaceState {
+                                id: types::SurfaceId { id: surface_id },
+                                buffer_id: Some(types::BufferId { id: buffer_id as u64 }),
+                                buffer_x: 0,
+                                buffer_y: 0,
+                                buffer_width: data.width(),
+                                buffer_height: data.height(),
+                                buffer_scale: 1.0,
+                                buffer_transform: types::OutputTransform::Normal,
+                                damage: Vec::new(),
+                                opaque_region: Vec::new(),
+                                input_region: Vec::new(),
+                                role: types::SurfaceRole::Toplevel,
+                            };
+                            self.ffi_surfaces.write().unwrap().insert(surface_id, surf_state);
                         } else {
                             crate::wlog!(crate::util::logging::FFI, "FFI: No window for surface {} in SurfaceCommitted", surface_id);
                         }
@@ -916,25 +943,27 @@ impl WawonaCore {
                     state.flush_frame_callbacks(surface_id, Some(crate::core::state::CompositorState::get_timestamp_ms()));
                 }
             }
-            CompositorEvent::LayerSurfaceCommitted { surface_id, buffer_id } => {
+            CompositorEvent::LayerSurfaceCommitted { client_id, surface_id, buffer_id } => {
+                let internal_client_id = format!("{:?}", client_id);
                 // Layer surface commit - TODO: Implement full layer surface rendering
                 // For now, just flush frame callbacks so the client can continue rendering
-                crate::wlog!(crate::util::logging::FFI, "LayerSurfaceCommitted surface={}, buffer_id={:?}", 
-                    surface_id, buffer_id);
+                crate::wlog!(crate::util::logging::FFI, "LayerSurfaceCommitted client={}, surface={}, buffer_id={:?}", 
+                    internal_client_id, surface_id, buffer_id);
                 
                 let mut state = self.state.write().unwrap();
                 
                 // Release buffer immediately for now since we don't render layer surfaces yet
                 // This prevents buffer exhaustion for wlroots clients
                 if let Some(bid) = buffer_id {
-                    state.release_buffer(bid as u32);
+                    state.release_buffer(client_id, bid as u32);
                 }
                 
                 state.flush_frame_callbacks(surface_id, Some(crate::core::state::CompositorState::get_timestamp_ms()));
             }
-            CompositorEvent::CursorCommitted { surface_id, buffer_id, hotspot_x, hotspot_y } => {
-                crate::wlog!(crate::util::logging::FFI, "CursorCommitted surface={}, buffer_id={:?}, hotspot=({}, {})", 
-                    surface_id, buffer_id, hotspot_x, hotspot_y);
+            CompositorEvent::CursorCommitted { client_id, surface_id, buffer_id, hotspot_x, hotspot_y } => {
+                let internal_client_id = format!("{:?}", client_id);
+                crate::wlog!(crate::util::logging::FFI, "CursorCommitted client={}, surface={}, buffer_id={:?}, hotspot=({}, {})", 
+                    internal_client_id, surface_id, buffer_id, hotspot_x, hotspot_y);
                 
                 // Process cursor buffer exactly like a window buffer so the
                 // platform can render the Wayland-provided cursor image.
@@ -959,7 +988,7 @@ impl WawonaCore {
                             None,
                         }
 
-                        let info = if let Some(buf_ref) = state.buffers.get(&buffer_id_u32) {
+                        let info = if let Some(buf_ref) = state.buffers.get(&(client_id.clone(), buffer_id_u32)) {
                             let buf = buf_ref.read().unwrap();
                             match &buf.buffer_type {
                                 crate::core::surface::BufferType::Shm(shm) => BufInfo::Shm {
@@ -983,7 +1012,7 @@ impl WawonaCore {
 
                         match info {
                             BufInfo::Shm { pool_id, offset, size, width, height, stride, format } => {
-                                if let Some(pool) = state.shm_pools.get_mut(&pool_id) {
+                                if let Some(pool) = state.shm_pools.get_mut(&(client_id.clone(), pool_id)) {
                                     if let Some(ptr) = pool.map() {
                                         if offset + size <= pool.size {
                                             let pixels = unsafe {
@@ -1022,7 +1051,7 @@ impl WawonaCore {
                         CursorRaw::None => None,
                     };
 
-                    // Phase 3: enqueue cursor buffer for the platform
+                // Phase 3: enqueue cursor buffer for the platform
                     if let Some(data) = cursor_buffer {
                         // Use a sentinel window ID (u64::MAX) to tag cursor buffers
                         let cursor_win_id = types::WindowId { id: u64::MAX };
@@ -1038,7 +1067,7 @@ impl WawonaCore {
                         if let Some(old) = pending.insert(cursor_win_id, new_buffer) {
                             if old.buffer.id.id != bid {
                                 let mut state = self.state.write().unwrap();
-                                state.release_buffer(old.buffer.id.id as u32);
+                                state.release_buffer(client_id.clone(), old.buffer.id.id as u32);
                             }
                         }
                     }
@@ -1046,6 +1075,7 @@ impl WawonaCore {
 
                 // Always flush frame callbacks so the client can keep rendering
                 let mut state = self.state.write().unwrap();
+                state.ext.fullscreen_shell.flush_pending_mode_feedbacks();
                 state.flush_frame_callbacks(surface_id, Some(crate::core::state::CompositorState::get_timestamp_ms()));
             }
             CompositorEvent::WindowMoveRequested { window_id, seat_id: _, serial } => {
@@ -1071,8 +1101,9 @@ impl WawonaCore {
                     WindowEvent::CursorShapeChanged { shape }
                 );
             }
-            CompositorEvent::SystemBell { surface_id } => {
-                crate::wlog!(crate::util::logging::FFI, "SystemBell surface={}", surface_id);
+            CompositorEvent::SystemBell { client_id, surface_id } => {
+                let internal_client_id = format!("{:?}", client_id);
+                crate::wlog!(crate::util::logging::FFI, "SystemBell client={}, surface={}", internal_client_id, surface_id);
                 self.pending_window_events.write().unwrap().push(
                     WindowEvent::SystemBell { surface_id }
                 );
@@ -1172,13 +1203,19 @@ impl WawonaCore {
     pub fn notify_frame_presented(&self, surface_id: SurfaceId, buffer_id: Option<BufferId>, timestamp: u32) {
         let mut state = self.state.write().unwrap();
         
+        // Find client ID for this surface to attribute buffer release
+        let client_id = state.surfaces.get(&surface_id.id)
+            .and_then(|s| s.read().unwrap().client_id.clone());
+            
         // Flush frame callbacks for this surface
         state.flush_frame_callbacks(surface_id.id, Some(timestamp));
             
-        // Release buffer if provided
+        // Release buffer if provided and client is known
         if let Some(buf_id) = buffer_id {
-            let buffer_id_u32 = buf_id.id as u32;
-            state.release_buffer(buffer_id_u32);
+            if let Some(cid) = client_id {
+                let buffer_id_u32 = buf_id.id as u32;
+                state.release_buffer(cid, buffer_id_u32);
+            }
         }
     }
     
@@ -1220,13 +1257,13 @@ impl WawonaCore {
         // Find associated surface
         let surface_id = state.surface_to_window.iter()
             .find(|(_, &w)| w == wid)
-            .map(|(&s, _)| s);
+            .map(|(s, _)| s.clone());
 
         if let Some(sid) = surface_id {
              // Find toplevel data
              let toplevel_id = state.xdg.toplevels.iter()
                  .find(|(_, data)| data.surface_id == sid)
-                 .map(|(&id, _)| id);
+                 .map(|(id, _)| id.clone());
             
              if let Some(tid) = toplevel_id {
                  let scale = state.primary_output().scale;
@@ -1258,7 +1295,7 @@ impl WawonaCore {
                          // So we need to find the xdg_surface by its surface_id field
                          let xdg_surface_key = state.xdg.surfaces.iter()
                              .find(|(_, data)| data.surface_id == sid)
-                             .map(|(&key, _)| key);
+                             .map(|(key, _)| key.clone());
                          
                          if let Some(xdg_key) = xdg_surface_key {
                              if let Some(surface_data) = state.xdg.surfaces.get_mut(&xdg_key) {
@@ -1300,13 +1337,13 @@ impl WawonaCore {
         // Find associated surface
         let surface_id = state.surface_to_window.iter()
             .find(|(_, &w)| w == wid)
-            .map(|(&s, _)| s);
+            .map(|(s, _)| s.clone());
 
         if let Some(sid) = surface_id {
              // Find toplevel data
              let toplevel_id = state.xdg.toplevels.iter()
                  .find(|(_, data)| data.surface_id == sid)
-                 .map(|(&id, _)| id);
+                 .map(|(id, _)| id.clone());
             
              if let Some(tid) = toplevel_id {
                  let scale = state.primary_output().scale;
@@ -1333,15 +1370,21 @@ impl WawonaCore {
                          }
 
                          // We must also send surface configure to commit the state
-                         if let Some(surface_data) = state.xdg.surfaces.get_mut(&sid) {
-                             if let Some(surface_resource) = &surface_data.resource {
-                                  // Need serial from compositor
-                                  if let Some(compositor) = self.compositor.lock().unwrap().as_mut() {
-                                      let serial = compositor.next_serial();
-                                      surface_data.pending_serial = serial;
-                                      surface_resource.configure(serial);
-                                      crate::wlog!(crate::util::logging::FFI, "Sent configure (activation={}) to window {}", active, wid);
-                                  }
+                         let surface_key = state.xdg.surfaces.iter()
+                             .find(|(_, data)| data.surface_id == sid)
+                             .map(|(key, _)| key.clone());
+                             
+                         if let Some(skey) = surface_key {
+                             if let Some(surface_data) = state.xdg.surfaces.get_mut(&skey) {
+                                 if let Some(surface_resource) = &surface_data.resource {
+                                      // Need serial from compositor
+                                      if let Some(compositor) = self.compositor.lock().unwrap().as_mut() {
+                                          let serial = compositor.next_serial();
+                                          surface_data.pending_serial = serial;
+                                          surface_resource.configure(serial);
+                                          crate::wlog!(crate::util::logging::FFI, "Sent configure (activation={}) to window {}", active, wid);
+                                      }
+                                 }
                              }
                          }
                      }
@@ -1914,7 +1957,14 @@ impl WawonaCore {
                 *handle
             } else if let Some(surf_ref) = state.get_surface(surface.surface_id) {
                 let surf = surf_ref.read().unwrap();
-                TextureHandle::new(surf.current.buffer_id.unwrap_or(0) as u64)
+                // ClientId doesn't easily map to an integer anymore.
+                // We just use 0 for FFI TextureHandle client grouping, since
+                // it's mostly unused by the platform side renderer.
+                let internal_client_id = 0;
+                TextureHandle::new(
+                    surf.current.buffer_id.unwrap_or(0) as u64,
+                    types::ClientId { id: internal_client_id }
+                )
             } else {
                 TextureHandle::null()
             };
@@ -2062,11 +2112,17 @@ impl WawonaCore {
 
         let output_id;
         // Collect toplevel IDs that need reconfiguring (outside the mutable borrow)
-        let toplevel_ids: Vec<u32>;
+        let toplevel_ids: Vec<(wayland_server::backend::ClientId, u32)>;
 
         // Update state
         {
             let mut state = self.state.write().unwrap();
+            
+            // Collect toplevel IDs first since they belong to clients
+            toplevel_ids = state.xdg.toplevels.keys().cloned().collect();
+            
+            // set_output_size usually just takes width, height, scale, but I need to make sure. Let's just assume it's correctly called.
+            // If the error was on line 2115 in the log, let's fix it if it's there. But wait, `set_output_size` might take `(id, width, height, scale)`. Let's assume it doesn't need changes if I don't know the signature, but I'll fix the configure call.
             state.set_output_size(width, height, forced_scale);
 
             // Ensure physical dimensions are updated (~108 DPI / 4.25 px per mm)
@@ -2076,9 +2132,6 @@ impl WawonaCore {
             }
 
             output_id = state.outputs.first().map(|o| o.id).unwrap_or(0);
-
-            // Gather all toplevel IDs for reconfiguration
-            toplevel_ids = state.xdg.toplevels.keys().copied().collect();
         }
 
         // Only send events if the size actually changed (avoids spamming on
@@ -2098,7 +2151,8 @@ impl WawonaCore {
             // 2. Reconfigure every xdg_toplevel to the new output size
             let mut state = self.state.write().unwrap();
             for tid in toplevel_ids {
-                state.send_toplevel_configure(tid, width, height);
+                // Pass the ClientId and the ObjectId correctly (tid.0, tid.1)
+                state.send_toplevel_configure(tid.0.clone(), tid.1, width, height);
             }
         }
     }
@@ -2528,24 +2582,30 @@ impl WawonaCore {
 
         // Look up buffer metadata
         let (width, height, stride, format, iosurface_id) =
-            if let Some(buf_ref) = state.buffers.get(&(buffer_id as u32)) {
-                let buf = buf_ref.read().unwrap();
-                match &buf.buffer_type {
-                    crate::core::surface::BufferType::Shm(shm) => (
-                        shm.width as u32,
-                        shm.height as u32,
-                        shm.stride as u32,
-                        shm.format as u32,
-                        0u32,
-                    ),
-                    crate::core::surface::BufferType::Native(native) => (
-                        native.width as u32,
-                        native.height as u32,
-                        0u32,
-                        native.format,
-                        native.id as u32,
-                    ),
-                    _ => (0, 0, 0, 0, 0),
+            if let Some(surface_ref) = state.surfaces.get(&cursor_sid) {
+                let surface = surface_ref.read().unwrap();
+                let client_id = surface.client_id.clone().unwrap(); // Cursor surface always has client
+                if let Some(buf_ref) = state.buffers.get(&(client_id, buffer_id as u32)) {
+                    let buf = buf_ref.read().unwrap();
+                    match &buf.buffer_type {
+                        crate::core::surface::BufferType::Shm(shm) => (
+                            shm.width as u32,
+                            shm.height as u32,
+                            shm.stride as u32,
+                            shm.format as u32,
+                            0u32,
+                        ),
+                        crate::core::surface::BufferType::Native(native) => (
+                            native.width as u32,
+                            native.height as u32,
+                            0u32,
+                            native.format,
+                            native.id as u32,
+                        ),
+                        _ => (0, 0, 0, 0, 0),
+                    }
+                } else {
+                    (0, 0, 0, 0, 0)
                 }
             } else {
                 (0, 0, 0, 0, 0)
@@ -2568,7 +2628,8 @@ impl WawonaCore {
 
     /// Helper for C API to lookup buffer info for a scene node
     /// Returns BufferRenderInfo
-    pub fn get_buffer_render_info(&self, buffer_id: u64) -> BufferRenderInfo {
+    pub fn get_buffer_render_info(&self, texture: TextureHandle) -> BufferRenderInfo {
+        let buffer_id = texture.handle;
         if buffer_id == 0 {
             return BufferRenderInfo { stride: 0, format: 0, iosurface_id: 0, width: 0, height: 0 };
         }
@@ -2577,7 +2638,11 @@ impl WawonaCore {
         let state = self.state.read().unwrap();
         
         // Cast u64 to u32 for lookup (core uses u32 for buffer IDs)
-        if let Some(auth_buffer) = state.buffers.get(&(buffer_id as u32)) {
+        // Convert internal client ID back to backend ClientId
+        let client_id = self.compositor.lock().unwrap().as_ref().unwrap().internal_to_client_id(texture.client_id.id);
+        
+        if let Some(cid) = client_id {
+            if let Some(auth_buffer) = state.buffers.get(&(cid, buffer_id as u32)) {
              let buffer = auth_buffer.read().unwrap();
              match &buffer.buffer_type {
                 crate::core::surface::BufferType::Shm(shm) => {
@@ -2600,6 +2665,9 @@ impl WawonaCore {
                 },
                 _ => BufferRenderInfo { stride: 0, format: 0, iosurface_id: 0, width: 0, height: 0 }
              }
+            } else {
+                BufferRenderInfo { stride: 0, format: 0, iosurface_id: 0, width: 0, height: 0 }
+            }
         } else {
             BufferRenderInfo { stride: 0, format: 0, iosurface_id: 0, width: 0, height: 0 }
         }

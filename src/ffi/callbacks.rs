@@ -148,7 +148,7 @@ impl PlatformCallbacks for StubPlatformCallbacks {
     
     fn upload_buffer(&self, _buffer: Buffer) -> TextureHandle {
         let handle = self.next_texture_handle.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        TextureHandle::new(handle)
+        TextureHandle::new(handle, crate::ffi::types::ClientId::default())
     }
     
     fn release_texture(&self, _texture: TextureHandle) {}

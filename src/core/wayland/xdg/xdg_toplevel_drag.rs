@@ -96,9 +96,10 @@ impl Dispatch<XdgToplevelDragV1, u32> for CompositorState {
         match request {
             xdg_toplevel_drag_v1::Request::Attach { toplevel, x_offset, y_offset } => {
                 let toplevel_id = toplevel.id().protocol_id();
+                let client_id = _client.id();
 
                 // Resolve toplevel to window ID
-                let window_id = state.xdg.toplevels.get(&toplevel_id)
+                let window_id = state.xdg.toplevels.get(&(client_id, toplevel_id))
                     .and_then(|td| {
                         state.surface_to_window.get(&td.surface_id).copied()
                     });

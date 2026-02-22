@@ -186,7 +186,8 @@ impl Dispatch<ExtImageCopyCaptureFrameV1, CaptureFrameData> for CompositorState 
                 };
                 *data.captured.lock().unwrap() = true;
 
-                let buffer_guard = match state.buffers.get(&buffer_id) {
+                let client_id = _client.id();
+                let buffer_guard = match state.buffers.get(&(client_id.clone(), buffer_id)) {
                     Some(b) => b.read().unwrap().clone(),
                     None => {
                         tracing::warn!("Image copy Capture: unknown buffer {}", buffer_id);
@@ -196,7 +197,7 @@ impl Dispatch<ExtImageCopyCaptureFrameV1, CaptureFrameData> for CompositorState 
                 };
                 let (width, height, stride, ptr, size) = match &buffer_guard.buffer_type {
                     BufferType::Shm(shm) => {
-                        let pool = match state.shm_pools.get_mut(&shm.pool_id) {
+                        let pool = match state.shm_pools.get_mut(&(client_id, shm.pool_id)) {
                             Some(p) => p,
                             None => {
                                 tracing::warn!("Image copy Copy: unknown pool {}", shm.pool_id);

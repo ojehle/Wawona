@@ -31,12 +31,15 @@ stdenv.mkDerivation rec {
     # Patch main function to be a callable library entry point
     sed -i 's/^main(int argc, char \*\*argv)/weston_simple_shm_main(int argc, char \*\*argv)/' $out/clients/simple-shm.c
 
-    # Use return NULL instead of exit to avoid crashing host process
-    sed -i 's/exit([0-9]*)/return NULL/g' $out/clients/simple-shm.c
+    # Use return instead of exit to avoid crashing host process
+    # First, handle functions returning pointers (like create_display)
+    sed -i '/create_display(void)/,/^}/ s/exit(\([0-9]*\))/return NULL/g' $out/clients/simple-shm.c
+    # Then handle functions returning int (like main)
+    sed -i 's/exit(\([0-9]*\))/return \1/g' $out/clients/simple-shm.c
 
     # Fix Android NDK bug: sys/select.h (included by unistd.h) needs sigset_t, which is mysteriously blocked. Provide the exact NDK types manually.
-    sed -i 's/#include <unistd.h>/typedef unsigned long sigset_t;\ntypedef struct { unsigned long __bits[128\/sizeof(long)]; } sigset64_t;\n#include <unistd.h>/g' $out/clients/simple-shm.c
-    sed -i 's/#include <unistd.h>/typedef unsigned long sigset_t;\ntypedef struct { unsigned long __bits[128\/sizeof(long)]; } sigset64_t;\n#include <unistd.h>/g' $out/shared/os-compatibility.c
+    sed -i 's/#include <unistd.h>/#ifndef __APPLE__\ntypedef unsigned long sigset_t;\ntypedef struct { unsigned long __bits[128\/sizeof(long)]; } sigset64_t;\n#endif\n#include <unistd.h>/g' $out/clients/simple-shm.c
+    sed -i 's/#include <unistd.h>/#ifndef __APPLE__\ntypedef unsigned long sigset_t;\ntypedef struct { unsigned long __bits[128\/sizeof(long)]; } sigset64_t;\n#endif\n#include <unistd.h>/g' $out/shared/os-compatibility.c
 
     # Polyfill linux/input.h constants
     sed -i '/#include <linux\/input.h>/d' $out/clients/simple-shm.c
@@ -55,10 +58,26 @@ stdenv.mkDerivation rec {
     # Stub out epoll_create which doesn't exist on Apple platforms, but is unused by simple-shm
     sed -i 's/epoll_create(1)/-1/g' $out/shared/os-compatibility.c
 
+    sed -i 's/static int running/int g_simple_shm_running/g' $out/clients/simple-shm.c
+    sed -i 's/\brunning =/g_simple_shm_running =/g' $out/clients/simple-shm.c
+    sed -i 's/\brunning;/g_simple_shm_running;/g' $out/clients/simple-shm.c
+    sed -i 's/\brunning &&/g_simple_shm_running \&\&/g' $out/clients/simple-shm.c
+
     awk '
       /^weston_simple_shm_main/ { in_main = 1 }
-      /^\{/ && in_main { print; print "\trunning = 1;"; in_main = 0; next }
-      /window = create_window/ { print "\tif (!display) return 1;" }
+      /^\{/ && in_main { 
+        print; 
+        print "\tg_simple_shm_running = 1;";
+        print "\tint width = 250, height = 250;";
+        print "\tfor (int i = 1; i < argc; i++) {";
+        print "\t\tif (strcmp(argv[i], \"--width\") == 0 && i + 1 < argc) width = atoi(argv[++i]);";
+        print "\t\telse if (strcmp(argv[i], \"--height\") == 0 && i + 1 < argc) height = atoi(argv[++i]);";
+        print "\t}";
+        in_main = 0; 
+        next 
+      }
+      /display = create_display\(\);/ { print; print "\tif (!display) return 1;"; next }
+      /window = create_window/ { print "\twindow = create_window(display, width, height);" ; next }
       { print }
     ' $out/clients/simple-shm.c > $out/clients/simple-shm.c.tmp
     mv $out/clients/simple-shm.c.tmp $out/clients/simple-shm.c

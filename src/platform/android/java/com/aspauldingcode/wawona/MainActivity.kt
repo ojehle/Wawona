@@ -156,9 +156,14 @@ fun WawonaApp(
         if (nativeWestonEnabled && nativeWestonProcess == null) {
             try {
                 val libDir = context.applicationInfo.nativeLibraryDir
-                val proc = ProcessBuilder("$libDir/libweston_bin.so")
+                val procBuilder = ProcessBuilder("$libDir/libweston_bin.so")
                     .redirectErrorStream(true)
-                    .start()
+                
+                val tmpDir = System.getenv("TMPDIR") ?: "/data/local/tmp"
+                procBuilder.environment()["XDG_RUNTIME_DIR"] = "$tmpDir/wawona-runtime"
+                procBuilder.environment()["WAYLAND_DISPLAY"] = "wayland-0"
+                
+                val proc = procBuilder.start()
                 nativeWestonProcess = proc
                 WLog.i("WESTON", "Native Weston launched")
             } catch (e: Exception) {
@@ -177,9 +182,14 @@ fun WawonaApp(
         if (nativeWestonTerminalEnabled && nativeWestonTerminalProcess == null) {
             try {
                 val libDir = context.applicationInfo.nativeLibraryDir
-                val proc = ProcessBuilder("$libDir/libweston-terminal_bin.so")
+                val procBuilder = ProcessBuilder("$libDir/libweston-terminal_bin.so")
                     .redirectErrorStream(true)
-                    .start()
+                
+                val tmpDir = System.getenv("TMPDIR") ?: "/data/local/tmp"
+                procBuilder.environment()["XDG_RUNTIME_DIR"] = "$tmpDir/wawona-runtime"
+                procBuilder.environment()["WAYLAND_DISPLAY"] = "wayland-0"
+                
+                val proc = procBuilder.start()
                 nativeWestonTerminalProcess = proc
                 WLog.i("WESTON", "Native Weston Terminal launched")
             } catch (e: Exception) {

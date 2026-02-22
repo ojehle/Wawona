@@ -22,15 +22,16 @@ impl Dispatch<xdg_positioner::XdgPositioner, ()> for CompositorState {
         _data_init: &mut wayland_server::DataInit<'_, Self>,
     ) {
         let positioner_id = resource.id().protocol_id();
+        let client_id = _client.id();
         
         // Ensure positioner data exists
-        if !state.xdg.positioners.contains_key(&positioner_id) {
-            state.xdg.positioners.insert(positioner_id, XdgPositionerData::default());
+        if !state.xdg.positioners.contains_key(&(client_id.clone(), positioner_id)) {
+            state.xdg.positioners.insert((client_id.clone(), positioner_id), XdgPositionerData::default());
         }
         
         // Helper to update positioner data
-        let update_positioner = |state: &mut CompositorState, id: u32, update_fn: Box<dyn FnOnce(&mut XdgPositionerData)>| {
-            if let Some(data) = state.xdg.positioners.get_mut(&id) {
+        let update_positioner = |state: &mut CompositorState, client_id: wayland_server::backend::ClientId, id: u32, update_fn: Box<dyn FnOnce(&mut XdgPositionerData)>| {
+            if let Some(data) = state.xdg.positioners.get_mut(&(client_id, id)) {
                 update_fn(data);
             }
         };
@@ -38,14 +39,14 @@ impl Dispatch<xdg_positioner::XdgPositioner, ()> for CompositorState {
         match request {
             xdg_positioner::Request::SetSize { width, height } => {
                 tracing::trace!("xdg_positioner.set_size: {}x{}", width, height);
-                update_positioner(state, positioner_id, Box::new(move |data| {
+                update_positioner(state, client_id.clone(), positioner_id, Box::new(move |data| {
                     data.width = width;
                     data.height = height;
                 }));
             }
             xdg_positioner::Request::SetAnchorRect { x, y, width, height } => {
                 tracing::trace!("xdg_positioner.set_anchor_rect: {},{} {}x{}", x, y, width, height);
-                update_positioner(state, positioner_id, Box::new(move |data| {
+                update_positioner(state, client_id.clone(), positioner_id, Box::new(move |data| {
                     data.anchor_rect = (x, y, width, height);
                 }));
             }
@@ -53,7 +54,7 @@ impl Dispatch<xdg_positioner::XdgPositioner, ()> for CompositorState {
                 tracing::trace!("xdg_positioner.set_anchor: {:?}", anchor);
                 if let wayland_server::WEnum::Value(anchor_val) = anchor {
                     let raw_val: u32 = anchor_val.into();
-                     update_positioner(state, positioner_id, Box::new(move |data| {
+                     update_positioner(state, client_id.clone(), positioner_id, Box::new(move |data| {
                         data.anchor = raw_val;
                     }));
                 }
@@ -62,7 +63,7 @@ impl Dispatch<xdg_positioner::XdgPositioner, ()> for CompositorState {
                 tracing::trace!("xdg_positioner.set_gravity: {:?}", gravity);
                 if let wayland_server::WEnum::Value(gravity_val) = gravity {
                     let raw_val: u32 = gravity_val.into();
-                    update_positioner(state, positioner_id, Box::new(move |data| {
+                    update_positioner(state, client_id.clone(), positioner_id, Box::new(move |data| {
                         data.gravity = raw_val;
                     }));
                 }
@@ -70,19 +71,19 @@ impl Dispatch<xdg_positioner::XdgPositioner, ()> for CompositorState {
             xdg_positioner::Request::SetConstraintAdjustment { constraint_adjustment } => {
                 tracing::trace!("xdg_positioner.set_constraint_adjustment: {:?}", constraint_adjustment);
                 let raw_val = u32::from(constraint_adjustment); 
-                update_positioner(state, positioner_id, Box::new(move |data| {
+                update_positioner(state, client_id.clone(), positioner_id, Box::new(move |data| {
                     data.constraint_adjustment = raw_val;
                 }));
             }
             xdg_positioner::Request::SetOffset { x, y } => {
                 tracing::trace!("xdg_positioner.set_offset: {},{}", x, y);
-                update_positioner(state, positioner_id, Box::new(move |data| {
+                update_positioner(state, client_id.clone(), positioner_id, Box::new(move |data| {
                     data.offset = (x, y);
                 }));
             }
             xdg_positioner::Request::Destroy => {
                 tracing::trace!("xdg_positioner destroyed");
-                state.xdg.positioners.remove(&positioner_id);
+                state.xdg.positioners.remove(&(client_id, positioner_id));
             }
             _ => {}
         }

@@ -962,8 +962,7 @@ pub extern "C" fn WWNCoreGetRenderScene(core: *mut WWNCore) -> *mut CRenderScene
         let buffer_id = node.texture.handle;
         
         // Call helper to get buffer info
-        // Call helper to get buffer info
-        let info = core.get_buffer_render_info(buffer_id);
+        let info = core.get_buffer_render_info(node.texture);
         let (stride, format, iosurface_id, width, height) = (info.stride, info.format, info.iosurface_id, info.width, info.height);
         
         c_nodes.push(CRenderNode {

@@ -173,6 +173,7 @@ extern void WWNCoreTextInputGetCursorRect(void *core, int32_t *out_x,
 
 extern int waypipe_main(int argc, const char **argv);
 extern int weston_simple_shm_main(int argc, const char **argv);
+extern int g_simple_shm_running;
 
 // JNI Function Prototypes
 JNIEXPORT void JNICALL Java_com_aspauldingcode_wawona_WawonaNative_nativeInit(
@@ -309,6 +310,8 @@ VkQueue g_queue = VK_NULL_HANDLE;
 VkSwapchainKHR g_swapchain = VK_NULL_HANDLE;
 uint32_t g_queue_family = 0;
 ANativeWindow *g_window = NULL;
+uint32_t g_output_width = 0;
+uint32_t g_output_height = 0;
 
 // Threading
 static int g_running = 0;
@@ -1122,6 +1125,8 @@ static void *render_thread(void *arg) {
   }
 
   // Set output size for the compositor core
+  g_output_width = extent.width;
+  g_output_height = extent.height;
   if (g_core) {
     WWNCoreSetOutputSize(g_core, extent.width, extent.height, 1.0f);
     LOGI("Set compositor output size: %ux%u", extent.width, extent.height);
@@ -2673,10 +2678,19 @@ static pthread_t g_weston_shm_thread = 0;
 
 static void *weston_simple_shm_thread_func(void *arg) {
   (void)arg;
-  LOGI("Starting weston-simple-shm background thread");
+  LOGI("Starting weston-simple-shm background thread (%ux%u)", g_output_width,
+       g_output_height);
 
-  const char *argv[] = {"weston-simple-shm", NULL};
-  int argc = 1;
+  char w_str[16];
+  char h_str[16];
+  snprintf(w_str, sizeof(w_str), "%u",
+           g_output_width > 0 ? g_output_width : 250);
+  snprintf(h_str, sizeof(h_str), "%u",
+           g_output_height > 0 ? g_output_height : 250);
+
+  const char *argv[] = {"weston-simple-shm", "--width", w_str,
+                        "--height",          h_str,     NULL};
+  int argc = 5;
 
   char saved_cwd[512] = "";
   const char *xdg_dir = getenv("XDG_RUNTIME_DIR");
@@ -2732,16 +2746,15 @@ Java_com_aspauldingcode_wawona_WawonaNative_nativeStopWestonSimpleSHM(
   }
 
   LOGI("Stopping weston-simple-shm...");
+  g_simple_shm_running = 0;
 
-  // There is no clean way to stop it currently, as it runs wl_display_dispatch
-  // forever. In a future update, we can implement a stop signal, but for now we
-  // let it detach or fail.
   if (g_weston_shm_thread) {
+    pthread_join(g_weston_shm_thread, NULL);
     g_weston_shm_thread = 0;
   }
 
   g_weston_shm_running = 0;
-  LOGI("weston-simple-shm stopped");
+  LOGI("weston-simple-shm stopped cleanly");
 }
 
 JNIEXPORT jboolean JNICALL

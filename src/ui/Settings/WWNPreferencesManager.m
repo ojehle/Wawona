@@ -74,6 +74,8 @@ NSString *const kWWNPrefsEnableDictation = @"EnableDictation";
 NSString *const kWWNForceSSDChangedNotification =
     @"WWNForceSSDChangedNotification";
 NSString *const kWWNPrefsWestonSimpleSHMEnabled = @"WestonSimpleSHMEnabled";
+NSString *const kWWNPrefsWestonEnabled = @"WestonEnabled";
+NSString *const kWWNPrefsWestonTerminalEnabled = @"WestonTerminalEnabled";
 
 static NSString *WWNPreferredSharedRuntimeDir(void) {
 #if TARGET_OS_IPHONE || TARGET_OS_SIMULATOR
@@ -139,6 +141,16 @@ static NSString *WWNPreferredSharedRuntimeDir(void) {
                   options:NSKeyValueObservingOptionNew |
                           NSKeyValueObservingOptionInitial
                   context:NULL];
+    [defaults addObserver:self
+               forKeyPath:kWWNPrefsWestonEnabled
+                  options:NSKeyValueObservingOptionNew |
+                          NSKeyValueObservingOptionInitial
+                  context:NULL];
+    [defaults addObserver:self
+               forKeyPath:kWWNPrefsWestonTerminalEnabled
+                  options:NSKeyValueObservingOptionNew |
+                          NSKeyValueObservingOptionInitial
+                  context:NULL];
   }
   return self;
 }
@@ -149,11 +161,32 @@ static NSString *WWNPreferredSharedRuntimeDir(void) {
                        context:(void *)context {
   if ([keyPath isEqualToString:kWWNPrefsWestonSimpleSHMEnabled]) {
     BOOL enabled = [change[NSKeyValueChangeNewKey] boolValue];
+    WWNLog("PREFS", @"Weston Simple SHM preference changed: %d", enabled);
     dispatch_async(dispatch_get_main_queue(), ^{
       if (enabled) {
         [[WWNWaypipeRunner sharedRunner] launchWestonSimpleSHM];
       } else {
         [[WWNWaypipeRunner sharedRunner] stopWestonSimpleSHM];
+      }
+    });
+  } else if ([keyPath isEqualToString:kWWNPrefsWestonEnabled]) {
+    BOOL enabled = [change[NSKeyValueChangeNewKey] boolValue];
+    WWNLog("PREFS", @"Weston preference changed: %d", enabled);
+    dispatch_async(dispatch_get_main_queue(), ^{
+      if (enabled) {
+        [[WWNWaypipeRunner sharedRunner] launchWeston];
+      } else {
+        [[WWNWaypipeRunner sharedRunner] stopWeston];
+      }
+    });
+  } else if ([keyPath isEqualToString:kWWNPrefsWestonTerminalEnabled]) {
+    BOOL enabled = [change[NSKeyValueChangeNewKey] boolValue];
+    WWNLog("PREFS", @"Weston Terminal preference changed: %d", enabled);
+    dispatch_async(dispatch_get_main_queue(), ^{
+      if (enabled) {
+        [[WWNWaypipeRunner sharedRunner] launchWestonTerminal];
+      } else {
+        [[WWNWaypipeRunner sharedRunner] stopWestonTerminal];
       }
     });
   } else {
@@ -204,6 +237,8 @@ static NSString *WWNPreferredSharedRuntimeDir(void) {
 #endif
     kWWNPrefsEnableLauncher : @NO,
     kWWNPrefsWestonSimpleSHMEnabled : @NO,
+    kWWNPrefsWestonEnabled : @NO,
+    kWWNPrefsWestonTerminalEnabled : @NO,
     // Waypipe
     kWWNPrefsWaypipeDisplay : @"wayland-0",
     kWWNPrefsWaypipeSocket : defaultSocket,
@@ -318,6 +353,8 @@ static NSString *WWNPreferredSharedRuntimeDir(void) {
   [defaults removeObjectForKey:kWWNPrefsMultipleClients];
   [defaults removeObjectForKey:kWWNPrefsEnableLauncher];
   [defaults removeObjectForKey:kWWNPrefsWestonSimpleSHMEnabled];
+  [defaults removeObjectForKey:kWWNPrefsWestonEnabled];
+  [defaults removeObjectForKey:kWWNPrefsWestonTerminalEnabled];
   // Waypipe
   [defaults removeObjectForKey:kWWNPrefsWaypipeDisplay];
   [defaults removeObjectForKey:kWWNPrefsWaypipeSocket];
@@ -477,7 +514,6 @@ static NSString *WWNPreferredSharedRuntimeDir(void) {
                                           forKey:kWWNPrefsWaypipeRSSupport];
 }
 
-// Weston Simple SHM
 - (BOOL)westonSimpleSHMEnabled {
   return [[NSUserDefaults standardUserDefaults]
       boolForKey:kWWNPrefsWestonSimpleSHMEnabled];
@@ -487,6 +523,27 @@ static NSString *WWNPreferredSharedRuntimeDir(void) {
   [[NSUserDefaults standardUserDefaults]
       setBool:enabled
        forKey:kWWNPrefsWestonSimpleSHMEnabled];
+}
+
+- (BOOL)westonEnabled {
+  return
+      [[NSUserDefaults standardUserDefaults] boolForKey:kWWNPrefsWestonEnabled];
+}
+
+- (void)setWestonEnabled:(BOOL)enabled {
+  [[NSUserDefaults standardUserDefaults] setBool:enabled
+                                          forKey:kWWNPrefsWestonEnabled];
+}
+
+- (BOOL)westonTerminalEnabled {
+  return [[NSUserDefaults standardUserDefaults]
+      boolForKey:kWWNPrefsWestonTerminalEnabled];
+}
+
+- (void)setWestonTerminalEnabled:(BOOL)enabled {
+  [[NSUserDefaults standardUserDefaults]
+      setBool:enabled
+       forKey:kWWNPrefsWestonTerminalEnabled];
 }
 
 // Network / Remote Access
