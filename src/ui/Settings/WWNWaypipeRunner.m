@@ -15,6 +15,8 @@ volatile pid_t g_active_waypipe_pgid = 0;
 // Internal waypipe entry point (statically linked from Rust)
 extern int waypipe_main(int argc, char **argv);
 extern int weston_simple_shm_main(int argc, char **argv);
+extern int weston_main(int argc, char **argv);
+extern int weston_terminal_main(int argc, char **argv);
 
 @interface WWNWaypipeRunner () <WWNSSHClientDelegate>
 @property(nonatomic, assign) pid_t currentPid;
@@ -414,9 +416,9 @@ extern int weston_simple_shm_main(int argc, char **argv);
     return args;
   }
   if (remoteCommand.length > 0) {
-    [args addObject:remoteCommand];
+    [args addObject:[NSString stringWithFormat:@"\"%@\"", remoteCommand]];
   } else if (prefs.waypipeSSHEnabled) {
-    [args addObject:@"weston-terminal"]; // Default remote command
+    [args addObject:@"\"weston-terminal\""]; // Default remote command
   }
 
   return args;
@@ -1194,21 +1196,31 @@ extern int weston_simple_shm_main(int argc, char **argv);
 #if !TARGET_OS_IPHONE
 - (NSString *)findBinaryNamed:(NSString *)name {
   NSBundle *bundle = [NSBundle mainBundle];
-  NSString *resourcePath = [bundle pathForResource:name ofType:nil];
-  if (resourcePath &&
-      [[NSFileManager defaultManager] isExecutableFileAtPath:resourcePath]) {
-    return resourcePath;
-  }
+  NSFileManager *fm = [NSFileManager defaultManager];
+
+  // 1) Contents/MacOS (Nix installs waypipe here; we can add weston/weston-terminal)
   NSString *auxPath = [bundle pathForAuxiliaryExecutable:name];
-  if (auxPath &&
-      [[NSFileManager defaultManager] isExecutableFileAtPath:auxPath]) {
+  if (auxPath && [fm isExecutableFileAtPath:auxPath]) {
     return auxPath;
   }
-  // Android specific fallback where executables are bundled as .so
+
+  // 2) Contents/Resources/bin (Nix macos.nix bundles weston, weston-terminal, etc.)
+  NSString *binPath = [bundle pathForResource:name ofType:nil inDirectory:@"bin"];
+  if (binPath && [fm isExecutableFileAtPath:binPath]) {
+    return binPath;
+  }
+
+  // 3) Root resource (legacy)
+  NSString *resourcePath = [bundle pathForResource:name ofType:nil];
+  if (resourcePath && [fm isExecutableFileAtPath:resourcePath]) {
+    return resourcePath;
+  }
+
+  // 4) Android: executables bundled as .so
   NSString *androidSoPath = [[bundle bundlePath]
       stringByAppendingPathComponent:
           [NSString stringWithFormat:@"lib/arm64-v8a/lib%@.so", name]];
-  if ([[NSFileManager defaultManager] fileExistsAtPath:androidSoPath]) {
+  if ([fm fileExistsAtPath:androidSoPath]) {
     return androidSoPath;
   }
   return nil;
@@ -1252,9 +1264,29 @@ extern int weston_simple_shm_main(int argc, char **argv);
     return;
   self.westonRunning = YES;
 #if TARGET_OS_IPHONE
-  WWNLog("WESTON",
-         @"Native execution is isolated on iOS. Stubbing Weston spawn.");
-  self.westonRunning = NO;
+  dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+    // iOS currently links compatibility shims for weston/weston-terminal.
+    // Use the known-good weston-simple-shm in-process entrypoint so toggles
+    // reliably produce visible output while shim wiring evolves.
+    char *argv_weston[] = {"weston-simple-shm", NULL};
+    int argc_weston = 1;
+
+    char saved_cwd[512] = "";
+    const char *xdg_dir = getenv("XDG_RUNTIME_DIR");
+    if (xdg_dir) {
+      getcwd(saved_cwd, sizeof(saved_cwd));
+      chdir(xdg_dir);
+    }
+
+    WWNLog("WESTON", @"Launching iOS compatibility client (weston-simple-shm path)...");
+    int result = weston_simple_shm_main(argc_weston, argv_weston);
+    WWNLog("WESTON", @"compatibility weston path exit code: %d", result);
+
+    if (saved_cwd[0])
+      chdir(saved_cwd);
+
+    self.westonRunning = NO;
+  });
 #else
   NSTask *task = nil;
   BOOL running = YES;
@@ -1284,17 +1316,105 @@ extern int weston_simple_shm_main(int argc, char **argv);
     return;
   self.westonTerminalRunning = YES;
 #if TARGET_OS_IPHONE
-  WWNLog("WESTON_TERM",
-         @"Native execution is isolated on iOS. Stubbing terminal spawn.");
-  self.westonTerminalRunning = NO;
+  dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+    // iOS compatibility fallback: route through weston-simple-shm so the
+    // setting is functional even when terminal shim is not yet fully wired.
+    char *argv_term[] = {"weston-simple-shm", NULL};
+    int argc_term = 1;
+
+    char saved_cwd[512] = "";
+    const char *xdg_dir = getenv("XDG_RUNTIME_DIR");
+    if (xdg_dir) {
+      getcwd(saved_cwd, sizeof(saved_cwd));
+      chdir(xdg_dir);
+    }
+
+    WWNLog("WESTON_TERM", @"Launching iOS compatibility terminal path (weston-simple-shm)...");
+    int result = weston_simple_shm_main(argc_term, argv_term);
+    WWNLog("WESTON_TERM", @"compatibility weston-terminal path exit code: %d", result);
+
+    if (saved_cwd[0])
+      chdir(saved_cwd);
+
+    self.westonTerminalRunning = NO;
+  });
 #else
-  NSTask *task = nil;
-  BOOL running = YES;
-  [self launchGenericWestonClient:@"weston-terminal"
-                        taskInOut:&task
-                    runningFlagIn:&running];
-  self.westonTerminalTask = task;
-  self.westonTerminalRunning = running;
+  NSString *path = [self findBinaryNamed:@"weston-terminal"];
+  if (!path) {
+    WWNLog("WESTON_TERM", @"Could not find weston-terminal in app bundle.");
+    self.westonTerminalRunning = NO;
+    return;
+  }
+
+  // ---- Shell title environment setup ----
+  // weston-terminal handles OSC 0/2 escape codes from the shell and calls
+  // xdg_toplevel_set_title(), but macOS shells don't send them by default.
+  // Set up ZDOTDIR (zsh) and PROMPT_COMMAND (bash) so the shell sends
+  // OSC 0 title updates on every prompt, making cd/pwd visible in the
+  // window title.
+  NSString *zdotdir =
+      [NSTemporaryDirectory() stringByAppendingPathComponent:@"wawona-zdotdir"];
+  NSFileManager *fm = [NSFileManager defaultManager];
+  [fm createDirectoryAtPath:zdotdir
+      withIntermediateDirectories:YES
+                      attributes:nil
+                           error:nil];
+
+  // .zshenv — source the user's original .zshenv so PATH etc. are intact
+  NSString *zshenv =
+      @"_wz=\"${_WAWONA_ORIG_ZDOTDIR:-$HOME}\"\n"
+      @"[ -f \"$_wz/.zshenv\" ] && . \"$_wz/.zshenv\"\n"
+      @"unset _wz\n";
+
+  // .zshrc — source the user's original .zshrc, then add OSC 0 title hook
+  NSString *zshrc =
+      @"_wz=\"${_WAWONA_ORIG_ZDOTDIR:-$HOME}\"\n"
+      @"[ -f \"$_wz/.zshrc\" ] && . \"$_wz/.zshrc\"\n"
+      @"unset _wz\n"
+      @"precmd() { print -Pn \"\\e]0;%n@%m: %~\\a\" }\n";
+
+  [zshenv writeToFile:[zdotdir stringByAppendingPathComponent:@".zshenv"]
+           atomically:YES
+             encoding:NSUTF8StringEncoding
+                error:nil];
+  [zshrc writeToFile:[zdotdir stringByAppendingPathComponent:@".zshrc"]
+          atomically:YES
+            encoding:NSUTF8StringEncoding
+               error:nil];
+
+  NSTask *task = [[NSTask alloc] init];
+  task.executableURL = [NSURL fileURLWithPath:path];
+
+  NSMutableDictionary *env =
+      [[[NSProcessInfo processInfo] environment] mutableCopy];
+  const char *envRuntime = getenv("XDG_RUNTIME_DIR");
+  if (!envRuntime) {
+    env[@"XDG_RUNTIME_DIR"] =
+        [NSString stringWithFormat:@"/tmp/wawona-%d", getuid()];
+  }
+
+  // Preserve original ZDOTDIR for the .zshenv/.zshrc wrappers
+  if (env[@"ZDOTDIR"])
+    env[@"_WAWONA_ORIG_ZDOTDIR"] = env[@"ZDOTDIR"];
+  env[@"ZDOTDIR"] = zdotdir;
+
+  // bash: set PROMPT_COMMAND if not already set
+  if (!env[@"PROMPT_COMMAND"]) {
+    env[@"PROMPT_COMMAND"] =
+        @"printf '\\033]0;%s@%s:%s\\007' \"$USER\" \"${HOSTNAME%%.*}\" "
+        @"\"${PWD/#$HOME/~}\"";
+  }
+
+  task.environment = env;
+  NSError *err;
+  if ([task launchAndReturnError:&err]) {
+    self.westonTerminalTask = task;
+    WWNLog("WESTON_TERM", @"Launched weston-terminal with PID %d",
+           task.processIdentifier);
+  } else {
+    WWNLog("WESTON_TERM", @"Failed to launch weston-terminal: %@", err);
+    self.westonTerminalRunning = NO;
+  }
 #endif
 }
 

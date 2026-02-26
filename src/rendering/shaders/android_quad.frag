@@ -15,6 +15,10 @@ layout(push_constant) uniform PushConstants {
     float extent_y;
     float opacity;
     float _pad;
+    float content_rect_x;
+    float content_rect_y;
+    float content_rect_w;
+    float content_rect_h;
 } pc;
 
 void main() {

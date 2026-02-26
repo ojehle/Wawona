@@ -54,6 +54,10 @@ if p.exists():
         p.write_text(c)
         print("Patched cli-auth.c with android_getpass")
 PY
+
+    # Patch dbclient for -R /path:/path Unix socket forwarding
+    # (streamlocal-forward@openssh.com -- required by waypipe ssh)
+    bash ${./patch-dbclient-streamlocal.sh}
   '';
 
   preConfigure = ''
@@ -77,6 +81,7 @@ PY
 #undef DROPBEAR_SFTPSERVER
 #define DROPBEAR_SFTPSERVER 0
 #define SFTPSERVER_PATH ""
+#define DROPBEAR_CLI_REMOTESTREAMFWD 1
 EOF
 
     ac_cv_func_getpass=yes \

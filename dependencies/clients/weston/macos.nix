@@ -164,6 +164,67 @@ EOF
 
     # Patch terminal.c to use our safe HOWMANY macro
     sed -i "s/\bhowmany\b/WESTON_HOWMANY/g" clients/terminal.c
+    # Keep classic default title expected by Wawona UX/tests.
+    # Weston 13 defaults to "Wayland Terminal"; restore "Weston Terminal".
+    sed -i "s/Wayland Terminal/Weston Terminal/g" clients/terminal.c
+
+    # --- OSC 7 title + PROMPT_COMMAND patches ---
+    # macOS zsh sends OSC 7 (file://host/path) for the cwd instead of
+    # OSC 0/2. Upstream weston-terminal recognises OSC 7 but silently
+    # discards it.  Patch handle_osc to extract the path from the URI
+    # and set it as the window title.  Also inject PROMPT_COMMAND so
+    # bash sessions send OSC 0 title updates on every prompt.
+    cat > _patch_terminal_title.py << 'PYEOF'
+with open("clients/terminal.c") as f:
+    src = f.read()
+
+# --- 1. OSC 7: extract directory from file:// URI, set as title ---
+old_osc7 = "\tcase 7: /* shell cwd as uri */\n\t\tbreak;"
+new_osc7 = (
+    "\tcase 7: { /* shell cwd as uri - extract path for title */\n"
+    "\t\tconst char *fp = \"file://\";\n"
+    "\t\tif (strncmp(p, fp, 7) == 0) {\n"
+    "\t\t\tconst char *sl = strchr(p + 7, '/');\n"
+    "\t\t\tif (sl) {\n"
+    "\t\t\t\tconst char *hm = getenv(\"HOME\");\n"
+    "\t\t\t\tsize_t hlen = hm ? strlen(hm) : 0;\n"
+    "\t\t\t\tchar *t = NULL;\n"
+    "\t\t\t\tif (hm && strncmp(sl, hm, hlen) == 0\n"
+    "\t\t\t\t    && (sl[hlen] == '/' || sl[hlen] == '\\0'))\n"
+    "\t\t\t\t\tasprintf(&t, \"~%s\", sl + hlen);\n"
+    "\t\t\t\telse\n"
+    "\t\t\t\t\tt = strdup(sl);\n"
+    "\t\t\t\tif (t) {\n"
+    "\t\t\t\t\tfree(terminal->title);\n"
+    "\t\t\t\t\tterminal->title = t;\n"
+    "\t\t\t\t\twindow_set_title(terminal->window, t);\n"
+    "\t\t\t\t}\n"
+    "\t\t\t}\n"
+    "\t\t}\n"
+    "\t\tbreak;\n"
+    "\t}"
+)
+assert old_osc7 in src, "OSC 7 patch target not found in terminal.c"
+src = src.replace(old_osc7, new_osc7)
+
+# --- 2. PROMPT_COMMAND for bash ---
+old_env = '\t\tsetenv("COLORTERM", option_term, 1);'
+prompt = (
+    'printf \'\\\\033]0;%s@%s:%s\\\\007\' '
+    '\\"$USER\\" '
+    '\\"''${HOSTNAME%%.*}\\" '
+    '\\"''${PWD/#$HOME/~}\\"'
+)
+new_env = old_env + '\n\t\tsetenv("PROMPT_COMMAND", "' + prompt + '", 0);'
+assert old_env in src, "COLORTERM patch target not found in terminal.c"
+src = src.replace(old_env, new_env)
+
+with open("clients/terminal.c", "w") as f:
+    f.write(src)
+print("Patched terminal.c: OSC 7 handler + PROMPT_COMMAND")
+PYEOF
+    python3 _patch_terminal_title.py
+    rm _patch_terminal_title.py
     
     # Create inclusive directory for shims
     mkdir -p include/sys include/libudev include/libinput include/linux include/libevdev include/GLES2 include/EGL include/KHR

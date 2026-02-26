@@ -24,6 +24,7 @@
 #if !TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
 #import <ApplicationServices/ApplicationServices.h> // CGSetDisplayTransferByTable, etc.
 #endif
+#include <stdatomic.h>
 #include <string.h> // For strdup
 
 // Plain C FFI functions exported from Rust with #[no_mangle]
@@ -43,6 +44,9 @@ extern void WWNCoreInjectWindowResize(void *core, uint64_t window_id,
                                       uint32_t width, uint32_t height);
 extern void WWNCoreSetWindowActivated(void *core, uint64_t window_id,
                                       bool active);
+extern void WWNCoreSetWindowActivatedSilent(void *core, uint64_t window_id,
+                                            bool active);
+extern void WWNCoreFlushClients(void *core);
 extern void WWNCoreSetForceSSD(void *core, bool enabled);
 extern void WWNCoreSetSafeAreaInsets(void *core, int32_t top, int32_t right,
                                      int32_t bottom, int32_t left);
@@ -112,6 +116,10 @@ typedef struct CRenderNode {
   uint32_t iosurface_id;
   float anchor_output_x;
   float anchor_output_y;
+  float content_rect_x;
+  float content_rect_y;
+  float content_rect_w;
+  float content_rect_h;
 } CRenderNode;
 
 typedef struct CRenderScene {
@@ -235,7 +243,10 @@ static void handle_cursor_shape_update(uint32_t shape) {
 
   // Guards against frame pile-up: when YES, a compositor tick is in
   // flight and the next CADisplayLink/NSTimer callback is skipped.
-  BOOL _compositorBusy;
+  // Atomic because it is written on _compositorQueue and read on the
+  // main thread; without barriers, ARM64 weak ordering can cause the
+  // main thread to read a stale YES and skip ticks indefinitely.
+  atomic_bool _compositorBusy;
 
 #if TARGET_OS_IPHONE || TARGET_OS_SIMULATOR
   NSMutableDictionary<NSNumber *, id> *_windows;
@@ -248,6 +259,22 @@ static void handle_cursor_shape_update(uint32_t shape) {
   // Scene Graph caches
   NSMutableDictionary<NSNumber *, id> *_bufferCache;
   NSMutableDictionary<NSNumber *, CALayer *> *_surfaceLayers;
+
+  // Per-window resize coalescing.  Each window gets its own "latest"
+  // dimensions so concurrent resizes of different windows never collide.
+  // Key = window_id (NSNumber wrapping uint64_t).
+  NSMutableDictionary<NSNumber *, NSValue *> *_latestResizeDims;
+  NSMutableDictionary<NSNumber *, NSValue *> *_sentResizeDims;
+  NSMutableSet<NSNumber *> *_resizeInFlightWindows;
+
+  // Output-size coalescing (same pattern)
+  BOOL _outputResizeInFlight;
+  uint32_t _latestOutputW;
+  uint32_t _latestOutputH;
+  float _latestOutputScale;
+  uint32_t _sentOutputW;
+  uint32_t _sentOutputH;
+  float _sentOutputScale;
 
 #if !TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
   // Saved gamma for restore (nested compositor may not use; main display only)
@@ -290,6 +317,9 @@ static void handle_cursor_shape_update(uint32_t shape) {
     _popups = [NSMutableDictionary dictionary];
     _bufferCache = [NSMutableDictionary dictionary];
     _surfaceLayers = [NSMutableDictionary dictionary];
+    _latestResizeDims = [NSMutableDictionary dictionary];
+    _sentResizeDims = [NSMutableDictionary dictionary];
+    _resizeInFlightWindows = [NSMutableSet set];
   }
   return self;
 }
@@ -495,7 +525,12 @@ static void handle_cursor_shape_update(uint32_t shape) {
 
   [_bufferCache removeAllObjects];
   [_surfaceLayers removeAllObjects];
-  _compositorBusy = NO;
+  atomic_store(&_compositorBusy, false);
+  [_latestResizeDims removeAllObjects];
+  [_sentResizeDims removeAllObjects];
+  [_resizeInFlightWindows removeAllObjects];
+  _outputResizeInFlight = NO;
+  _sentOutputW = _sentOutputH = 0;
 }
 
 - (BOOL)isRunning {
@@ -549,17 +584,15 @@ static void handle_cursor_shape_update(uint32_t shape) {
 /// on the main thread but we immediately dispatch the heavy Rust work to
 /// _compositorQueue, then bounce lightweight UI updates back to main.
 - (void)_compositorTick {
-  if (!_rustCore || _compositorBusy) {
+  if (!_rustCore || atomic_load(&_compositorBusy)) {
     return;
   }
-  _compositorBusy = YES;
+  atomic_store(&_compositorBusy, true);
 
   dispatch_async(_compositorQueue, ^{
     // Guard: compositor may have been stopped between dispatch and execution
     if (!self->_rustCore) {
-      dispatch_async(dispatch_get_main_queue(), ^{
-        self->_compositorBusy = NO;
-      });
+      atomic_store(&self->_compositorBusy, false);
       return;
     }
 
@@ -582,7 +615,15 @@ static void handle_cursor_shape_update(uint32_t shape) {
     //    the buffer.  Image creation from SHM data is CPU-bound work that
     //    benefits from running off main thread.
     CBufferData *buffer;
+    NSUInteger poppedBufferCount = 0;
     while ((buffer = WWNCorePopPendingBuffer(self->_rustCore)) != NULL) {
+      poppedBufferCount++;
+      WWNLog("TICK",
+             @"Popped buffer: win=%llu surf=%u buf=%llu %ux%u pixels=%p "
+             @"iosurface=%u",
+             buffer->window_id, buffer->surface_id, buffer->buffer_id,
+             buffer->width, buffer->height, buffer->pixels,
+             buffer->iosurface_id);
       [self cacheBuffer:buffer];
       uint32_t ts = (uint32_t)([[NSDate date] timeIntervalSince1970] * 1000.0);
       WWNCoreNotifyFramePresented(self->_rustCore, buffer->surface_id,
@@ -590,12 +631,43 @@ static void handle_cursor_shape_update(uint32_t shape) {
       WWNBufferDataFree(buffer);
     }
 
+    // 3b. Flush all pending protocol events (frame_done, buffer_release)
+    //     to clients unconditionally.  Events may have been generated by
+    //     NotifyFramePresented above OR by SurfaceCommitted handlers inside
+    //     ProcessEvents (step 1).  Flushing only when poppedBufferCount > 0
+    //     would leave frame_done events stranded when a commit was processed
+    //     but its buffer couldn't be popped (e.g. window not yet created,
+    //     DMA-BUF type, SHM mapping failure).  For in-process waypipe on
+    //     iOS this stalls the entire remote frame pipeline.
+    WWNCoreFlushClients(self->_rustCore);
+
     // 4. Build the render scene graph (scene-graph traversal + buffer
     //    info lookups happen inside Rust; the returned CRenderScene is a
     //    self-contained snapshot safe to consume on any thread).
     CRenderScene *scene = WWNCoreGetRenderScene(self->_rustCore);
+    {
+      static NSUInteger sPrevPoppedCount = 0;
+      static size_t sPrevSceneCount = 0;
+      static NSUInteger sPrevCacheSize = 0;
+      size_t sc = scene ? scene->count : 0;
+      NSUInteger cs = self->_bufferCache.count;
+      if (poppedBufferCount != sPrevPoppedCount || sc != sPrevSceneCount ||
+          cs != sPrevCacheSize) {
+        WWNLog("TICK",
+               @"Buffers popped: %lu, scene nodes: %zu, cache size: %lu",
+               (unsigned long)poppedBufferCount, sc, (unsigned long)cs);
+        sPrevPoppedCount = poppedBufferCount;
+        sPrevSceneCount = sc;
+        sPrevCacheSize = cs;
+      }
+    }
 
     // === Main Queue: lightweight UI updates ===
+    // NOTE: _compositorBusy is reset at the END of this main-queue block,
+    // NOT here on the compositor queue.  Resetting here would allow the
+    // next tick's [self cacheBuffer:] to write _bufferCache concurrently
+    // with updateLayerForNode: reading it — a data race on
+    // NSMutableDictionary that causes visual flashing.
     dispatch_async(dispatch_get_main_queue(), ^{
       // Apply window events (create/destroy views, update titles)
       for (NSValue *val in windowEvents) {
@@ -648,7 +720,9 @@ static void handle_cursor_shape_update(uint32_t shape) {
       }
 #endif
 
-      self->_compositorBusy = NO;
+      // Reset AFTER all main-queue UI work is done so the next compositor
+      // tick cannot mutate _bufferCache while we are still reading it.
+      atomic_store(&self->_compositorBusy, false);
     });
   });
 }
@@ -692,6 +766,10 @@ static void handle_cursor_shape_update(uint32_t shape) {
     IOSurfaceRef surf = IOSurfaceLookup(buffer->iosurface_id);
     if (surf) {
       _bufferCache[bufId] = (__bridge_transfer id)surf;
+      WWNLog("CACHE", @"Cached IOSurface buf=%llu", buffer->buffer_id);
+    } else {
+      WWNLog("CACHE", @"FAILED IOSurface lookup for buf=%llu iosurface=%u",
+             buffer->buffer_id, buffer->iosurface_id);
     }
     return;
   }
@@ -711,11 +789,19 @@ static void handle_cursor_shape_update(uint32_t shape) {
 
     if (image) {
       _bufferCache[bufId] = (__bridge_transfer id)image;
+      WWNLog("CACHE", @"Cached SHM CGImage buf=%llu %ux%u stride=%u",
+             buffer->buffer_id, buffer->width, buffer->height, buffer->stride);
+    } else {
+      WWNLog("CACHE", @"FAILED CGImageCreate for buf=%llu %ux%u",
+             buffer->buffer_id, buffer->width, buffer->height);
     }
 
     CGColorSpaceRelease(colorSpace);
     CGDataProviderRelease(provider);
     CFRelease(pixelData);
+  } else {
+    WWNLog("CACHE", @"SKIP: buf=%llu has no pixels and no iosurface",
+           buffer->buffer_id);
   }
 }
 
@@ -748,6 +834,7 @@ static void handle_cursor_shape_update(uint32_t shape) {
   if (!layer) {
     layer = [CALayer layer];
     layer.contentsScale = node->scale;
+    layer.contentsGravity = kCAGravityResize;
     _surfaceLayers[surfId] = layer;
 
     // Attach to window hierarchy (toplevels and popups both in _windows)
@@ -769,6 +856,15 @@ static void handle_cursor_shape_update(uint32_t shape) {
       hostView = _popups[winId];
     if ([hostView isKindOfClass:[WWNCompositorView_ios class]]) {
       [((WWNCompositorView_ios *)hostView).contentLayer addSublayer:layer];
+      WWNLog("RENDER",
+             @"Created layer for surf=%@ → attached to win=%@ contentLayer",
+             surfId, winId);
+    } else {
+      WWNLog("RENDER",
+             @"WARNING: No host view for surf=%@ win=%@ (_windows has %lu "
+             @"entries, _popups has %lu)",
+             surfId, winId, (unsigned long)_windows.count,
+             (unsigned long)_popups.count);
     }
 #endif
   }
@@ -776,11 +872,20 @@ static void handle_cursor_shape_update(uint32_t shape) {
 #if !TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
   if (node->buffer_id != 0) {
     id w = _windows[winId];
-    if (w && [w isKindOfClass:[NSWindow class]] && ![(NSWindow *)w isVisible]) {
-      [(NSWindow *)w makeKeyAndOrderFront:nil];
+    if (w && [w isKindOfClass:[NSWindow class]]) {
+      NSWindow *window = (NSWindow *)w;
+      if (![window isVisible] && ![window isMiniaturized]) {
+        [window makeKeyAndOrderFront:nil];
+      }
     }
   }
 #endif
+
+  // Disable implicit animations so layer property changes are instantaneous.
+  // During rotation, an active animation context would capture these changes
+  // and animate them, causing the surface to appear frozen/stretched.
+  [CATransaction begin];
+  [CATransaction setDisableActions:YES];
 
   // 2. Update Geometry — use anchor for window-local coords (subsurfaces)
   float localX = node->x - node->anchor_output_x;
@@ -791,17 +896,37 @@ static void handle_cursor_shape_update(uint32_t shape) {
   layer.opacity = node->opacity;
   layer.cornerRadius = node->corner_radius;
 
+  // 2b. Crop buffer to content area when CSD geometry is set.
+  // The client's buffer may include shadow/frame around the content;
+  // xdg_surface.set_window_geometry defines the content rect.
+  // content_rect is pre-normalized (0..1) on the Rust side.
+  if (node->content_rect_w > 0.0f && node->content_rect_h > 0.0f) {
+    layer.contentsRect = CGRectMake(node->content_rect_x, node->content_rect_y,
+                                    node->content_rect_w, node->content_rect_h);
+  }
+
   // 3. Update Contents from Cache
   // We use node->buffer_id to look up the image
   id content = _bufferCache[@(node->buffer_id)];
+  if (node->buffer_id != 0 && !content) {
+    WWNLog(
+        "RENDER",
+        @"MISS: surf=%@ win=%@ buf=%llu not in cache (cache has %lu entries)",
+        surfId, winId, node->buffer_id, (unsigned long)_bufferCache.count);
+  }
   if (content) {
     layer.contents = content;
-    // If it's an IOSurface, specific handling might be needed but usually layer
-    // handles it
   }
+
+  [CATransaction commit];
 }
 
 - (void)flushClients {
+  if (!_rustCore)
+    return;
+  [self _dispatchToRust:^{
+    WWNCoreFlushClients(self->_rustCore);
+  }];
 }
 
 #if !TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
@@ -973,6 +1098,7 @@ extern void WWNCoreInjectTouchUp(void *core, int32_t id, uint32_t timestamp);
 extern void WWNCoreInjectTouchMotion(void *core, int32_t id, double x, double y,
                                      uint32_t timestamp);
 extern void WWNCoreInjectTouchCancel(void *core);
+extern void WWNCoreInject_touch_frame(void *core);
 
 /// Dispatch a block to the compositor's serial queue.
 /// All Rust FFI calls (input injection, configuration changes, etc.) go
@@ -1028,6 +1154,15 @@ extern void WWNCoreInjectTouchCancel(void *core);
   }
   [self _dispatchToRust:^{
     WWNCoreInjectTouchCancel(self->_rustCore);
+  }];
+}
+
+- (void)injectTouchFrame {
+  if (!_rustCore) {
+    return;
+  }
+  [self _dispatchToRust:^{
+    WWNCoreInject_touch_frame(self->_rustCore);
   }];
 }
 
@@ -1183,11 +1318,47 @@ extern void WWNCoreInjectTouchCancel(void *core);
 - (void)injectWindowResize:(uint64_t)windowId
                      width:(uint32_t)width
                     height:(uint32_t)height {
-  if (!_rustCore) {
+  if (!_rustCore)
     return;
+
+  NSNumber *key = @(windowId);
+  CGSize dims = CGSizeMake(width, height);
+  _latestResizeDims[key] = [NSValue value:&dims withObjCType:@encode(CGSize)];
+  [self _drainPendingWindowResizeForId:key];
+}
+
+/// Dispatch at most one resize block per window to the compositor queue.
+/// When the block completes, it checks whether newer dimensions arrived
+/// for that window while it was running and re-dispatches if necessary.
+- (void)_drainPendingWindowResizeForId:(NSNumber *)key {
+  if ([_resizeInFlightWindows containsObject:key])
+    return;
+
+  NSValue *latestVal = _latestResizeDims[key];
+  NSValue *sentVal = _sentResizeDims[key];
+  if (!latestVal)
+    return;
+  CGSize latestDims, sentDims;
+  [latestVal getValue:&latestDims];
+  if (sentVal) {
+    [sentVal getValue:&sentDims];
+    if (CGSizeEqualToSize(latestDims, sentDims))
+      return;
   }
+
+  [_resizeInFlightWindows addObject:key];
+  _sentResizeDims[key] = latestVal;
+  CGSize dims = latestDims;
+  uint32_t w = (uint32_t)dims.width;
+  uint32_t h = (uint32_t)dims.height;
+  uint64_t wid = key.unsignedLongLongValue;
+
   [self _dispatchToRust:^{
-    WWNCoreInjectWindowResize(self->_rustCore, windowId, width, height);
+    WWNCoreInjectWindowResize(self->_rustCore, wid, w, h);
+    dispatch_async(dispatch_get_main_queue(), ^{
+      [self->_resizeInFlightWindows removeObject:key];
+      [self _drainPendingWindowResizeForId:key];
+    });
   }];
 }
 
@@ -1218,12 +1389,38 @@ extern void WWNCoreInjectTouchCancel(void *core);
 // MARK: - Configuration
 
 - (void)setOutputWidth:(uint32_t)w height:(uint32_t)h scale:(float)s {
-  if (!_rustCore) {
+  if (!_rustCore)
     return;
-  }
+
+  _latestOutputW = w;
+  _latestOutputH = h;
+  _latestOutputScale = s;
+  [self _drainPendingOutputResize];
+}
+
+/// Same coalescing pattern as window resize — at most one output-resize
+/// block on the compositor queue at a time.
+- (void)_drainPendingOutputResize {
+  if (_outputResizeInFlight)
+    return;
+  uint32_t w = _latestOutputW;
+  uint32_t h = _latestOutputH;
+  float s = _latestOutputScale;
+  if (w == _sentOutputW && h == _sentOutputH && s == _sentOutputScale)
+    return;
+
+  _outputResizeInFlight = YES;
+  _sentOutputW = w;
+  _sentOutputH = h;
+  _sentOutputScale = s;
+
   [self _dispatchToRust:^{
     WWNCoreSetOutputSize(self->_rustCore, w, h, s);
     WWNLog("BRIDGE", @"Output: %ux%u @ %.1fx", w, h, s);
+    dispatch_async(dispatch_get_main_queue(), ^{
+      self->_outputResizeInFlight = NO;
+      [self _drainPendingOutputResize];
+    });
   }];
 }
 
@@ -1278,6 +1475,9 @@ typedef enum : uint32_t {
   CWindowEventTypeMoveRequested = 6,
   CWindowEventTypeResizeRequested = 7,
   CWindowEventTypeDecorationModeChanged = 8,
+  CWindowEventTypeMinimizeRequested = 9,
+  CWindowEventTypeMaximizeRequested = 10,
+  CWindowEventTypeUnmaximizeRequested = 11,
 } CWindowEventType;
 
 typedef struct CWindowEvent {
@@ -1292,7 +1492,8 @@ typedef struct CWindowEvent {
   int32_t y;
   uint8_t decoration_mode;  // 0 = ClientSide, 1 = ServerSide
   uint8_t fullscreen_shell; // 0 = no, 1 = yes (kiosk - no host chrome)
-  uint16_t padding;
+  uint8_t edges;            // xdg_toplevel resize_edge
+  uint8_t padding;
 } CWindowEvent;
 
 extern CWindowEvent *WWNCorePopWindowEvent(void *core);
@@ -1348,6 +1549,21 @@ extern void WWNWindowInfoFree(CWindowInfo *info);
     [self handleDecorationModeChanged:event];
 #endif
     break;
+  case CWindowEventTypeMinimizeRequested:
+#if !TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+    [self handleWindowMinimizeRequested:event];
+#endif
+    break;
+  case CWindowEventTypeMaximizeRequested:
+#if !TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+    [self handleWindowMaximizeRequested:event];
+#endif
+    break;
+  case CWindowEventTypeUnmaximizeRequested:
+#if !TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+    [self handleWindowUnmaximizeRequested:event];
+#endif
+    break;
   }
 }
 
@@ -1388,20 +1604,66 @@ extern void WWNWindowInfoFree(CWindowInfo *info);
          event->window_id, event->width, event->height, event->decoration_mode,
          event->fullscreen_shell);
 
+  CGFloat screenW = [NSScreen mainScreen].frame.size.width;
+  CGFloat screenH = [NSScreen mainScreen].frame.size.height;
+  BOOL shouldInjectResize = NO;
+  BOOL shouldUpdateOutput = NO; // Whether wl_output.mode must also change.
+
   NSRect contentRect;
   if (event->fullscreen_shell) {
-    contentRect = [NSScreen mainScreen].frame;
+    // Fullscreen-shell surfaces fill the output at whatever size the output
+    // reports.  When Force SSD is active the NSWindow gets a native macOS
+    // titlebar, which consumes height from the content area and shrinks the
+    // drawable region below the output dimensions Weston expects.
+    //
+    // We must inject a resize after window creation so that:
+    //   • wl_output.mode is updated to the actual content area (not the
+    //     full output including the titlebar region), and
+    //   • the fullscreen_shell surface receives a configure at the correct
+    //     drawable size.
+    //
+    // Without this, Weston renders its desktop shell at the full output size
+    // and the bottom strip is clipped/hidden behind the window chrome.
+    contentRect = NSMakeRect(100, 100, event->width, event->height);
+    if (event->decoration_mode == 1) {
+      // Force SSD: titlebar will eat into the content rect after window init.
+      shouldInjectResize = YES;
+      shouldUpdateOutput = YES;
+    }
+  } else if (event->width >= (uint32_t)screenW &&
+             event->height >= (uint32_t)screenH) {
+    // xdg_toplevel requesting full-screen dimensions (e.g. a nested
+    // compositor like Weston).  Place it in a reasonable windowed size,
+    // then update BOTH wl_output.mode and xdg_toplevel configure to the
+    // new content-area size.
+    //
+    // Critical: nested compositors (Weston) size their *virtual display*
+    // to wl_output.mode, not to xdg_toplevel.configure.  If we only send
+    // a new configure without also updating the output mode, Weston renders
+    // at the old, full-screen output dimensions and the content is clipped
+    // or misaligned inside the smaller macOS host window.
+    CGFloat defaultW = fmin(1024, screenW * 0.75);
+    CGFloat defaultH = fmin(768, screenH * 0.75);
+    contentRect = NSMakeRect(100, 100, defaultW, defaultH);
+    shouldInjectResize = YES;
+    shouldUpdateOutput = YES;
   } else {
     contentRect = NSMakeRect(100, 100, event->width, event->height);
+    // For SSD windows the actual content area must be communicated back
+    // to the Rust compositor so wl_output stays in sync.  Nested
+    // compositors like Weston rely on wl_output.mode matching the
+    // content area.
+    if (event->decoration_mode == 1) {
+      shouldInjectResize = YES;
+    }
   }
   NSWindowStyleMask styleMask;
-  if (event->fullscreen_shell) {
-    styleMask = NSWindowStyleMaskBorderless;
-  } else if (event->decoration_mode == 1) {
+  if (event->fullscreen_shell || event->decoration_mode == 1) {
     styleMask = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
                 NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable;
   } else {
-    styleMask = NSWindowStyleMaskBorderless | NSWindowStyleMaskResizable;
+    styleMask = NSWindowStyleMaskBorderless | NSWindowStyleMaskResizable |
+                NSWindowStyleMaskMiniaturizable;
   }
 
   WWNWindow *window =
@@ -1412,8 +1674,9 @@ extern void WWNWindowInfoFree(CWindowInfo *info);
 
   window.wwnWindowId = event->window_id;
 
-  NSString *title = event->title ? [NSString stringWithUTF8String:event->title]
-                                 : @"WWN Window";
+  NSString *title = (event->title && strlen(event->title) > 0)
+                        ? [NSString stringWithUTF8String:event->title]
+                        : @"";
   [window setTitle:title];
 
   // Create content view
@@ -1432,21 +1695,49 @@ extern void WWNWindowInfoFree(CWindowInfo *info);
   [_windows setObject:window forKey:@(event->window_id)];
   WWNLog("BRIDGE", @"Created window %llu: %@ (total windows: %lu)",
          event->window_id, title, (unsigned long)[_windows count]);
+
+  // If the window was placed at a default size (smaller than what the
+  // Wayland client requested), update wl_output.mode first, then inject
+  // the xdg_toplevel configure resize.
+  //
+  // Order matters: the output-mode update must arrive at the Rust core
+  // BEFORE the configure so that nested compositors (Weston) see a
+  // consistent wl_output.mode matching the configure dimensions.  Both
+  // calls use the same serial compositor queue, so FIFO ordering is
+  // guaranteed as long as we call setOutputWidth:… before injectWindowResize:.
+  if (shouldInjectResize) {
+    NSSize contentSize = [window contentLayoutRect].size;
+    WWNLog("BRIDGE", @"Injecting initial resize for window %llu: %.0fx%.0f%@",
+           event->window_id, contentSize.width, contentSize.height,
+           shouldUpdateOutput ? @" (+ output mode update)" : @"");
+
+    if (shouldUpdateOutput && contentSize.width > 0 && contentSize.height > 0) {
+      // Update wl_output.mode to the new windowed content-area size so
+      // nested compositors configure their virtual display correctly.
+      [self setOutputWidth:(uint32_t)contentSize.width
+                    height:(uint32_t)contentSize.height
+                     scale:_latestOutputScale > 0 ? _latestOutputScale : 1.0f];
+    }
+
+    [self injectWindowResize:event->window_id
+                       width:(uint32_t)contentSize.width
+                      height:(uint32_t)contentSize.height];
+  }
 }
 
 - (void)handleWindowMoveRequested:(CWindowEvent *)event {
   WWNLog("BRIDGE", @"handleWindowMoveRequested: id=%llu", event->window_id);
 #if !TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
   WWNWindow *window = _windows[@(event->window_id)];
-  if (window) {
-    // On macOS, we can't easily start a move from a background click without
-    // the original event.
-    // However, if we're on the main thread and have the current event, we can
-    // try:
-    NSEvent *currentEvent = [NSApp currentEvent];
-    if (currentEvent.type == NSEventTypeLeftMouseDown) {
-      [window performWindowDragWithEvent:currentEvent];
-    }
+  if (!window)
+    return;
+
+  NSEvent *currentEvent = [NSApp currentEvent];
+  if (currentEvent && (currentEvent.type == NSEventTypeLeftMouseDown ||
+                       currentEvent.type == NSEventTypeLeftMouseDragged)) {
+    [window performWindowDragWithEvent:currentEvent];
+  } else if (window.lastMouseDownEvent) {
+    [window performWindowDragWithEvent:window.lastMouseDownEvent];
   }
 #endif
 }
@@ -1460,29 +1751,147 @@ extern void WWNWindowInfoFree(CWindowInfo *info);
     styleMask = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
                 NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable;
   } else {
-    styleMask = NSWindowStyleMaskBorderless | NSWindowStyleMaskResizable;
+    styleMask = NSWindowStyleMaskBorderless | NSWindowStyleMaskResizable |
+                NSWindowStyleMaskMiniaturizable;
   }
   [window setStyleMask:styleMask];
-  WWNLog("BRIDGE", @"Decoration mode changed for window %llu: %s",
-         event->window_id,
-         event->decoration_mode == 1 ? "ServerSide" : "ClientSide");
+
+  // After changing the style mask the content area may have shrunk (e.g. a
+  // titlebar was added for SSD mode).  Inject the new content-area size
+  // immediately so the Rust compositor state is correct before
+  // reconfigure_window_decorations sends an xdg_toplevel.configure to the
+  // client.  Without this, nested compositors receive the pre-titlebar
+  // dimensions and render at the wrong size.
+  NSSize contentSize = [window contentLayoutRect].size;
+  if (contentSize.width > 0 && contentSize.height > 0) {
+    WWNLog("BRIDGE",
+           @"Decoration mode changed for window %llu: %s — injecting "
+           @"content resize %.0fx%.0f",
+           event->window_id,
+           event->decoration_mode == 1 ? "ServerSide" : "ClientSide",
+           contentSize.width, contentSize.height);
+    [self injectWindowResize:event->window_id
+                       width:(uint32_t)contentSize.width
+                      height:(uint32_t)contentSize.height];
+  } else {
+    WWNLog("BRIDGE", @"Decoration mode changed for window %llu: %s",
+           event->window_id,
+           event->decoration_mode == 1 ? "ServerSide" : "ClientSide");
+  }
 }
 
 - (void)handleWindowResizeRequested:(CWindowEvent *)event {
-  WWNLog("BRIDGE", @"handleWindowResizeRequested: id=%llu", event->window_id);
+  WWNLog("BRIDGE", @"handleWindowResizeRequested: id=%llu edges=%u",
+         event->window_id, event->edges);
+#if !TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+  WWNWindow *window = _windows[@(event->window_id)];
+  if (!window)
+    return;
+
+  NSEvent *mouseEvent = [NSApp currentEvent];
+  if (!mouseEvent || (mouseEvent.type != NSEventTypeLeftMouseDown &&
+                      mouseEvent.type != NSEventTypeLeftMouseDragged)) {
+    mouseEvent = window.lastMouseDownEvent;
+  }
+  if (!mouseEvent)
+    return;
+
+  uint8_t edges = event->edges;
+  NSPoint startLoc = [NSEvent mouseLocation];
+  NSRect startFrame = window.frame;
+
+  // Track the mouse and resize the window according to the requested edge
+  [window
+      trackEventsMatchingMask:(NSEventMaskLeftMouseDragged |
+                               NSEventMaskLeftMouseUp)
+                      timeout:NSEventDurationForever
+                         mode:NSEventTrackingRunLoopMode
+                      handler:^(NSEvent *trackEvent, BOOL *stop) {
+                        if (trackEvent.type == NSEventTypeLeftMouseUp) {
+                          *stop = YES;
+                          return;
+                        }
+
+                        NSPoint curLoc = [NSEvent mouseLocation];
+                        CGFloat dx = curLoc.x - startLoc.x;
+                        CGFloat dy = curLoc.y - startLoc.y;
+
+                        NSRect newFrame = startFrame;
+
+                        // Horizontal edges
+                        if (edges & 8) { // Right
+                          newFrame.size.width =
+                              MAX(100, startFrame.size.width + dx);
+                        } else if (edges & 4) { // Left
+                          CGFloat newW = MAX(100, startFrame.size.width - dx);
+                          newFrame.origin.x = startFrame.origin.x +
+                                              startFrame.size.width - newW;
+                          newFrame.size.width = newW;
+                        }
+
+                        // Vertical edges (macOS y is flipped: origin is
+                        // bottom-left)
+                        if (edges & 1) { // Top (Wayland top → macOS top →
+                                         // increase height, keep top)
+                          CGFloat newH = MAX(100, startFrame.size.height + dy);
+                          newFrame.size.height = newH;
+                        } else if (edges & 2) { // Bottom (Wayland bottom →
+                                                // macOS bottom)
+                          CGFloat newH = MAX(100, startFrame.size.height - dy);
+                          newFrame.origin.y = startFrame.origin.y +
+                                              startFrame.size.height - newH;
+                          newFrame.size.height = newH;
+                        }
+
+                        [window setFrame:newFrame display:YES];
+                      }];
+#endif
+}
+
+- (void)handleWindowMinimizeRequested:(CWindowEvent *)event {
+  WWNLog("BRIDGE", @"handleWindowMinimizeRequested: id=%llu", event->window_id);
 #if !TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
   WWNWindow *window = _windows[@(event->window_id)];
   if (window) {
-    // Wayland apps request a resize. On macOS, we can initiate a native window
-    // resize if we have the current event.
-    NSEvent *currentEvent = [NSApp currentEvent];
-    if (currentEvent.type == NSEventTypeLeftMouseDown) {
-      // In a real implementation, 'Edge' from event would matter.
-      // NSWindow doesn't have a direct 'performWindowResize' like
-      // 'performWindowDrag', but starting a drag on a corner usually works if
-      // the style mask allows it.
-      // For now, we'll rely on the app handling its own resize via configure
-      // loops.
+    [window miniaturize:nil];
+  }
+#endif
+}
+
+- (void)handleWindowMaximizeRequested:(CWindowEvent *)event {
+  WWNLog("BRIDGE", @"handleWindowMaximizeRequested: id=%llu", event->window_id);
+#if !TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+  WWNWindow *window = _windows[@(event->window_id)];
+  if (window) {
+    if (![window isZoomed]) {
+      window.processingResize = YES;
+      [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
+        [window zoom:nil];
+      }
+          completionHandler:^{
+            window.processingResize = NO;
+            [window windowDidResize:nil];
+          }];
+    }
+  }
+#endif
+}
+
+- (void)handleWindowUnmaximizeRequested:(CWindowEvent *)event {
+  WWNLog("BRIDGE", @"handleWindowUnmaximizeRequested: id=%llu",
+         event->window_id);
+#if !TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+  WWNWindow *window = _windows[@(event->window_id)];
+  if (window) {
+    if ([window isZoomed]) {
+      window.processingResize = YES;
+      [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
+        [window zoom:nil];
+      }
+          completionHandler:^{
+            window.processingResize = NO;
+            [window windowDidResize:nil];
+          }];
     }
   }
 #endif
@@ -1725,36 +2134,55 @@ extern void WWNWindowInfoFree(CWindowInfo *info);
 
   [_windows setObject:view forKey:@(event->window_id)];
 
-  // Activate the window and send keyboard enter so the remote client
-  // knows it's in focus. This is critical -- without activation, clients
-  // like weston-terminal don't know they're focused.
+  // Fullscreen shell (kiosk) windows are display-only surfaces presented
+  // behind the primary toplevel.  Activating them would steal keyboard
+  // focus from the toplevel, sending a deactivation configure that makes
+  // nested compositors like weston exit.  Skip activation entirely.
+  if (event->fullscreen_shell) {
+    WWNLog("BRIDGE", @"Fullscreen shell window %llu — skipping activation",
+           event->window_id);
+    return;
+  }
+
+  // Activate synchronously BEFORE any layoutSubviews can fire.
+  // We use the "silent" variant that sets the activation flag without
+  // emitting a configure, then injectWindowResize sends a single
+  // configure with both the correct size AND activation state.
+  // This avoids the ordering problem where calling them separately
+  // produces either a deactivated or 0x0 configure.
   uint64_t windowId = event->window_id;
-  dispatch_async(dispatch_get_main_queue(), ^{
-    WWNLog("BRIDGE", @"Activating new window %llu", windowId);
+  WWNLog("BRIDGE", @"Activating new window %llu", windowId);
 
-    // 1. Tell the client it's activated (xdg_toplevel.configure with
-    // Activated)
-    [self setWindowActivated:windowId active:YES];
+  // 1. Set activated=true in Rust without sending a configure.
+  [self _dispatchToRust:^{
+    WWNCoreSetWindowActivatedSilent(self->_rustCore, windowId, true);
+  }];
 
-    // 2. Send keyboard enter
-    [self injectKeyboardEnterForWindow:windowId keys:@[]];
+  // 2. Resize sends ONE configure: correct size + Activated state.
+  CGRect viewFrame = self.containerView ? self.containerView.bounds
+                                        : CGRectMake(0, 0, 800, 600);
+  [self injectWindowResize:windowId
+                     width:(uint32_t)viewFrame.size.width
+                    height:(uint32_t)viewFrame.size.height];
 
-    // 3. Send pointer enter so the client knows a pointer is present
-    //    and can set a cursor surface (critical for touchpad mode).
-    CGRect viewFrame = self.containerView ? self.containerView.bounds
-                                          : CGRectMake(0, 0, 800, 600);
-    double cx = viewFrame.size.width / 2.0;
-    double cy = viewFrame.size.height / 2.0;
-    [self injectPointerEnterForWindow:windowId x:cx y:cy timestamp:0];
+  // 3. Input focus events.
+  [self injectKeyboardEnterForWindow:windowId keys:@[]];
 
-    // 4. Make the view first responder (shows iOS keyboard, also sends
-    //    activation via becomeFirstResponder)
-    WWNCompositorView_ios *v =
-        (WWNCompositorView_ios *)[self->_windows objectForKey:@(windowId)];
-    if (v && [v isKindOfClass:[WWNCompositorView_ios class]]) {
-      [v activateKeyboard];
-    }
-  });
+  double cx = viewFrame.size.width / 2.0;
+  double cy = viewFrame.size.height / 2.0;
+  [self injectPointerEnterForWindow:windowId x:cx y:cy timestamp:0];
+
+  // 4. Flush immediately so events reach the wire NOW, before
+  //    activateKeyboard triggers a UIKit keyboard animation that
+  //    blocks the main queue and prevents _compositorTick from firing.
+  //    Without this, mode_successful feedback is delayed ~2s and
+  //    weston times out waiting for it.
+  [self _dispatchToRust:^{
+    WWNCoreFlushClients(self->_rustCore);
+  }];
+
+  // 5. Make the view first responder (iOS keyboard).
+  [view activateKeyboard];
 }
 
 - (void)handleWindowDestroyed:(CWindowEvent *)event {
@@ -1775,7 +2203,24 @@ extern void WWNWindowInfoFree(CWindowInfo *info);
 }
 
 - (void)handleWindowTitleChanged:(CWindowEvent *)event {
-  // Optional: Update some UI label if we add one to WWNWindow
+  if (!event->title)
+    return;
+  NSString *newTitle = [NSString stringWithUTF8String:event->title];
+  WWNLog("BRIDGE", @"iOS handleWindowTitleChanged: window %llu → '%@'",
+         event->window_id, newTitle);
+
+  // Update the UIWindowScene title so it appears in the app switcher
+  // and iPad Stage Manager.
+  UIWindowScene *scene = nil;
+  for (UIScene *s in [UIApplication sharedApplication].connectedScenes) {
+    if ([s isKindOfClass:[UIWindowScene class]]) {
+      scene = (UIWindowScene *)s;
+      break;
+    }
+  }
+  if (scene) {
+    scene.title = newTitle;
+  }
 }
 
 - (void)handleWindowSizeChanged:(CWindowEvent *)event {

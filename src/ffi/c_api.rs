@@ -178,7 +178,7 @@ pub extern "C" fn WWNCoreInjectWindowResize(
     core.resize_window(WindowId { id: window_id }, width, height);
 }
 
-/// Set window activation state (focus)
+/// Set window activation state (focus) and send a configure event.
 #[no_mangle]
 pub extern "C" fn WWNCoreSetWindowActivated(
     core: *mut WWNCore,
@@ -187,7 +187,30 @@ pub extern "C" fn WWNCoreSetWindowActivated(
 ) {
     if core.is_null() { return; }
     let core = unsafe { &*core };
-    core.set_window_activated(WindowId { id: window_id }, active);
+    core.set_window_activated(WindowId { id: window_id }, active, true);
+}
+
+/// Set window activation state without emitting a configure.
+/// The caller must trigger a configure separately (e.g. via resize).
+#[no_mangle]
+pub extern "C" fn WWNCoreSetWindowActivatedSilent(
+    core: *mut WWNCore,
+    window_id: u64,
+    active: bool
+) {
+    if core.is_null() { return; }
+    let core = unsafe { &*core };
+    core.set_window_activated(WindowId { id: window_id }, active, false);
+}
+
+/// Flush all pending Wayland events to connected clients immediately.
+/// Call after generating events outside of the normal compositor tick
+/// to avoid them sitting in the buffer until the next tick fires.
+#[no_mangle]
+pub extern "C" fn WWNCoreFlushClients(core: *mut WWNCore) {
+    if core.is_null() { return; }
+    let core = unsafe { &*core };
+    core.flush_clients();
 }
 
 /// Free WWNCore instance
@@ -213,6 +236,9 @@ pub enum CWindowEventType {
     MoveRequested = 6,
     ResizeRequested = 7,
     DecorationModeChanged = 8,
+    MinimizeRequested = 9,
+    MaximizeRequested = 10,
+    UnmaximizeRequested = 11,
 }
 
 /// C-compatible window event structure
@@ -231,7 +257,9 @@ pub struct CWindowEvent {
     pub decoration_mode: u8,
     /// 0 = false, 1 = true (fullscreen shell / kiosk - no host chrome)
     pub fullscreen_shell: u8,
-    pub padding: u16,
+    /// Resize edge (xdg_toplevel resize_edge values)
+    pub edges: u8,
+    pub padding: u8,
 }
 
 /// Pop the next pending window event
@@ -256,6 +284,7 @@ pub extern "C" fn WWNCorePopWindowEvent(core: *mut WWNCore) -> *mut CWindowEvent
             y: 0,
             decoration_mode: 0,
             fullscreen_shell: 0,
+            edges: 0,
             padding: 0,
         });
 
@@ -325,8 +354,24 @@ pub extern "C" fn WWNCorePopWindowEvent(core: *mut WWNCore) -> *mut CWindowEvent
                 c_event.window_id = window_id.id;
                 true
             },
-            super::types::WindowEvent::ResizeRequested { window_id, serial: _, edge: _ } => {
+            super::types::WindowEvent::ResizeRequested { window_id, serial: _, edge } => {
                 c_event.event_type = CWindowEventType::ResizeRequested as u64;
+                c_event.window_id = window_id.id;
+                c_event.edges = edge.to_u32() as u8;
+                true
+            },
+            super::types::WindowEvent::MinimizeRequested { window_id } => {
+                c_event.event_type = CWindowEventType::MinimizeRequested as u64;
+                c_event.window_id = window_id.id;
+                true
+            },
+            super::types::WindowEvent::MaximizeRequested { window_id } => {
+                c_event.event_type = CWindowEventType::MaximizeRequested as u64;
+                c_event.window_id = window_id.id;
+                true
+            },
+            super::types::WindowEvent::UnmaximizeRequested { window_id } => {
+                c_event.event_type = CWindowEventType::UnmaximizeRequested as u64;
                 c_event.window_id = window_id.id;
                 true
             },
@@ -479,8 +524,32 @@ pub extern "C" fn WWNCorePopPendingBuffer(core: *mut WWNCore) -> *mut CBufferDat
                 });
                 return Box::into_raw(data);
             },
+            super::types::BufferData::DmaBuf { fd: _, width, height, format, modifier: _ } => {
+                crate::wlog!(crate::util::logging::FFI,
+                    "DMA-BUF buffer popped (buf={} surf={} win={} {}x{} fmt={}): \
+                     rendering unsupported, passing metadata so frame_done/release still fire",
+                    event.buffer.id.id, event.surface_id.id, event.window_id.id,
+                    width, height, format);
+
+                let data = Box::new(CBufferData {
+                    window_id: event.window_id.id,
+                    surface_id: event.surface_id.id,
+                    buffer_id: event.buffer.id.id,
+                    width,
+                    height,
+                    stride: 0,
+                    format,
+                    pixels: std::ptr::null_mut(),
+                    size: 0,
+                    capacity: 0,
+                    iosurface_id: 0,
+                });
+                return Box::into_raw(data);
+            }
             _ => {
-                // Handle DMA-BUF later
+                crate::wlog!(crate::util::logging::FFI,
+                    "Unknown buffer type popped (buf={} surf={} win={}): skipping",
+                    event.buffer.id.id, event.surface_id.id, event.window_id.id);
                 return std::ptr::null_mut();
             }
         }
@@ -923,6 +992,11 @@ pub struct CRenderNode {
     /// Anchor position in output space for subsurface positioning
     pub anchor_output_x: f32,
     pub anchor_output_y: f32,
+    /// Normalized content rect within buffer (0..1). Default: (0,0,1,1).
+    pub content_rect_x: f32,
+    pub content_rect_y: f32,
+    pub content_rect_w: f32,
+    pub content_rect_h: f32,
 }
 
 /// C-compatible RenderScene structure
@@ -985,6 +1059,10 @@ pub extern "C" fn WWNCoreGetRenderScene(core: *mut WWNCore) -> *mut CRenderScene
             iosurface_id,
             anchor_output_x: node.anchor_output_x as f32,
             anchor_output_y: node.anchor_output_y as f32,
+            content_rect_x: node.content_rect.x,
+            content_rect_y: node.content_rect.y,
+            content_rect_w: node.content_rect.w,
+            content_rect_h: node.content_rect.h,
         });
     }
     

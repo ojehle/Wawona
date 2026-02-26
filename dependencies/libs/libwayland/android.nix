@@ -45,10 +45,10 @@ let
 
   # Build wayland-scanner for the build architecture (host)
   # We need a native wayland-scanner to generate headers for the target
-  waylandScanner = pkgs.stdenv.mkDerivation {
+  waylandScanner = buildPackages.stdenv.mkDerivation {
     name = "wayland-scanner-host";
     inherit src;
-    nativeBuildInputs = with pkgs; [
+    nativeBuildInputs = with buildPackages; [
       meson
       ninja
       pkg-config

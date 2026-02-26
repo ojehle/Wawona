@@ -71,6 +71,16 @@ rec {
     hash = "sha256-57XwqlsbDq3GOhxiTAyn9a8TOqhX1qQnGw7z0L22ho4=";
   };
 
+  zlib-src = fetchurl {
+    url = "https://github.com/madler/zlib/releases/download/v1.2.13/zlib-1.2.13.tar.gz";
+    sha256 = "b3a24de97a8fdbc835b9833169501030b8977031bcb54b3b3ac13740f846ab30";
+  };
+
+  libpng-src = fetchurl {
+    url = "https://github.com/pnggroup/libpng/archive/refs/tags/v1.6.50.tar.gz";
+    sha256 = "71158e53cfdf2877bc99bcab33641d78df3f48e6e0daad030afe9cb8c031aa46";
+  };
+
   shaderc-src = fetchFromGitHub {
     owner = "google";
     repo = "shaderc";
@@ -82,7 +92,7 @@ rec {
     mkdir -p external/renderdoc/src
     cp -r ${renderdoc} external/renderdoc/src/renderdoc_app.h
 
-    mkdir -p external/amber external/glslang external/jsoncpp external/spirv-headers external/spirv-tools external/video_generator external/vulkan-docs external/vulkan-validationlayers external/vulkan-video-samples
+    mkdir -p external/amber external/glslang external/jsoncpp external/spirv-headers external/spirv-tools external/video_generator external/vulkan-docs external/vulkan-validationlayers external/vulkan-video-samples external/zlib external/libpng
 
     cp -r ${amber} external/amber/src
     cp -r ${glslang} external/glslang/src
@@ -93,6 +103,16 @@ rec {
     cp -r ${vulkan-docs} external/vulkan-docs/src
     cp -r ${vulkan-validationlayers} external/vulkan-validationlayers/src
     cp -r ${vulkan-video-samples} external/vulkan-video-samples/src
+
+    # zlib and libpng (required for iOS/Android when FindPackage doesn't find system libs)
+    mkdir -p external/zlib external/libpng/src
+    tar -xzf ${zlib-src} -C external/zlib --strip-components=1
+    tar -xzf ${libpng-src} -C external/libpng/src --strip-components=1
+    # zlib 1.2.13 uses cmake_minimum_required(VERSION 2.4.4); modern CMake requires 3.5+
+    sed 's/cmake_minimum_required(VERSION 2.4.4)/cmake_minimum_required(VERSION 3.5)/' external/zlib/CMakeLists.txt > external/zlib/CMakeLists.txt.tmp && mv external/zlib/CMakeLists.txt.tmp external/zlib/CMakeLists.txt
+    if [ -f external/libpng/src/scripts/pnglibconf.h.prebuilt ]; then
+      cp external/libpng/src/scripts/pnglibconf.h.prebuilt external/libpng/src/pnglibconf.h
+    fi
 
     chmod u+w -R external
   '';

@@ -32,6 +32,7 @@
     self.layerContentsPlacement = NSViewLayerContentsPlacementTopLeft;
 
     contentLayer_ = [CALayer layer];
+    contentLayer_.geometryFlipped = YES;
     contentLayer_.contentsGravity = kCAGravityResize;
     contentLayer_.masksToBounds =
         NO; // Allow subsurfaces to extend outside (Wayland spec)
@@ -64,6 +65,7 @@
 - (CALayer *)contentLayer {
   if (!contentLayer_) {
     contentLayer_ = [CALayer layer];
+    contentLayer_.geometryFlipped = YES;
     contentLayer_.contentsGravity = kCAGravityResize;
     contentLayer_.masksToBounds =
         NO; // Allow subsurfaces to extend outside (Wayland spec)
@@ -97,17 +99,14 @@
 }
 
 - (void)updateTrackingAreas {
-  // Clear existing tracking areas
   for (NSTrackingArea *area_to_remove in self.trackingAreas) {
     [self removeTrackingArea:area_to_remove];
   }
 
-  // Create new tracking area for entire bounds
   NSTrackingArea *trackingArea = [[NSTrackingArea alloc]
       initWithRect:self.bounds
            options:NSTrackingMouseEnteredAndExited | NSTrackingMouseMoved |
-                   NSTrackingActiveInKeyWindow | NSTrackingInVisibleRect |
-                   NSTrackingActiveAlways
+                   NSTrackingActiveAlways | NSTrackingInVisibleRect
              owner:self
           userInfo:nil];
 
@@ -116,6 +115,10 @@
 }
 
 - (BOOL)acceptsFirstResponder {
+  return YES;
+}
+
+- (BOOL)acceptsFirstMouse:(NSEvent *)event {
   return YES;
 }
 
@@ -171,6 +174,9 @@
 }
 
 - (void)mouseDown:(NSEvent *)event {
+  if ([self.window isKindOfClass:[WWNWindow class]]) {
+    ((WWNWindow *)self.window).lastMouseDownEvent = event;
+  }
   [[WWNCompositorBridge sharedBridge]
       injectPointerButtonForWindow:[self wwnWindowId]
                             button:0x110 // BTN_LEFT
@@ -179,6 +185,9 @@
 }
 
 - (void)mouseUp:(NSEvent *)event {
+  if ([self.window isKindOfClass:[WWNWindow class]]) {
+    ((WWNWindow *)self.window).lastMouseDownEvent = nil;
+  }
   [[WWNCompositorBridge sharedBridge]
       injectPointerButtonForWindow:[self wwnWindowId]
                             button:0x110 // BTN_LEFT

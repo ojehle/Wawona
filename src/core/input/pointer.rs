@@ -125,10 +125,14 @@ impl PointerState {
         }
     }
 
-    /// Send frame event to all pointer resources
-    pub fn broadcast_frame(&self) {
-        for ptr in &self.resources {
-            ptr.frame();
+    /// Send frame event to focused client's pointer resources
+    pub fn broadcast_frame(&self, focused_client: Option<&wayland_server::Client>) {
+        if let Some(focused) = focused_client {
+            for ptr in &self.resources {
+                if ptr.client().as_ref() == Some(focused) {
+                    ptr.frame();
+                }
+            }
         }
     }
 

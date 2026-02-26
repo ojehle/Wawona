@@ -7,55 +7,69 @@
 #if TARGET_OS_IPHONE || TARGET_OS_SIMULATOR
 // iOS: Full implementation
 @interface WWNAboutPanel ()
-@property(nonatomic, strong) UIImageView *logoImageView;
 @end
 
-static UIImage *WWNAboutLogoForStyle(UIUserInterfaceStyle style) {
-  NSArray<NSString *> *preferredNames = nil;
-  NSArray<NSString *> *fallbackNames = nil;
-
-  if (style == UIUserInterfaceStyleDark) {
-    preferredNames = @[
-      @"Wawona-iOS-Light-1024x1024@1x.png", @"Wawona-iOS-Light-1024x1024@1x",
-      @"Wawona-iOS-Light-1024x1024", @"Wawona-iOS-Light"
-    ];
-    fallbackNames = @[
-      @"Wawona-iOS-Dark-1024x1024@1x.png", @"Wawona-iOS-Dark-1024x1024@1x",
-      @"Wawona-iOS-Dark-1024x1024", @"Wawona-iOS-Dark"
-    ];
-  } else {
-    preferredNames = @[
-      @"Wawona-iOS-Dark-1024x1024@1x.png", @"Wawona-iOS-Dark-1024x1024@1x",
-      @"Wawona-iOS-Dark-1024x1024", @"Wawona-iOS-Dark"
-    ];
-    fallbackNames = @[
-      @"Wawona-iOS-Light-1024x1024@1x.png", @"Wawona-iOS-Light-1024x1024@1x",
-      @"Wawona-iOS-Light-1024x1024", @"Wawona-iOS-Light"
-    ];
-  }
-
+/// Load the About-header logo using the same cascading strategy as macOS:
+/// try the dark logo by exact filename, then pathForResource, then direct
+/// bundle path, then generic/light fallbacks.  No style switching — the
+/// dark logo is used unconditionally, matching the macOS About panel.
+static UIImage *WWNAboutLogo(void) {
   NSBundle *bundle = [NSBundle mainBundle];
-  NSArray<NSString *> *allNames =
-      [preferredNames arrayByAddingObjectsFromArray:fallbackNames];
-  for (NSString *name in allNames) {
-    UIImage *img = [UIImage imageNamed:name];
-    if (img) {
-      return img;
-    }
+  NSFileManager *fm = [NSFileManager defaultManager];
+  UIImage *img = nil;
 
-    NSString *base = [name stringByDeletingPathExtension];
-    NSString *ext = [name pathExtension];
-    if (ext.length == 0) {
-      ext = @"png";
-    }
-    NSString *path = [bundle pathForResource:base ofType:ext];
-    if (path.length > 0) {
-      img = [UIImage imageWithContentsOfFile:path];
-      if (img) {
-        return img;
-      }
-    }
+  // 1. imageNamed (works if the file is in an asset catalog)
+  img = [UIImage imageNamed:@"Wawona-iOS-Dark-1024x1024@1x.png"];
+  if (img) return img;
+
+  // 2. pathForResource (base + extension separated)
+  NSString *path =
+      [bundle pathForResource:@"Wawona-iOS-Dark-1024x1024@1x" ofType:@"png"];
+  if (path) {
+    img = [UIImage imageWithContentsOfFile:path];
+    if (img) return img;
   }
+
+  // 3. Without the @1x scale suffix (ios.nix installs an unsuffixed copy)
+  path = [bundle pathForResource:@"Wawona-iOS-Dark-1024x1024" ofType:@"png"];
+  if (path) {
+    img = [UIImage imageWithContentsOfFile:path];
+    if (img) return img;
+  }
+
+  // 4. Direct bundle-path with the original @1x filename — bypasses iOS
+  //    pathForResource:ofType: which treats @1x as a scale modifier and
+  //    refuses to return it on 2x/3x devices.
+  NSString *bundleRoot = [bundle bundlePath];
+  NSString *direct =
+      [bundleRoot stringByAppendingPathComponent:
+                      @"Wawona-iOS-Dark-1024x1024@1x.png"];
+  if ([fm fileExistsAtPath:direct]) {
+    img = [UIImage imageWithContentsOfFile:direct];
+    if (img) return img;
+  }
+
+  // 5. Direct bundle-path without scale suffix
+  direct = [bundleRoot stringByAppendingPathComponent:
+                           @"Wawona-iOS-Dark-1024x1024.png"];
+  if ([fm fileExistsAtPath:direct]) {
+    img = [UIImage imageWithContentsOfFile:direct];
+    if (img) return img;
+  }
+
+  // 6. Generic "Wawona" name
+  img = [UIImage imageNamed:@"Wawona"];
+  if (img) return img;
+
+  path = [bundle pathForResource:@"Wawona" ofType:@"png"];
+  if (path) {
+    img = [UIImage imageWithContentsOfFile:path];
+    if (img) return img;
+  }
+
+  // 7. Light variant as last resort
+  img = [UIImage imageNamed:@"Wawona-iOS-Light-1024x1024@1x.png"];
+  if (img) return img;
 
   return nil;
 }
@@ -95,12 +109,10 @@ static UIImage *WWNAboutLogoForStyle(UIUserInterfaceStyle style) {
   contentStack.alignment = UIStackViewAlignmentCenter;
   [scrollView addSubview:contentStack];
 
-  // App Logo
-  UIImageView *logoView = [[UIImageView alloc]
-      initWithImage:WWNAboutLogoForStyle(
-                        self.traitCollection.userInterfaceStyle)];
+  // App Logo (same approach as macOS: always use the dark logo)
+  UIImageView *logoView =
+      [[UIImageView alloc] initWithImage:WWNAboutLogo()];
   logoView.contentMode = UIViewContentModeScaleAspectFit;
-  self.logoImageView = logoView;
   [contentStack addArrangedSubview:logoView];
 
   [NSLayoutConstraint activateConstraints:@[
@@ -225,20 +237,6 @@ static UIImage *WWNAboutLogoForStyle(UIUserInterfaceStyle style) {
       initWithBarButtonSystemItem:UIBarButtonSystemItemDone
                            target:self
                            action:@selector(dismissAbout:)];
-
-  // Modern trait change observation (replaces deprecated
-  // traitCollectionDidChange:)
-  __weak typeof(self) weakSelf = self;
-  [self registerForTraitChanges:@[ [UITraitUserInterfaceStyle class] ]
-                    withHandler:^(
-                        id<UITraitEnvironment> _Nonnull traitEnvironment,
-                        UITraitCollection *_Nonnull previousCollection) {
-                      __strong typeof(weakSelf) strongSelf = weakSelf;
-                      if (!strongSelf)
-                        return;
-                      strongSelf.logoImageView.image = WWNAboutLogoForStyle(
-                          strongSelf.traitCollection.userInterfaceStyle);
-                    }];
 }
 
 - (void)addSocialButton:(NSString *)title
@@ -392,10 +390,25 @@ static UIImage *WWNAboutLogoForStyle(UIUserInterfaceStyle style) {
   logoView.imageScaling = NSImageScaleProportionallyUpOrDown;
   logoView.translatesAutoresizingMaskIntoConstraints = NO;
 
-  // Load adaptive icon (macOS 26+) or fallback to PNG
-  NSImage *logo = [NSImage imageNamed:@"Wawona"];
+  // Prefer the dark variant for About branding.
+  NSImage *logo = [NSImage imageNamed:@"Wawona-iOS-Dark-1024x1024@1x.png"];
   if (!logo) {
-    logo = [NSImage imageNamed:@"Wawona-iOS-Dark-1024x1024@1x.png"];
+    NSString *darkPath = [[NSBundle mainBundle]
+        pathForResource:@"Wawona-iOS-Dark-1024x1024@1x"
+                 ofType:@"png"];
+    if (darkPath) {
+      logo = [[NSImage alloc] initWithContentsOfFile:darkPath];
+    }
+  }
+  if (!logo) {
+    logo = [NSImage imageNamed:@"Wawona"];
+  }
+  if (!logo) {
+    NSString *pngPath =
+        [[NSBundle mainBundle] pathForResource:@"Wawona" ofType:@"png"];
+    if (pngPath) {
+      logo = [[NSImage alloc] initWithContentsOfFile:pngPath];
+    }
   }
   if (!logo) {
     logo = [NSImage imageNamed:@"Wawona-iOS-Light-1024x1024@1x.png"];

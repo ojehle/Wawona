@@ -89,15 +89,8 @@ impl Dispatch<wl_surface::WlSurface, u32> for CompositorState {
                                 .filter(|o| o.client() == client_id)
                                 .cloned()
                                 .collect();
-                                
-                            if client_outputs.is_empty() {
-                                let all_outputs: Vec<_> = state.output_resources.values()
-                                    .map(|o| format!("{:?} (client={:?})", o.id(), o.client().as_ref().map(|c| c.id())))
-                                    .collect();
-                                crate::wlog!(crate::util::logging::COMPOSITOR, 
-                                    "WARNING: No outputs bound for client {:?}. All bound outputs: {:?}", 
-                                    client_id.as_ref().map(|c| c.id()), all_outputs);
-                            } else {
+
+                            if !client_outputs.is_empty() {
                                 let count = client_outputs.len();
                                 for output in client_outputs {
                                     resource.enter(&output);

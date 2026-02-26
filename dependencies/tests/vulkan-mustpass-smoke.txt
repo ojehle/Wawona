@@ -1,0 +1,12 @@
+# Vulkan CTS smoke subset - fast must-pass tests for driver validation
+# Run with: deqp-vk --deqp-caselist-file=... --deqp-archive-dir=...
+dEQP-VK.api.smoke.triangle
+dEQP-VK.api.smoke.compute
+dEQP-VK.api.info.physical_device
+dEQP-VK.api.info.instance
+dEQP-VK.memory.alloc_info.basic
+dEQP-VK.binding_model.shader_access.primary_cmd_buf
+dEQP-VK.pipeline.simple.triangle
+dEQP-VK.wsi.display.create_surface
+dEQP-VK.glsl.builtin.precision.common_fma.mediump_float_vertex
+dEQP-VK.glsl.builtin.precision.common_fma.mediump_float_fragment

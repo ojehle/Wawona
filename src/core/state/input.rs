@@ -288,55 +288,130 @@ impl CompositorState {
     /// Flush pending pointer events (send frame event)
     pub fn flush_pointer_events(&mut self) {
         self.seat.cleanup_resources();
-        for pointer in &self.seat.pointer.resources {
-            pointer.frame();
-        }
+        let client = self.focused_pointer_client();
+        self.seat.broadcast_pointer_frame(client.as_ref());
     }
 
-    /// Inject touch down event
+    /// Look up a surface's absolute position in the scene graph.
+    fn surface_position_in_scene(&mut self, surface_id: u32) -> Option<(i32, i32, f32)> {
+        self.build_scene();
+        let flattened = self.scene.flatten();
+        for node in &flattened {
+            if node.surface_id == surface_id {
+                return Some((node.x, node.y, node.scale));
+            }
+        }
+        None
+    }
+
+    /// Inject touch down event.
+    /// Performs surface hit-testing at (x, y) to find the target surface,
+    /// records the touch point, sets keyboard focus, and sends wl_touch.down.
     pub fn inject_touch_down(&mut self, id: i32, x: f64, y: f64, time: u32) {
         self.ext.idle_notify.record_activity();
-        let serial = self.next_serial();
         self.seat.cleanup_resources();
-        
-        let _client = self.focused_pointer_client();
-        if let Some(sid) = self.seat.pointer.focus {
-            if let Some(surf) = self.surfaces.get(&sid) {
-                let surf = surf.read().unwrap();
-                if let Some(res) = &surf.resource {
-                    self.seat.broadcast_touch_down(serial, time, res, id, x, y);
+
+        let picking = self.find_surface_at(x, y);
+        if let Some((surface_id, local_x, local_y)) = picking {
+            self.seat.touch.touch_down(id, surface_id, local_x, local_y);
+
+            if let Some(&window_id) = self.surface_to_window.get(&surface_id) {
+                self.set_focused_window(Some(window_id));
+                self.window_tree.bring_to_front(window_id);
+            }
+
+            let serial = self.next_serial();
+            if let Some(surface) = self.surfaces.get(&surface_id).cloned() {
+                let surface = surface.read().unwrap();
+                if let Some(res) = &surface.resource {
+                    self.seat.broadcast_touch_down(serial, time, res, id, local_x, local_y);
+                    let client = res.client();
+                    self.seat.broadcast_touch_frame(client.as_ref());
                 }
             }
         }
     }
 
-    /// Inject touch up event
+    /// Inject touch up event.
+    /// Looks up the target surface from the active touch state (not pointer focus).
     pub fn inject_touch_up(&mut self, id: i32, time: u32) {
+        self.seat.cleanup_resources();
+
+        let client = self.seat.touch.get_touch_surface(id).and_then(|sid| {
+            self.surfaces.get(&sid).and_then(|surf| {
+                surf.read().unwrap().resource.as_ref().and_then(|r| r.client())
+            })
+        });
+
         let serial = self.next_serial();
-        self.seat.cleanup_resources();
-        let client = self.focused_pointer_client();
         self.seat.broadcast_touch_up(serial, time, id, client.as_ref());
-    }
-
-    /// Inject touch motion event
-    pub fn inject_touch_motion(&mut self, id: i32, x: f64, y: f64, time: u32) {
-        self.seat.cleanup_resources();
-        let client = self.focused_pointer_client();
-        self.seat.broadcast_touch_motion(time, id, x, y, client.as_ref());
-    }
-
-    /// Inject touch frame event
-    pub fn inject_touch_frame(&mut self) {
-        self.seat.cleanup_resources();
-        let client = self.focused_pointer_client();
+        self.seat.touch.touch_up(id);
         self.seat.broadcast_touch_frame(client.as_ref());
     }
 
-    /// Inject touch cancel event
+    /// Inject touch motion event.
+    /// Computes surface-local coordinates from the scene graph for the
+    /// surface that originally received the touch-down.
+    pub fn inject_touch_motion(&mut self, id: i32, x: f64, y: f64, time: u32) {
+        self.seat.cleanup_resources();
+
+        let surface_id = self.seat.touch.get_touch_surface(id);
+        if let Some(sid) = surface_id {
+            let pos = self.surface_position_in_scene(sid);
+            if let Some((sx, sy, scale)) = pos {
+                let local_x = (x - sx as f64) / scale as f64;
+                let local_y = (y - sy as f64) / scale as f64;
+
+                self.seat.touch.touch_motion(id, local_x, local_y);
+
+                let client = self.surfaces.get(&sid).and_then(|surf| {
+                    surf.read().unwrap().resource.as_ref().and_then(|r| r.client())
+                });
+                self.seat.broadcast_touch_motion(time, id, local_x, local_y, client.as_ref());
+                self.seat.broadcast_touch_frame(client.as_ref());
+            }
+        }
+    }
+
+    /// Inject touch frame event.
+    /// Sends frame to all clients that have active touch points.
+    pub fn inject_touch_frame(&mut self) {
+        self.seat.cleanup_resources();
+        let surface_ids: Vec<u32> = self.seat.touch.active_points.values()
+            .map(|p| p.surface_id)
+            .collect();
+        let mut seen = std::collections::HashSet::new();
+        for sid in surface_ids {
+            let client = self.surfaces.get(&sid).and_then(|surf| {
+                surf.read().unwrap().resource.as_ref().and_then(|r| r.client())
+            });
+            if let Some(ref c) = client {
+                if seen.insert(c.id()) {
+                    self.seat.broadcast_touch_frame(client.as_ref());
+                }
+            }
+        }
+    }
+
+    /// Inject touch cancel event.
+    /// Sends cancel to all clients with active touch points, then clears state.
     pub fn inject_touch_cancel(&mut self) {
         self.seat.cleanup_resources();
-        let client = self.focused_pointer_client();
-        self.seat.broadcast_touch_cancel(client.as_ref());
+        let surface_ids: Vec<u32> = self.seat.touch.active_points.values()
+            .map(|p| p.surface_id)
+            .collect();
+        let mut seen = std::collections::HashSet::new();
+        for sid in &surface_ids {
+            let client = self.surfaces.get(sid).and_then(|surf| {
+                surf.read().unwrap().resource.as_ref().and_then(|r| r.client())
+            });
+            if let Some(ref c) = client {
+                if seen.insert(c.id()) {
+                    self.seat.broadcast_touch_cancel(client.as_ref());
+                }
+            }
+        }
+        self.seat.touch.touch_cancel();
     }
 
     // =========================================================================

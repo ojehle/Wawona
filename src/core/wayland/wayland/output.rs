@@ -48,11 +48,34 @@ impl GlobalDispatch<WlOutput, OutputGlobal> for CompositorState {
         if let Some(output_state) = state.outputs.iter().find(|o| o.id == global_data.output_id) {
             send_output_info(&output, output_state);
         } else {
-            // Fallback to primary output or logging error
             crate::wlog!(crate::util::logging::COMPOSITOR, "ERROR: OutputGlobal ID {} not found in state!", global_data.output_id);
             if let Some(primary) = state.outputs.first() {
                 send_output_info(&output, primary);
             }
+        }
+
+        // Retroactively send wl_surface.enter for any existing surfaces owned
+        // by this client.  Without this, surfaces attached before the client
+        // binds wl_output never receive an enter event, which violates the
+        // protocol expectation that surfaces know their output.
+        let bind_client_id = _client.id();
+        let surfaces_for_client: Vec<_> = state.surfaces.values()
+            .filter_map(|s| {
+                let s = s.read().unwrap();
+                if s.client_id.as_ref() == Some(&bind_client_id) {
+                    s.resource.clone()
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for surf_res in &surfaces_for_client {
+            surf_res.enter(&output);
+        }
+        if !surfaces_for_client.is_empty() {
+            crate::wlog!(crate::util::logging::COMPOSITOR,
+                "Retroactively sent wl_surface.enter to {} surfaces for client {:?}",
+                surfaces_for_client.len(), client_id);
         }
     }
 }
@@ -97,18 +120,15 @@ fn send_output_info(output: &WlOutput, state: &OutputState) {
         Transform::Normal,
     );
     
-    crate::wlog!(crate::util::logging::COMPOSITOR, "Sending wl_output.mode: {}x{} (Current | Preferred)", state.width, state.height);
-    // Send modes separately for maximum compatibility
+    // wl_output.mode reports physical pixel dimensions.
+    // OutputState.width/height are logical (points/dp), so multiply by scale.
+    let phys_w = (state.width as f32 * state.scale) as i32;
+    let phys_h = (state.height as f32 * state.scale) as i32;
+    crate::wlog!(crate::util::logging::COMPOSITOR, "Sending wl_output.mode: {}x{} (Current | Preferred)", phys_w, phys_h);
     output.mode(
-        wl_output::Mode::Preferred,
-        state.width as i32,
-        state.height as i32,
-        state.refresh as i32,
-    );
-    output.mode(
-        wl_output::Mode::Current,
-        state.width as i32,
-        state.height as i32,
+        wl_output::Mode::Current | wl_output::Mode::Preferred,
+        phys_w,
+        phys_h,
         state.refresh as i32,
     );
     
@@ -129,8 +149,8 @@ fn send_output_info(output: &WlOutput, state: &OutputState) {
     }
     
     crate::wlog!(crate::util::logging::COMPOSITOR,
-        "Sent output info: {} {}x{} ({}x{}mm) @ {}mHz, scale {}, version {}",
-        state.name, state.width, state.height, state.physical_width, state.physical_height, state.refresh, state.scale, output.version()
+        "Sent output info: {} {}x{} logical ({}x{} physical px, {}x{}mm) @ {}mHz, scale {}, version {}",
+        state.name, state.width, state.height, phys_w, phys_h, state.physical_width, state.physical_height, state.refresh, state.scale, output.version()
     );
 }
 
@@ -163,4 +183,42 @@ pub fn notify_output_change(state: &CompositorState, output_id: u32) {
 
     // Also notify xdg_output resources
     crate::core::wayland::xdg::xdg_output::notify_xdg_output_change(state);
+}
+
+/// Notify only a single client's bound output resources of a configuration change.
+///
+/// Used when a per-window resize should only inform the owning client about
+/// the output mode change, not all connected clients.
+pub fn notify_output_change_for_client(
+    state: &CompositorState,
+    output_id: u32,
+    client_id: &wayland_server::backend::ClientId,
+) {
+    let output_state = match state.outputs.iter().find(|o| o.id == output_id) {
+        Some(o) => o,
+        None => {
+            tracing::warn!("notify_output_change_for_client: output {} not found", output_id);
+            return;
+        }
+    };
+
+    let mut notified = 0;
+    for (_obj_id, output_res) in &state.output_resources {
+        if !output_res.is_alive() {
+            continue;
+        }
+        if let Some(client) = output_res.client() {
+            if client.id() == *client_id {
+                send_output_info(output_res, output_state);
+                notified += 1;
+            }
+        }
+    }
+
+    tracing::debug!(
+        "Notified {} output resources for client {:?} of output {} change ({}x{})",
+        notified, client_id, output_id, output_state.width, output_state.height
+    );
+
+    crate::core::wayland::xdg::xdg_output::notify_xdg_output_change_for_client(state, client_id);
 }

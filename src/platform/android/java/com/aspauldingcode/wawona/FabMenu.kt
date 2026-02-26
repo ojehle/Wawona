@@ -46,7 +46,8 @@ fun ExpressiveFabMenu(
     isWaypipeRunning: Boolean,
     onSettingsClick: () -> Unit,
     onRunWaypipeClick: () -> Unit,
-    onStopWaypipeClick: () -> Unit
+    onStopWaypipeClick: () -> Unit,
+    onMenuClosed: () -> Unit = {}
 ) {
     var expanded by remember { mutableStateOf(false) }
 
@@ -102,6 +103,7 @@ fun ExpressiveFabMenu(
                     onClick = {
                         onSettingsClick()
                         expanded = false
+                        onMenuClosed()
                     }
                 )
                 if (isWaypipeRunning) {
@@ -111,6 +113,7 @@ fun ExpressiveFabMenu(
                         onClick = {
                             onStopWaypipeClick()
                             expanded = false
+                            onMenuClosed()
                         }
                     )
                 } else {
@@ -120,6 +123,7 @@ fun ExpressiveFabMenu(
                         onClick = {
                             onRunWaypipeClick()
                             expanded = false
+                            onMenuClosed()
                         }
                     )
                 }
@@ -127,7 +131,10 @@ fun ExpressiveFabMenu(
         }
 
         LargeFloatingActionButton(
-            onClick = { expanded = !expanded },
+            onClick = {
+                if (expanded) onMenuClosed()
+                expanded = !expanded
+            },
             containerColor = if (expanded)
                 MaterialTheme.colorScheme.primaryContainer
             else

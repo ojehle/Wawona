@@ -53,6 +53,9 @@ pub struct WawonaCore {
     
     /// Force server-side decorations
     force_ssd: RwLock<bool>,
+
+    /// Whether to advertise zwp_fullscreen_shell_v1
+    advertise_fullscreen_shell: RwLock<bool>,
     
     /// FFI window info cache
     ffi_windows: RwLock<HashMap<u64, WindowInfo>>,
@@ -85,6 +88,24 @@ pub struct WawonaCore {
     ipc_server: Mutex<Option<crate::core::ipc::IpcServer>>,
 }
 
+/// Translate platform view-local coordinates to surface-local coordinates
+/// by adding the CSD geometry offset stored on the window.
+fn apply_geometry_offset(
+    state: &CompositorState,
+    window_id: WindowId,
+    x: f64,
+    y: f64,
+) -> (f64, f64) {
+    let wid = window_id.id as u32;
+    if let Some(window_ref) = state.get_window(wid) {
+        let w = window_ref.read().unwrap();
+        if w.geometry_x != 0 || w.geometry_y != 0 {
+            return (x + w.geometry_x as f64, y + w.geometry_y as f64);
+        }
+    }
+    (x, y)
+}
+
 #[uniffi::export]
 impl WawonaCore {
     // =========================================================================
@@ -102,6 +123,7 @@ impl WawonaCore {
             state: Arc::new(RwLock::new(CompositorState::new(None))), // Default for now, updated in start()
             output_size: RwLock::new((1920, 1080, 1.0)),
             force_ssd: RwLock::new(false),
+            advertise_fullscreen_shell: RwLock::new(false),
             ffi_windows: RwLock::new(HashMap::new()),
             ffi_surfaces: RwLock::new(HashMap::new()),
             ffi_clients: RwLock::new(HashMap::new()),
@@ -141,6 +163,7 @@ impl WawonaCore {
             output_scale: scale,
             keyboard_repeat_rate: repeat_rate,
             keyboard_repeat_delay: repeat_delay,
+            advertise_fullscreen_shell: *self.advertise_fullscreen_shell.read().unwrap(),
         };
         
         // Create and start the compositor
@@ -150,12 +173,11 @@ impl WawonaCore {
         // Synchronize output configuration into state
         let mut state = self.state.write().unwrap();
         state.update_primary_output(width, height, scale);
-        
-        // Synchronize Force SSD policy
+        state.advertise_fullscreen_shell = config.advertise_fullscreen_shell;
         state.decoration_policy = if config.force_ssd {
             crate::core::state::DecorationPolicy::ForceServer
         } else {
-            crate::core::state::DecorationPolicy::PreferClient
+            crate::core::state::DecorationPolicy::default()
         };
         
         compositor.start(&mut state)
@@ -246,9 +268,25 @@ impl WawonaCore {
                 },
             );
 
-            // Trigger reconfiguration
-            state.reconfigure_window_decorations(window_id);
+            // Do NOT call reconfigure_window_decorations here.
+            //
+            // Calling it now would immediately send an xdg_toplevel.configure
+            // with window.width/height, which is still the PRE-decoration size.
+            // The platform will fire handleDecorationModeChanged:, which now
+            // injects a resize via injectWindowResize after setStyleMask: runs.
+            // That resize flows through resize_window → send_toplevel_configure
+            // with the correct post-titlebar content-area size.
+
         }
+    }
+
+    /// Set whether to advertise zwp_fullscreen_shell_v1
+    pub fn set_advertise_fullscreen_shell(&self, enabled: bool) {
+        crate::wlog!(crate::util::logging::FFI, "FFI: set_advertise_fullscreen_shell({})", enabled);
+        *self.advertise_fullscreen_shell.write().unwrap() = enabled;
+        
+        let mut state = self.state.write().unwrap();
+        state.advertise_fullscreen_shell = enabled;
     }
     
     /// Stop the compositor
@@ -444,14 +482,27 @@ impl WawonaCore {
             }
         }; // state lock released here
         
+        // Flush client queues so deferred events (e.g. mode_successful from
+        // fullscreen shell) reach the wire immediately rather than waiting for
+        // the next poll cycle.  Without this, nested compositors like weston
+        // time out waiting for the mode feedback and exit.
+        let _ = compositor.flush();
+
         // Drop the other locks too before handling events
         drop(runtime);
         drop(compositor_guard);
         
-        // Handle events without holding any locks
+        let event_count = events.len();
         for event in events {
             self.handle_compositor_event(event);
         }
+
+        self.flush_clients();
+
+        if event_count > 0 {
+            crate::wlog!(crate::util::logging::FFI, "ProcessEvents: handled {} events", event_count);
+        }
+
         true
     }
     
@@ -472,7 +523,10 @@ impl WawonaCore {
             let mut state = self.state.write().unwrap();
             
             match runtime.dispatch(compositor, &mut state, timeout) {
-                Ok(events) => events,
+                Ok(events) => {
+                    state.ext.fullscreen_shell.flush_pending_mode_feedbacks();
+                    events
+                }
                 Err(e) => {
                     crate::wlog!(crate::util::logging::FFI, "Event dispatch error: {}", e);
                     return false;
@@ -480,6 +534,9 @@ impl WawonaCore {
             }
         }; // state lock released here
         
+        // Flush so deferred events reach the wire immediately
+        let _ = compositor.flush();
+
         // Drop other locks before handling events
         drop(runtime);
         drop(compositor_guard);
@@ -488,6 +545,10 @@ impl WawonaCore {
         for event in events {
             self.handle_compositor_event(event);
         }
+
+        // Flush protocol events generated by event handlers (frame_done, etc.)
+        self.flush_clients();
+
         true
     }
     
@@ -561,6 +622,21 @@ impl WawonaCore {
                 if minimized {
                     self.pending_window_events.write().unwrap().push(
                         WindowEvent::MinimizeRequested { 
+                            window_id: WindowId { id: window_id as u64 } 
+                        }
+                    );
+                }
+            }
+            CompositorEvent::WindowMaximized { window_id, maximized } => {
+                if maximized {
+                    self.pending_window_events.write().unwrap().push(
+                        WindowEvent::MaximizeRequested { 
+                            window_id: WindowId { id: window_id as u64 } 
+                        }
+                    );
+                } else {
+                    self.pending_window_events.write().unwrap().push(
+                        WindowEvent::UnmaximizeRequested { 
                             window_id: WindowId { id: window_id as u64 } 
                         }
                     );
@@ -940,7 +1016,12 @@ impl WawonaCore {
                         }
                     }
                     
+                    let has_frame_cbs = state.frame_callbacks.contains_key(&surface_id);
                     state.flush_frame_callbacks(surface_id, Some(crate::core::state::CompositorState::get_timestamp_ms()));
+
+                    crate::wlog!(crate::util::logging::FFI,
+                        "SurfaceCommitted: surf={} buf={} frame_cbs={}",
+                        surface_id, buffer_id, has_frame_cbs);
                 }
             }
             CompositorEvent::LayerSurfaceCommitted { client_id, surface_id, buffer_id } => {
@@ -1074,9 +1155,12 @@ impl WawonaCore {
                 }
 
                 // Always flush frame callbacks so the client can keep rendering
-                let mut state = self.state.write().unwrap();
-                state.ext.fullscreen_shell.flush_pending_mode_feedbacks();
-                state.flush_frame_callbacks(surface_id, Some(crate::core::state::CompositorState::get_timestamp_ms()));
+                {
+                    let mut state = self.state.write().unwrap();
+                    state.ext.fullscreen_shell.flush_pending_mode_feedbacks();
+                    state.flush_frame_callbacks(surface_id, Some(crate::core::state::CompositorState::get_timestamp_ms()));
+                }
+                self.flush_clients();
             }
             CompositorEvent::WindowMoveRequested { window_id, seat_id: _, serial } => {
                 self.pending_window_events.write().unwrap().push(
@@ -1108,6 +1192,51 @@ impl WawonaCore {
                     WindowEvent::SystemBell { surface_id }
                 );
             }
+        }
+    }
+}
+
+/// Ensure pointer focus matches the window the platform says events are
+/// coming from.  If the current `seat.pointer.focus` points to a different
+/// surface, sends leave/enter events to update it.  This makes focus
+/// tracking robust against missed `mouseEntered:` / `mouseExited:`
+/// callbacks on macOS.
+fn ensure_pointer_focus(
+    state: &mut crate::core::state::CompositorState,
+    window_id: WindowId,
+    serial_fn: &dyn Fn() -> u32,
+) {
+    let target_sid = state.surface_to_window.iter()
+        .find(|(_, &wid)| wid as u64 == window_id.id)
+        .map(|(sid, _)| *sid);
+
+    let target_sid = match target_sid {
+        Some(sid) => sid,
+        None => return,
+    };
+
+    if state.seat.pointer.focus == Some(target_sid) {
+        return;
+    }
+
+    if let Some(old_sid) = state.seat.pointer.focus {
+        if let Some(surface) = state.surfaces.get(&old_sid).cloned() {
+            let surface = surface.read().unwrap();
+            if let Some(res) = &surface.resource {
+                let serial = serial_fn();
+                state.seat.broadcast_pointer_leave(serial, res);
+            }
+        }
+    }
+
+    state.seat.pointer.focus = Some(target_sid);
+    if let Some(surface) = state.surfaces.get(&target_sid).cloned() {
+        let surface = surface.read().unwrap();
+        if let Some(res) = &surface.resource {
+            let serial = serial_fn();
+            let x = state.seat.pointer.x;
+            let y = state.seat.pointer.y;
+            state.seat.broadcast_pointer_enter(serial, res, x, y);
         }
     }
 }
@@ -1203,18 +1332,38 @@ impl WawonaCore {
     pub fn notify_frame_presented(&self, surface_id: SurfaceId, buffer_id: Option<BufferId>, timestamp: u32) {
         let mut state = self.state.write().unwrap();
         
-        // Find client ID for this surface to attribute buffer release
         let client_id = state.surfaces.get(&surface_id.id)
             .and_then(|s| s.read().unwrap().client_id.clone());
+
+        let has_callbacks = state.frame_callbacks.contains_key(&surface_id.id);
+        let pending_releases = state.pending_buffer_releases.len();
             
-        // Flush frame callbacks for this surface
         state.flush_frame_callbacks(surface_id.id, Some(timestamp));
-            
-        // Release buffer if provided and client is known
+
+        let timestamp_ns = (timestamp as u64) * 1_000_000;
+        let refresh_ns: u64 = 1_000_000_000 / 60;
+        let seq = state.ext.presentation.next_seq;
+        state.ext.presentation.next_seq += 1;
+        state.ext.presentation.send_presented_events(timestamp_ns, refresh_ns, seq);
+
+        // Flush queued buffer releases from handle_surface_commit. This is the
+        // correct time: the frame has been rendered and the old buffer's texture
+        // is no longer needed.  Doing this in SurfaceCommitted (before
+        // rendering) caused the client to destroy buffers before the compositor
+        // cached them, leading to visual flashing.
+        state.flush_buffer_releases();
+
         if let Some(buf_id) = buffer_id {
             if let Some(cid) = client_id {
                 let buffer_id_u32 = buf_id.id as u32;
                 state.release_buffer(cid, buffer_id_u32);
+                crate::wlog!(crate::util::logging::FFI,
+                    "FramePresented: surf={} buf={} released=true callbacks_flushed={} pending_releases_before={}",
+                    surface_id.id, buf_id.id, has_callbacks, pending_releases);
+            } else {
+                crate::wlog!(crate::util::logging::FFI,
+                    "FramePresented: surf={} buf={} — no client_id, buffer NOT released",
+                    surface_id.id, buf_id.id);
             }
         }
     }
@@ -1238,87 +1387,90 @@ impl WawonaCore {
     // Window Management
     // =========================================================================
 
-    /// Resize a window
+    /// Resize a window.
+    ///
+    /// Always updates the global wl_output mode so nested compositors
+    /// (e.g. Weston) see a consistent display size, then reconfigures
+    /// only the toplevels belonging to the owning client.
     pub fn resize_window(&self, window_id: WindowId, width: u32, height: u32) {
         if !self.is_running() {
             return;
         }
 
-        let mut state = self.state.write().unwrap();
         let wid = window_id.id as u32;
 
-        // Update core window state
-        if let Some(window) = state.get_window(wid) {
-             let mut window = window.write().unwrap();
-             window.width = width as i32;
-             window.height = height as i32;
+        // Update core window dimensions.
+        {
+            let state = self.state.write().unwrap();
+            if let Some(window) = state.get_window(wid) {
+                let mut window = window.write().unwrap();
+                window.width = width as i32;
+                window.height = height as i32;
+            }
         }
 
-        // Find associated surface
-        let surface_id = state.surface_to_window.iter()
-            .find(|(_, &w)| w == wid)
-            .map(|(s, _)| s.clone());
+        // Find the specific toplevel associated with this window.
+        // Each window maps to exactly one toplevel — we must NOT
+        // reconfigure other toplevels even if they belong to the
+        // same client.
+        let target_toplevel: Option<(wayland_server::backend::ClientId, u32)> = {
+            let state = self.state.read().unwrap();
+            state.xdg.toplevels.iter()
+                .find(|(_, data)| data.window_id == wid)
+                .map(|(key, _)| key.clone())
+        };
 
-        if let Some(sid) = surface_id {
-             // Find toplevel data
-             let toplevel_id = state.xdg.toplevels.iter()
-                 .find(|(_, data)| data.surface_id == sid)
-                 .map(|(id, _)| id.clone());
+        // Do NOT change the global output size here *for xdg_toplevels*.  The output
+        // represents the physical display (set by setOutputWidth:
+        // height:scale: on the platform side).  Changing it per-
+        // window would broadcast wl_output.mode to all clients and
+        // cause unrelated windows to resize in sympathy.  The
+        // toplevel configure below carries the correct per-window
+        // dimensions to the target client.
+        // 
+        // HOWEVER: fullscreen_shell surfaces do not receive xdg_toplevel.configure
+        // events. Their only way to know their sizing is via global wl_output mode.
+        // If a fullscreen_shell surface is resized (e.g. nested compositor running
+        // in a Force SSD window), we MUST update the global output mode so it
+        // readjusts its virtual display bounds.
+        let mut is_fullscreen_shell = false;
+        if target_toplevel.is_none() {
+            let state = self.state.read().unwrap();
+            is_fullscreen_shell = state.ext.fullscreen_shell.presented_window_id == Some(wid);
+        }
+
+        if let Some(tid) = target_toplevel {
+            crate::wlog!(crate::util::logging::FFI,
+                "Window resize: window={} {}x{}, reconfiguring toplevel {:?}",
+                wid, width, height, tid.1);
+
+            let mut state = self.state.write().unwrap();
+            state.send_toplevel_configure(tid.0.clone(), tid.1, width, height);
+        } else if is_fullscreen_shell {
+            crate::wlog!(crate::util::logging::FFI,
+                "Window resize: window={} {}x{}, fullscreen_shell - updating global output mode",
+                wid, width, height);
             
-             if let Some(tid) = toplevel_id {
-                 let scale = state.primary_output().scale;
-                 if let Some(toplevel_data) = state.xdg.toplevels.get_mut(&tid) {
-                     // Dedup: if size hasn't changed, don't spam configure
-                     if toplevel_data.width == width && toplevel_data.height == height {
-                         return;
-                     }
-
-                     toplevel_data.width = width;
-                     toplevel_data.height = height;
-                     
-                     if let Some(resource) = &toplevel_data.resource {
-                         // Send toplevel configure
-                         let mut states: Vec<u8> = vec![]; 
-                         
-                         // Preserve activated state!
-                         if toplevel_data.activated {
-                             states.extend_from_slice(&((wayland_protocols::xdg::shell::server::xdg_toplevel::State::Activated as u32).to_ne_bytes()));
-                         }
-                         // TODO: handle maximized/fullscreen states
-
-                         let logical_width = (width as f32 / scale) as i32;
-                         let logical_height = (height as f32 / scale) as i32;
-                         resource.configure(logical_width, logical_height, states);
-
-                         // We must also send surface configure to commit the state
-                         // Note: xdg_surfaces is keyed by xdg_surface's protocol_id, not wl_surface internal ID
-                         // So we need to find the xdg_surface by its surface_id field
-                         let xdg_surface_key = state.xdg.surfaces.iter()
-                             .find(|(_, data)| data.surface_id == sid)
-                             .map(|(key, _)| key.clone());
-                         
-                         if let Some(xdg_key) = xdg_surface_key {
-                             if let Some(surface_data) = state.xdg.surfaces.get_mut(&xdg_key) {
-                                 if let Some(surface_resource) = &surface_data.resource {
-                                      // Need serial from compositor
-                                      if let Some(compositor) = self.compositor.lock().unwrap().as_mut() {
-                                          let serial = compositor.next_serial();
-                                          surface_data.pending_serial = serial;
-                                          surface_resource.configure(serial);
-                                          // Use debug log instead of FFI log to reduce spam
-                                          tracing::debug!("Sent configure to window {}: {}x{} serial={}", wid, width, height, serial);
-                                      }
-                                 }
-                             }
-                         }
-                      }
-                 }
-             }
+            // Get current scale to preserve it
+            let scale = {
+                let cur = self.output_size.read().unwrap();
+                cur.2
+            };
+            self.set_output_size(width, height, scale);
+        } else {
+            crate::wlog!(crate::util::logging::FFI,
+                "Window resize: window={} {}x{}, no toplevel/fullscreen_shell found to reconfigure",
+                wid, width, height);
         }
     }
 
-    /// Set window activation state
-    pub fn set_window_activated(&self, window_id: WindowId, active: bool) {
+    /// Set window activation state.
+    ///
+    /// When `send_configure` is false the flag is stored but no
+    /// xdg_toplevel/xdg_surface configure pair is emitted.  The caller
+    /// is expected to trigger a configure shortly after (e.g. via
+    /// `resize_window`) which will pick up the new activation state.
+    pub fn set_window_activated(&self, window_id: WindowId, active: bool, send_configure: bool) {
         if !self.is_running() {
             return;
         }
@@ -1334,60 +1486,26 @@ impl WawonaCore {
              window.activated = active;
         }
 
-        // Find associated surface
+        // Find associated surface and toplevel
         let surface_id = state.surface_to_window.iter()
             .find(|(_, &w)| w == wid)
-            .map(|(s, _)| s.clone());
+            .map(|(s, _)| *s);
 
         if let Some(sid) = surface_id {
-             // Find toplevel data
              let toplevel_id = state.xdg.toplevels.iter()
                  .find(|(_, data)| data.surface_id == sid)
                  .map(|(id, _)| id.clone());
-            
-             if let Some(tid) = toplevel_id {
-                 let scale = state.primary_output().scale;
-                 if let Some(toplevel_data) = state.xdg.toplevels.get_mut(&tid) {
-                     toplevel_data.activated = active;
-                     
-                     if let Some(resource) = &toplevel_data.resource {
-                         // Send toplevel configure with updated states
-                         let mut states: Vec<u8> = vec![];
-                         
-                         // Add activated state if active
-                         if active {
-                             states.extend_from_slice(&((wayland_protocols::xdg::shell::server::xdg_toplevel::State::Activated as u32).to_ne_bytes()));
-                         }
-                         
-                         // Add other states (maximized, fullscreen, resizing)
-                         // TODO: Retrieve these from window state
-                         if toplevel_data.width > 0 && toplevel_data.height > 0 {
-                            let logical_width = (toplevel_data.width as f32 / scale) as i32;
-                            let logical_height = (toplevel_data.height as f32 / scale) as i32;
-                            resource.configure(logical_width, logical_height, states);
-                         } else {
-                            resource.configure(0, 0, states);
-                         }
 
-                         // We must also send surface configure to commit the state
-                         let surface_key = state.xdg.surfaces.iter()
-                             .find(|(_, data)| data.surface_id == sid)
-                             .map(|(key, _)| key.clone());
-                             
-                         if let Some(skey) = surface_key {
-                             if let Some(surface_data) = state.xdg.surfaces.get_mut(&skey) {
-                                 if let Some(surface_resource) = &surface_data.resource {
-                                      // Need serial from compositor
-                                      if let Some(compositor) = self.compositor.lock().unwrap().as_mut() {
-                                          let serial = compositor.next_serial();
-                                          surface_data.pending_serial = serial;
-                                          surface_resource.configure(serial);
-                                          crate::wlog!(crate::util::logging::FFI, "Sent configure (activation={}) to window {}", active, wid);
-                                      }
-                                 }
-                             }
-                         }
-                     }
+             if let Some(tid) = toplevel_id {
+                 let (w, h) = if let Some(td) = state.xdg.toplevels.get_mut(&tid) {
+                     td.activated = active;
+                     (td.width, td.height)
+                 } else {
+                     return;
+                 };
+
+                 if send_configure {
+                     state.send_toplevel_configure(tid.0.clone(), tid.1, w, h);
                  }
              }
         }
@@ -1396,11 +1514,11 @@ impl WawonaCore {
     // =========================================================================
     // Input Injection
     // =========================================================================
-    
+
     /// Inject pointer motion event
     pub fn inject_pointer_motion(
         &self,
-        _window_id: WindowId,
+        window_id: WindowId,
         x: f64,
         y: f64,
         timestamp_ms: u32,
@@ -1410,25 +1528,28 @@ impl WawonaCore {
         }
         
         let mut state = self.state.write().unwrap();
-        // Ensure dead resources are cleaned up
         state.seat.cleanup_resources();
         
-        // Update seat state
-        state.seat.pointer.x = x;
-        state.seat.pointer.y = y;
-        state.seat.pointer.cursor_hotspot_x = x;
-        state.seat.pointer.cursor_hotspot_y = y;
+        let (sx, sy) = apply_geometry_offset(&state, window_id, x, y);
+        
+        state.seat.pointer.x = sx;
+        state.seat.pointer.y = sy;
+        state.seat.pointer.cursor_hotspot_x = sx;
+        state.seat.pointer.cursor_hotspot_y = sy;
+
+        // Auto-correct focus if the platform is routing events for a
+        // different window than the one currently focused.
+        ensure_pointer_focus(&mut state, window_id, &|| self.next_serial());
         
         let focused_client = state.focused_pointer_client();
-        // Broadcast motion + frame event (required for clients to process atomically)
-        state.seat.broadcast_pointer_motion(timestamp_ms, x, y, focused_client.as_ref());
+        state.seat.broadcast_pointer_motion(timestamp_ms, sx, sy, focused_client.as_ref());
         state.seat.broadcast_pointer_frame(focused_client.as_ref());
     }
     
     /// Inject pointer button event
     pub fn inject_pointer_button(
         &self,
-        _window_id: WindowId,
+        window_id: WindowId,
         button: PointerButton,
         state: ButtonState,
         timestamp_ms: u32,
@@ -1454,8 +1575,11 @@ impl WawonaCore {
 
         let mut state = self.state.write().unwrap();
         state.seat.cleanup_resources();
+
+        // Auto-correct pointer focus to the window the platform says
+        // this click targets.
+        ensure_pointer_focus(&mut state, window_id, &|| self.next_serial());
         
-        // Update button count for implicit grab tracking
         match wl_state {
             wayland_server::protocol::wl_pointer::ButtonState::Pressed => {
                 state.seat.pointer.button_count += 1;
@@ -1467,7 +1591,6 @@ impl WawonaCore {
         }
         
         let focused_client = state.focused_pointer_client();
-        // Broadcast button + frame event
         state.seat.broadcast_pointer_button(serial, timestamp_ms, button_code, wl_state, focused_client.as_ref());
         state.seat.broadcast_pointer_frame(focused_client.as_ref());
     }
@@ -1518,30 +1641,24 @@ impl WawonaCore {
         let serial = self.next_serial();
         let mut state = self.state.write().unwrap();
         
+        let (sx, sy) = apply_geometry_offset(&state, window_id, x, y);
+        
         // Find surface for window
         let surface_id = state.surface_to_window.iter()
             .find(|(_, &wid)| wid as u64 == window_id.id)
             .map(|(sid, _)| *sid);
             
         if let Some(sid) = surface_id {
-            // Respect implicit grab: if buttons are pressed, don't change focus or send enter to others
             if state.seat.pointer.button_count > 0 {
-                // If we are already focused on this surface, we might want to update position?
-                // But generally `motion` handles that.
-                // If we are focused on another surface (grab owner), we must NOT send enter here.
                 return;
             }
 
-            // Update pointer focus
             state.seat.pointer.focus = Some(sid);
 
-            // Clone Arc to avoid borrowing state while mutating seat
             if let Some(surface) = state.surfaces.get(&sid).cloned() {
                  let surface = surface.read().unwrap();
                  if let Some(res) = &surface.resource {
-                     // TODO: This uses the first resource bound to the surface, which is usually correct
-                     // A more robust apporach would be needed for multi-resource surfaces
-                     state.seat.broadcast_pointer_enter(serial, res, x, y);
+                     state.seat.broadcast_pointer_enter(serial, res, sx, sy);
                  }
             }
         }
@@ -1979,11 +2096,14 @@ impl WawonaCore {
             node.y = surface.y;
             node.width = surface.width;
             node.height = surface.height;
+
+
             node.scale = surface.scale;
             node.opacity = surface.opacity;
             node.visible = true; // Visibility is baked into flatten() results
             node.anchor_output_x = current_anchor.1;
             node.anchor_output_y = current_anchor.2;
+            node.content_rect = surface.content_rect;
             
             ffi_nodes.push(node);
         }
@@ -2095,63 +2215,46 @@ impl WawonaCore {
     /// 3. Sends xdg_output logical_size changes
     /// 4. Reconfigures every xdg_toplevel to the new output dimensions
     pub fn set_output_size(&self, width: u32, height: u32, scale: f32) {
-        // FORCING SCALE TO 1.0 to fix Weston coordinate mismatch
-        let forced_scale = 1.0;
+        let safe_scale = if scale < 1.0 { 1.0 } else { scale };
 
-        let (prev_w, prev_h) = {
+        let (prev_w, prev_h, prev_s) = {
             let cur = self.output_size.read().unwrap();
-            (cur.0, cur.1)
+            (cur.0, cur.1, cur.2)
         };
 
-        if prev_w == width && prev_h == height {
+        if prev_w == width && prev_h == height && (prev_s - safe_scale).abs() < 0.001 {
             return;
         }
 
-        crate::wlog!(crate::util::logging::FFI, "Output size: {}x{} @ {}x (forced from {}x)", width, height, forced_scale, scale);
-        *self.output_size.write().unwrap() = (width, height, forced_scale);
+        crate::wlog!(crate::util::logging::FFI, "Output size: {}x{} @ {}x", width, height, safe_scale);
+        *self.output_size.write().unwrap() = (width, height, safe_scale);
 
         let output_id;
-        // Collect toplevel IDs that need reconfiguring (outside the mutable borrow)
         let toplevel_ids: Vec<(wayland_server::backend::ClientId, u32)>;
 
-        // Update state
         {
             let mut state = self.state.write().unwrap();
             
-            // Collect toplevel IDs first since they belong to clients
             toplevel_ids = state.xdg.toplevels.keys().cloned().collect();
             
-            // set_output_size usually just takes width, height, scale, but I need to make sure. Let's just assume it's correctly called.
-            // If the error was on line 2115 in the log, let's fix it if it's there. But wait, `set_output_size` might take `(id, width, height, scale)`. Let's assume it doesn't need changes if I don't know the signature, but I'll fix the configure call.
-            state.set_output_size(width, height, forced_scale);
-
-            // Ensure physical dimensions are updated (~108 DPI / 4.25 px per mm)
-            if let Some(output) = state.outputs.get_mut(0) {
-                output.physical_width = (width as f32 / 4.25) as u32;
-                output.physical_height = (height as f32 / 4.25) as u32;
-            }
+            state.set_output_size(width, height, safe_scale);
 
             output_id = state.outputs.first().map(|o| o.id).unwrap_or(0);
         }
 
-        // Only send events if the size actually changed (avoids spamming on
-        // repeated calls with the same dimensions, e.g. redundant layout passes).
-        if prev_w != width || prev_h != height {
+        if prev_w != width || prev_h != height || (prev_s - safe_scale).abs() > 0.001 {
             let state = self.state.read().unwrap();
 
-            // 1. Notify all bound wl_output resources (mode, geometry, done)
             crate::core::wayland::wayland::output::notify_output_change(&state, output_id);
 
             crate::wlog!(crate::util::logging::FFI,
-                "Output resized {}x{} → {}x{}, reconfiguring {} toplevels",
-                prev_w, prev_h, width, height, toplevel_ids.len());
+                "Output resized {}x{}@{}x → {}x{}@{}x, reconfiguring {} toplevels",
+                prev_w, prev_h, prev_s, width, height, safe_scale, toplevel_ids.len());
 
             drop(state);
 
-            // 2. Reconfigure every xdg_toplevel to the new output size
             let mut state = self.state.write().unwrap();
             for tid in toplevel_ids {
-                // Pass the ClientId and the ObjectId correctly (tid.0, tid.1)
                 state.send_toplevel_configure(tid.0.clone(), tid.1, width, height);
             }
         }

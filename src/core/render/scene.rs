@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use crate::core::render::node::SceneNode;
+use crate::ffi::types::ContentRect;
 
 /// Represents a flattened surface to be rendered.
 #[derive(Debug, Clone)]
@@ -11,6 +12,8 @@ pub struct FlattenedSurface {
     pub height: u32,
     pub opacity: f32,
     pub scale: f32,
+    /// Normalized content rect within the buffer (0..1 range)
+    pub content_rect: ContentRect,
 }
 
 /// Manages the scene graph.
@@ -90,6 +93,7 @@ impl Scene {
                     height: node.height,
                     opacity: current_abs_opacity,
                     scale: current_abs_scale,
+                    content_rect: node.content_rect,
                 });
             }
 

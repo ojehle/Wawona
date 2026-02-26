@@ -93,115 +93,140 @@ let
     "src/platform/macos/WWNPopupWindow.h"
   ];
 
-  macosSourcesFiltered = common.filterSources macosSources;
-
-  # Files created by prePatch when untracked - always compile if present
-  macosPrePatchSources = [
+  # Use full list: filterSources can empty the list when wawonaSrc is cleanSourceWith
+  # (path doesn't exist at eval time). We skip missing files at build time instead.
+  macosSourcesAll = lib.unique (macosSources ++ [
     "src/platform/macos/WWNPopupWindow.m"
     "src/platform/macos/WWNPopupWindow.h"
-  ];
+  ]);
 
   # Mirror iOS Wawona icon installation: same sources (AppIcon.appiconset,
   # Wawona.icon, About PNGs). macOS uses Contents/Resources; iOS uses app root.
   # Tahoe can use the Icon Composer .icon bundle; optionally compile to Assets.car
   # when actool is available for the dock icon.
+  # Install phase runs in a separate shell from buildPhase, so we must set up
+  # Xcode env here for iconutil and actool (needed for .icns and Tahoe Assets.car).
+  # Use build directory (cwd in installPhase = unpacked source root).
+  # macOS 26+ uses .icon (icon.json) → actool → Assets.car. Use explicit Xcode tool paths.
+  # All shell variables must be escaped for Nix: use ''$VAR so the script gets literal $VAR.
   installMacOSIcons = ''
+    ${xcodeEnv "macos"}
     RESOURCES="$out/Applications/Wawona.app/Contents/Resources"
-    mkdir -p "$RESOURCES"
-    APPICONSET="$src/src/resources/Assets.xcassets/AppIcon.appiconset"
-    ICON_BUNDLE="$src/src/resources/Wawona.icon"
+    mkdir -p "''$RESOURCES"
+    ICON_ROOT="src/resources"
+    APPICONSET="''$ICON_ROOT/Assets.xcassets/AppIcon.appiconset"
+    ICON_BUNDLE="''$ICON_ROOT/Wawona.icon"
+    ACTOOL="''${DEVELOPER_DIR:-}/usr/bin/actool"
+    ICONUTIL="''${DEVELOPER_DIR:-}/usr/bin/iconutil"
 
-    # Same as iOS: app icons (light + dark) from AppIcon.appiconset
-    if [ -d "$APPICONSET" ] && [ -f "$APPICONSET/AppIcon-Light-1024.png" ]; then
-      cp "$APPICONSET/AppIcon-Light-1024.png" "$RESOURCES/AppIcon.png"
-      echo "Installed AppIcon.png (light, opaque)"
-    fi
-    if [ -d "$APPICONSET" ] && [ -f "$APPICONSET/AppIcon-Dark-1024.png" ]; then
-      cp "$APPICONSET/AppIcon-Dark-1024.png" "$RESOURCES/AppIcon-Dark.png"
-      echo "Installed AppIcon-Dark.png (dark)"
-    fi
-
-    # Same as iOS: modern Wawona.icon bundle (Tahoe/iOS 26+ Icon Composer format)
-    if [ -d "$ICON_BUNDLE" ]; then
-      cp -R "$ICON_BUNDLE" "$RESOURCES/"
-      echo "Installed Wawona.icon bundle"
-    fi
-
-    # Same as iOS: bundle logo PNGs for Settings About header
-    if [ -f "$src/src/resources/Wawona-iOS-Dark-1024x1024@1x.png" ]; then
-      cp "$src/src/resources/Wawona-iOS-Dark-1024x1024@1x.png" "$RESOURCES/"
-      echo "Bundled Wawona-iOS-Dark-1024x1024@1x.png"
-    fi
-    if [ -f "$src/src/resources/Wawona-iOS-Light-1024x1024@1x.png" ]; then
-      cp "$src/src/resources/Wawona-iOS-Light-1024x1024@1x.png" "$RESOURCES/"
-      echo "Bundled Wawona-iOS-Light-1024x1024@1x.png"
-    fi
-
-    # Standard macOS ICNS generation using iconutil
-    if [ -d "$APPICONSET" ] && command -v iconutil >/dev/null 2>&1; then
-      ICON_TMP="$TMPDIR/wawona-iconutil"
-      rm -rf "$ICON_TMP"
-      mkdir -p "$ICON_TMP/AppIcon.iconset"
-      
-      # Copy light icons into the .iconset format
-      if [ -f "$APPICONSET/AppIcon-16.png" ]; then cp "$APPICONSET/AppIcon-16.png" "$ICON_TMP/AppIcon.iconset/icon_16x16.png"; fi
-      if [ -f "$APPICONSET/AppIcon-32.png" ]; then cp "$APPICONSET/AppIcon-32.png" "$ICON_TMP/AppIcon.iconset/icon_16x16@2x.png"; cp "$APPICONSET/AppIcon-32.png" "$ICON_TMP/AppIcon.iconset/icon_32x32.png"; fi
-      if [ -f "$APPICONSET/AppIcon-64.png" ]; then cp "$APPICONSET/AppIcon-64.png" "$ICON_TMP/AppIcon.iconset/icon_32x32@2x.png"; fi
-      if [ -f "$APPICONSET/AppIcon-128.png" ]; then cp "$APPICONSET/AppIcon-128.png" "$ICON_TMP/AppIcon.iconset/icon_128x128.png"; fi
-      if [ -f "$APPICONSET/AppIcon-256.png" ]; then cp "$APPICONSET/AppIcon-256.png" "$ICON_TMP/AppIcon.iconset/icon_128x128@2x.png"; cp "$APPICONSET/AppIcon-256.png" "$ICON_TMP/AppIcon.iconset/icon_256x256.png"; fi
-      if [ -f "$APPICONSET/AppIcon-512.png" ]; then cp "$APPICONSET/AppIcon-512.png" "$ICON_TMP/AppIcon.iconset/icon_256x256@2x.png"; cp "$APPICONSET/AppIcon-512.png" "$ICON_TMP/AppIcon.iconset/icon_512x512.png"; fi
-      if [ -f "$APPICONSET/AppIcon-Light-1024.png" ]; then
-         cp "$APPICONSET/AppIcon-Light-1024.png" "$ICON_TMP/AppIcon.iconset/icon_512x512@2x.png"
-      elif [ -f "$APPICONSET/AppIcon-1024.png" ]; then
-         cp "$APPICONSET/AppIcon-1024.png" "$ICON_TMP/AppIcon.iconset/icon_512x512@2x.png"
-      fi
-      
-      iconutil -c icns "$ICON_TMP/AppIcon.iconset" -o "$RESOURCES/AppIcon.icns"
-      echo "Installed AppIcon.icns (compiled via iconutil)"
-    fi
-
-    # Tahoe: compile .icon to Assets.car when actool available (dock icon)
-    if [ -d "$ICON_BUNDLE" ]; then
-      if [ -z "''${DEVELOPER_DIR:-}" ]; then
-        XCODE_APP=$(${xcodeUtils.findXcodeScript}/bin/find-xcode 2>/dev/null || true)
-        if [ -n "$XCODE_APP" ]; then
-          export DEVELOPER_DIR="$XCODE_APP/Contents/Developer"
-          export PATH="$DEVELOPER_DIR/usr/bin:$PATH"
+    # --- Primary: Wawona.icon (icon.json) → actool → Assets.car + .icns (26+ pipeline) ---
+    if [ -d "''$ICON_BUNDLE" ] && [ -f "''$ICON_BUNDLE/icon.json" ]; then
+      if [ -n "''${DEVELOPER_DIR:-}" ] && [ -x "''$ACTOOL" ]; then
+        ICON_TMP="''$TMPDIR/wawona-icon-compile"
+        rm -rf "''$ICON_TMP"
+        mkdir -p "''$ICON_TMP"
+        cp -R "''$ICON_BUNDLE" "''$ICON_TMP/Wawona.icon"
+        if [ -f "''$ICON_ROOT/wayland.png" ] && [ ! -f "''$ICON_TMP/Wawona.icon/wayland.png" ]; then
+          cp "''$ICON_ROOT/wayland.png" "''$ICON_TMP/Wawona.icon/"
         fi
-      fi
-      if command -v actool >/dev/null 2>&1; then
-        ICON_TMP="$TMPDIR/wawona-icon-compile"
-        rm -rf "$ICON_TMP"
-        mkdir -p "$ICON_TMP"
-        cp -R "$ICON_BUNDLE" "$ICON_TMP/Wawona.icon"
-        if [ -f "$src/src/resources/wayland.png" ] && [ ! -f "$ICON_TMP/Wawona.icon/wayland.png" ]; then
-          cp "$src/src/resources/wayland.png" "$ICON_TMP/Wawona.icon/"
-        fi
-        OUT_CAR="$ICON_TMP/icons"
-        mkdir -p "$OUT_CAR"
-        if actool "$ICON_TMP/Wawona.icon" --compile "$OUT_CAR" \
+        OUT_CAR="''$ICON_TMP/icons"
+        mkdir -p "''$OUT_CAR"
+        if "''$ACTOOL" "''$ICON_TMP/Wawona.icon" --compile "''$OUT_CAR" \
             --platform macosx --target-device mac \
             --minimum-deployment-target 26.0 \
             --app-icon Wawona --include-all-app-icons \
             --output-format human-readable-text --notices --warnings \
-            --development-region en --enable-on-demand-resources NO; then
-          if [ -f "$OUT_CAR/Assets.car" ]; then
-            cp "$OUT_CAR/Assets.car" "$RESOURCES/"
-            echo "Installed Assets.car (Tahoe app icon)"
+            --development-region en --enable-on-demand-resources NO \
+            --output-partial-info-plist "''$OUT_CAR/assetcatalog_generated_info.plist"; then
+          if [ -f "''$OUT_CAR/Assets.car" ]; then
+            cp "''$OUT_CAR/Assets.car" "''$RESOURCES/"
+            echo "Installed Assets.car (from Wawona.icon / icon.json)"
           fi
+          for icns in "''$OUT_CAR"/Wawona.icns "''$OUT_CAR"/*.icns; do
+            if [ -f "''$icns" ]; then
+              cp "''$icns" "''$RESOURCES/AppIcon.icns"
+              echo "Installed AppIcon.icns (from actool .icon)"
+              break
+            fi
+          done
+        fi
+      else
+        echo "Warning: actool not available (Xcode at DEVELOPER_DIR); macOS 26+ icon may be missing."
+      fi
+      cp -R "''$ICON_BUNDLE" "''$RESOURCES/"
+      echo "Installed Wawona.icon bundle"
+    fi
+
+    # --- Fallback: AppIcon.icns from PNGs via iconutil ---
+    if [ ! -f "''$RESOURCES/AppIcon.icns" ] && [ -d "''$APPICONSET" ] && [ -n "''${DEVELOPER_DIR:-}" ] && [ -x "''$ICONUTIL" ]; then
+      ICON_TMP="''$TMPDIR/wawona-iconutil"
+      rm -rf "''$ICON_TMP"
+      mkdir -p "''$ICON_TMP/AppIcon.iconset"
+      if [ -f "''$APPICONSET/AppIcon-16.png" ]; then cp "''$APPICONSET/AppIcon-16.png" "''$ICON_TMP/AppIcon.iconset/icon_16x16.png"; fi
+      if [ -f "''$APPICONSET/AppIcon-32.png" ]; then cp "''$APPICONSET/AppIcon-32.png" "''$ICON_TMP/AppIcon.iconset/icon_16x16@2x.png"; cp "''$APPICONSET/AppIcon-32.png" "''$ICON_TMP/AppIcon.iconset/icon_32x32.png"; fi
+      if [ -f "''$APPICONSET/AppIcon-64.png" ]; then cp "''$APPICONSET/AppIcon-64.png" "''$ICON_TMP/AppIcon.iconset/icon_32x32@2x.png"; fi
+      if [ -f "''$APPICONSET/AppIcon-128.png" ]; then cp "''$APPICONSET/AppIcon-128.png" "''$ICON_TMP/AppIcon.iconset/icon_128x128.png"; fi
+      if [ -f "''$APPICONSET/AppIcon-256.png" ]; then cp "''$APPICONSET/AppIcon-256.png" "''$ICON_TMP/AppIcon.iconset/icon_128x128@2x.png"; cp "''$APPICONSET/AppIcon-256.png" "''$ICON_TMP/AppIcon.iconset/icon_256x256.png"; fi
+      if [ -f "''$APPICONSET/AppIcon-512.png" ]; then cp "''$APPICONSET/AppIcon-512.png" "''$ICON_TMP/AppIcon.iconset/icon_256x256@2x.png"; cp "''$APPICONSET/AppIcon-512.png" "''$ICON_TMP/AppIcon.iconset/icon_512x512.png"; fi
+      if [ -f "''$APPICONSET/AppIcon-Light-1024.png" ]; then
+        cp "''$APPICONSET/AppIcon-Light-1024.png" "''$ICON_TMP/AppIcon.iconset/icon_512x512@2x.png"
+      elif [ -f "''$APPICONSET/AppIcon-1024.png" ]; then
+        cp "''$APPICONSET/AppIcon-1024.png" "''$ICON_TMP/AppIcon.iconset/icon_512x512@2x.png"
+      fi
+      "''$ICONUTIL" -c icns "''$ICON_TMP/AppIcon.iconset" -o "''$RESOURCES/AppIcon.icns"
+      echo "Installed AppIcon.icns (fallback via iconutil)"
+    fi
+
+    # --- Last resort: .icns from single 1024 PNG using sips + iconutil ---
+    if [ ! -f "''$RESOURCES/AppIcon.icns" ] && [ -n "''${DEVELOPER_DIR:-}" ] && [ -x "''$ICONUTIL" ]; then
+      SRC1024=""
+      [ -f "''$APPICONSET/AppIcon-Light-1024.png" ] && SRC1024="''$APPICONSET/AppIcon-Light-1024.png"
+      [ -z "''$SRC1024" ] && [ -f "''$APPICONSET/AppIcon-1024.png" ] && SRC1024="''$APPICONSET/AppIcon-1024.png"
+      if [ -n "''$SRC1024" ]; then
+        ICON_TMP="''$TMPDIR/wawona-iconutil-minimal"
+        rm -rf "''$ICON_TMP"
+        mkdir -p "''$ICON_TMP/AppIcon.iconset"
+        SIPS="sips"
+        [ -x "/usr/bin/sips" ] && SIPS="/usr/bin/sips"
+        cp "''$SRC1024" "''$ICON_TMP/AppIcon.iconset/icon_512x512@2x.png"
+        "''$SIPS" -z 16 16 "''$SRC1024" --out "''$ICON_TMP/AppIcon.iconset/icon_16x16.png" 2>/dev/null || true
+        "''$SIPS" -z 32 32 "''$SRC1024" --out "''$ICON_TMP/AppIcon.iconset/icon_16x16@2x.png" 2>/dev/null || true
+        "''$SIPS" -z 32 32 "''$SRC1024" --out "''$ICON_TMP/AppIcon.iconset/icon_32x32.png" 2>/dev/null || true
+        "''$SIPS" -z 64 64 "''$SRC1024" --out "''$ICON_TMP/AppIcon.iconset/icon_32x32@2x.png" 2>/dev/null || true
+        "''$SIPS" -z 128 128 "''$SRC1024" --out "''$ICON_TMP/AppIcon.iconset/icon_128x128.png" 2>/dev/null || true
+        "''$SIPS" -z 256 256 "''$SRC1024" --out "''$ICON_TMP/AppIcon.iconset/icon_128x128@2x.png" 2>/dev/null || true
+        "''$SIPS" -z 256 256 "''$SRC1024" --out "''$ICON_TMP/AppIcon.iconset/icon_256x256.png" 2>/dev/null || true
+        "''$SIPS" -z 512 512 "''$SRC1024" --out "''$ICON_TMP/AppIcon.iconset/icon_256x256@2x.png" 2>/dev/null || true
+        "''$SIPS" -z 512 512 "''$SRC1024" --out "''$ICON_TMP/AppIcon.iconset/icon_512x512.png" 2>/dev/null || true
+        if [ -f "''$ICON_TMP/AppIcon.iconset/icon_512x512@2x.png" ]; then
+          "''$ICONUTIL" -c icns "''$ICON_TMP/AppIcon.iconset" -o "''$RESOURCES/AppIcon.icns" 2>/dev/null && echo "Installed AppIcon.icns (minimal from 1024 PNG)"
         fi
       fi
     fi
 
-    # [NSImage imageNamed:@"Wawona"] for About panel and Settings > About
+    # Legacy PNG copies
+    if [ -d "''$APPICONSET" ] && [ -f "''$APPICONSET/AppIcon-Light-1024.png" ]; then
+      cp "''$APPICONSET/AppIcon-Light-1024.png" "''$RESOURCES/AppIcon.png"
+    fi
+    if [ -d "''$APPICONSET" ] && [ -f "''$APPICONSET/AppIcon-Dark-1024.png" ]; then
+      cp "''$APPICONSET/AppIcon-Dark-1024.png" "''$RESOURCES/AppIcon-Dark.png"
+    fi
+    if [ -f "''$ICON_ROOT/Wawona-iOS-Dark-1024x1024@1x.png" ]; then
+      cp "''$ICON_ROOT/Wawona-iOS-Dark-1024x1024@1x.png" "''$RESOURCES/"
+    fi
+    if [ -f "''$ICON_ROOT/Wawona-iOS-Light-1024x1024@1x.png" ]; then
+      cp "''$ICON_ROOT/Wawona-iOS-Light-1024x1024@1x.png" "''$RESOURCES/"
+    fi
+
+    # Wawona.png for [NSImage imageNamed:@"Wawona"] fallback
     for candidate in "Assets.xcassets/AppIcon.appiconset/AppIcon-Light-1024.png" \
                      "Assets.xcassets/AppIcon.appiconset/AppIcon-Dark-1024.png" \
                      "Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png" \
                      "Wawona-iOS-Light-1024x1024@1x.png" \
                      "Wawona-iOS-Dark-1024x1024@1x.png"; do
-      if [ -f "$src/src/resources/$candidate" ]; then
-        cp "$src/src/resources/$candidate" "$RESOURCES/Wawona.png"
-        echo "Installed Wawona.png for About/Settings"
+      if [ -f "''$ICON_ROOT/''$candidate" ]; then
+        cp "''$ICON_ROOT/''$candidate" "''$RESOURCES/Wawona.png"
+        echo "Installed Wawona.png for About/Settings fallback"
         break
       fi
     done
@@ -443,10 +468,10 @@ GEN_HEADER
       # Now _GEN-wawona-Swift.h is available in current directory
       echo "🔨 Phase 2: Compiling Objective-C and C files..."
       OBJ_FILES="$SWIFT_OBJ"
-      # Deduplicate to prevent double-building if files exist in both repo and prePatchSources
-      ALL_SOURCES="${lib.concatStringsSep " " (lib.unique (macosSourcesFiltered ++ macosPrePatchSources))}"
+      ALL_SOURCES="${lib.concatStringsSep " " macosSourcesAll}"
       for src_file in $ALL_SOURCES; do
         if [[ "$src_file" == *.c ]] || [[ "$src_file" == *.m ]]; then
+          [ -f "$src_file" ] || continue
           obj_file="''${src_file//\//_}.o"
           obj_file="''${obj_file//src_/}"
           
@@ -601,12 +626,14 @@ GEN_HEADER
             echo "DEBUG: Bundling Weston clients..."
             mkdir -p $out/Applications/Wawona.app/Contents/Resources/bin
             if [ -d "${weston}/bin" ]; then
-              # Copy weston-terminal specifically
-              if [ -f "${weston}/bin/weston-terminal" ]; then
-                 cp "${weston}/bin/weston-terminal" $out/Applications/Wawona.app/Contents/Resources/bin/
-                 chmod +x $out/Applications/Wawona.app/Contents/Resources/bin/weston-terminal
-              fi
-              # Copy other useful clients
+              # Weston compositor and weston-terminal (used by Settings)
+              for client in weston weston-terminal; do
+                if [ -f "${weston}/bin/$client" ]; then
+                  cp "${weston}/bin/$client" $out/Applications/Wawona.app/Contents/Resources/bin/
+                  chmod +x $out/Applications/Wawona.app/Contents/Resources/bin/$client
+                fi
+              done
+              # Other useful clients
               for client in weston-simple-egl weston-simple-shm weston-flower weston-smoke weston-resizor weston-scaler; do
                  if [ -f "${weston}/bin/$client" ]; then
                    cp "${weston}/bin/$client" $out/Applications/Wawona.app/Contents/Resources/bin/
@@ -708,57 +735,57 @@ MVK_ICD_EOF
               fi
             ''}
             
-            cat > $out/Applications/Wawona.app/Contents/Info.plist <<PLIST_EOF
-      <?xml version="1.0" encoding="UTF-8"?>
-      <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-      <plist version="1.0">
-      <dict>
-          <key>CFBundleDevelopmentRegion</key>
-          <string>en</string>
-          <key>CFBundleExecutable</key>
-          <string>Wawona</string>
-          <key>CFBundleIdentifier</key>
-          <string>com.aspauldingcode.Wawona</string>
-          <key>CFBundleInfoDictionaryVersion</key>
-          <string>6.0</string>
-          <key>CFBundleName</key>
-          <string>Wawona</string>
-          <key>CFBundlePackageType</key>
-          <string>APPL</string>
-          <key>CFBundleShortVersionString</key>
-          <string>${projectVersion}</string>
-          <key>CFBundleVersion</key>
-          <string>${projectVersionPatch}</string>
-          <key>NSHumanReadableCopyright</key>
-          <string>Copyright © 2025-${currentYear} Alex Spaulding. All rights reserved.</string>
-        <key>LSMinimumSystemVersion</key>
-        <string>26.0</string>
-          <key>NSHighResolutionCapable</key>
-          <true/>
-          <key>CFBundleIcons</key>
-          <dict>
-              <key>CFBundlePrimaryIcon</key>
-              <dict>
-                  <key>CFBundleIconName</key>
-                  <string>Wawona</string>
-              </dict>
-          </dict>
-          <key>CFBundleIconName</key>
-          <string>AppIcon</string>
-          <key>CFBundleIconFile</key>
-          <string>AppIcon</string>
-          <key>NSLocalNetworkUsageDescription</key>
-          <string>Wawona needs access to your local network to connect to SSH hosts.</string>
-          <key>NSAppTransportSecurity</key>
-          <dict>
-              <key>NSAllowsArbitraryLoads</key>
-              <true/>
-              <key>NSAllowsLocalNetworking</key>
-              <true/>
-          </dict>
-      </dict>
-      </plist>
-      PLIST_EOF
+            cat > $out/Applications/Wawona.app/Contents/Info.plist <<'PLIST_EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleExecutable</key>
+    <string>Wawona</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.aspauldingcode.Wawona</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>Wawona</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>${projectVersion}</string>
+    <key>CFBundleVersion</key>
+    <string>${projectVersionPatch}</string>
+    <key>NSHumanReadableCopyright</key>
+    <string>Copyright © 2025-${currentYear} Alex Spaulding. All rights reserved.</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>26.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>CFBundleIcons</key>
+    <dict>
+        <key>CFBundlePrimaryIcon</key>
+        <dict>
+            <key>CFBundleIconName</key>
+            <string>Wawona</string>
+        </dict>
+    </dict>
+    <key>CFBundleIconName</key>
+    <string>AppIcon</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>Wawona needs access to your local network to connect to SSH hosts.</string>
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsArbitraryLoads</key>
+        <true/>
+        <key>NSAllowsLocalNetworking</key>
+        <true/>
+    </dict>
+</dict>
+</plist>
+PLIST_EOF
 
             ${installMacOSIcons}
 

@@ -79,15 +79,13 @@ impl Dispatch<ZxdgOutputManagerV1, ()> for CompositorState {
                 // Send output information
                 let output_state = state.primary_output();
                 
-                // Logical position (in compositor coordinates)
                 xdg_output.logical_position(output_state.x, output_state.y);
                 
-                // Logical size (may differ from physical due to scaling)
-                let logical_width = (output_state.width as f32 / output_state.scale) as i32;
-                let logical_height = (output_state.height as f32 / output_state.scale) as i32;
-                xdg_output.logical_size(logical_width, logical_height);
+                // OutputState.width/height are already logical (points/dp).
+                let lw = output_state.width as i32;
+                let lh = output_state.height as i32;
+                xdg_output.logical_size(lw, lh);
                 
-                // Name and description (v2+)
                 if xdg_output.version() >= 2 {
                     xdg_output.name(output_state.name.clone());
                     xdg_output.description(format!(
@@ -99,14 +97,13 @@ impl Dispatch<ZxdgOutputManagerV1, ()> for CompositorState {
                     ));
                 }
                 
-                // Done event (v3+)
                 if xdg_output.version() >= 3 {
                     xdg_output.done();
                 }
                 
                 tracing::debug!(
                     "Created xdg_output for output {}: logical {}x{} at ({}, {})",
-                    output_id, logical_width, logical_height, output_state.x, output_state.y
+                    output_id, lw, lh, output_state.x, output_state.y
                 );
             }
             zxdg_output_manager_v1::Request::Destroy => {
@@ -148,15 +145,16 @@ impl Dispatch<ZxdgOutputV1, ()> for CompositorState {
 /// Called when output geometry, mode, or scale changes.
 pub fn notify_xdg_output_change(state: &CompositorState) {
     let output_state = state.primary_output();
-    let logical_width = (output_state.width as f32 / output_state.scale) as i32;
-    let logical_height = (output_state.height as f32 / output_state.scale) as i32;
+    // OutputState.width/height are already logical (points/dp).
+    let lw = output_state.width as i32;
+    let lh = output_state.height as i32;
 
     for (_, xdg_output) in &state.xdg.output.resources {
         if !xdg_output.is_alive() {
             continue;
         }
         xdg_output.logical_position(output_state.x, output_state.y);
-        xdg_output.logical_size(logical_width, logical_height);
+        xdg_output.logical_size(lw, lh);
 
         if xdg_output.version() >= 3 {
             xdg_output.done();
@@ -167,8 +165,29 @@ pub fn notify_xdg_output_change(state: &CompositorState) {
         tracing::debug!(
             "Notified {} xdg_output resources of change: logical {}x{} at ({}, {})",
             state.xdg.output.resources.len(),
-            logical_width, logical_height, output_state.x, output_state.y
+            lw, lh, output_state.x, output_state.y
         );
+    }
+}
+
+/// Notify only a single client's xdg_output resources of a change.
+pub fn notify_xdg_output_change_for_client(
+    state: &CompositorState,
+    client_id: &wayland_server::backend::ClientId,
+) {
+    let output_state = state.primary_output();
+    let lw = output_state.width as i32;
+    let lh = output_state.height as i32;
+
+    for ((cid, _), xdg_output) in &state.xdg.output.resources {
+        if cid != client_id || !xdg_output.is_alive() {
+            continue;
+        }
+        xdg_output.logical_position(output_state.x, output_state.y);
+        xdg_output.logical_size(lw, lh);
+        if xdg_output.version() >= 3 {
+            xdg_output.done();
+        }
     }
 }
 

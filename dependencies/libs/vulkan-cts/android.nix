@@ -2,30 +2,20 @@
   lib,
   pkgs,
   buildPackages,
-  common ? null,
-  buildModule ? null,
+  buildTargets ? "deqp-vk",
 }:
 
 let
-  sources = import ./sources.nix {
-    inherit (pkgs) fetchurl fetchFromGitHub;
-  };
+  common = import ./common.nix { inherit pkgs; };
   androidToolchain = import ../../toolchains/android.nix { inherit lib pkgs; };
 in
 pkgs.stdenv.mkDerivation (finalAttrs: {
   pname = "vulkan-cts-android";
-  version = "1.4.5.0";
+  version = common.version;
 
-  src = pkgs.fetchFromGitHub {
-    owner = "KhronosGroup";
-    repo = "VK-GL-CTS";
-    rev = "vulkan-cts-${finalAttrs.version}";
-    hash = "sha256-cbXSelRPCCH52xczWaxqftbimHe4PyIKZqySQSFTHos=";
-  };
+  src = common.src;
 
-  prePatch = ''
-    ${sources.prePatch}
-  '';
+  prePatch = common.prePatch;
 
   nativeBuildInputs = with buildPackages; [
     cmake
@@ -55,6 +45,8 @@ pkgs.stdenv.mkDerivation (finalAttrs: {
 
   cmakeFlags = [
     "-DCMAKE_SYSTEM_NAME=Android"
+    "-DDEQP_TARGET=android"
+    "-DDE_OS=DE_OS_ANDROID"
     "-DCMAKE_ANDROID_ARCH_ABI=arm64-v8a"
     "-DCMAKE_ANDROID_NDK=${androidToolchain.androidndkRoot}"
     "-DCMAKE_ANDROID_API=${toString androidToolchain.androidNdkApiLevel}"
@@ -65,17 +57,15 @@ pkgs.stdenv.mkDerivation (finalAttrs: {
     "-DCMAKE_INSTALL_BINDIR=bin"
     "-DCMAKE_INSTALL_LIBDIR=lib"
     "-DCMAKE_INSTALL_INCLUDEDIR=include"
-    "-DSELECTED_BUILD_TARGETS=deqp-vk"
-    (lib.cmakeFeature "FETCHCONTENT_SOURCE_DIR_SHADERC" "${sources.shaderc-src}")
+    "-DSELECTED_BUILD_TARGETS=${buildTargets}"
+    (lib.cmakeFeature "FETCHCONTENT_SOURCE_DIR_SHADERC" "${common.sources.shaderc-src}")
   ];
 
   postInstall = ''
-    test ! -e $out
-
     mkdir -p $out/bin $out/archive-dir
-    cp -a external/vulkancts/modules/vulkan/deqp-vk $out/bin/ || true
-    cp -a external/vulkancts/modules/vulkan/vulkan $out/archive-dir/ || true
-    cp -a external/vulkancts/modules/vulkan/vk-default $out/ || true
+    [ -f external/vulkancts/modules/vulkan/deqp-vk ] && cp -a external/vulkancts/modules/vulkan/deqp-vk $out/bin/ || true
+    [ -d external/vulkancts/modules/vulkan/vulkan ] && cp -a external/vulkancts/modules/vulkan/vulkan $out/archive-dir/ || true
+    [ -d external/vulkancts/modules/vulkan/vk-default ] && cp -a external/vulkancts/modules/vulkan/vk-default $out/ || true
   '';
 
   postFixup = ''

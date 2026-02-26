@@ -10,7 +10,7 @@
   </details>
 </div>
 
-> **Project Vision:** Read about my long-term objectives in [Project Goals](docs/goals.md).
+> **Project Vision:** Read about long-term objectives in [Project Goals](docs/goals.md).
 
 ## FAQ
 
@@ -34,7 +34,14 @@ This project uses a simple `.envrc` file to manage your Apple Development Team I
 
 2.  **The environment is automatically loaded** when you use `nix develop` - no additional tools required!
 
-> For detailed instructions and available build targets, see → [Compilation Guide](docs/compilation.md).
+> For build targets and Nix pipeline details, see [Compilation Guide](docs/compilation.md) and [Nix Build System](docs/2026-nix-build-system.md).
+
+### How do I run Weston or Waypipe?
+
+- **Weston natively on macOS:** `nix run .#weston` (full compositor) or `nix run .#weston-terminal` (terminal client)
+- **Waypipe (remote apps):** Configure SSH in Settings > Waypipe, set Remote Command (e.g. `nix run ~/Wawona#weston-terminal`), tap Run Waypipe
+
+See [Usage Guide](docs/usage.md) and [Settings Reference](docs/settings.md).
 
 ### "I don't have nix"
 

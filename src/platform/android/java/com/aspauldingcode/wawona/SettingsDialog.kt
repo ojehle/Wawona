@@ -6,6 +6,7 @@ import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -25,11 +26,16 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import android.content.ClipData
+import android.content.ClipboardManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.net.NetworkInterface
 
 private enum class SettingsTab(val label: String, val icon: ImageVector) {
@@ -38,7 +44,8 @@ private enum class SettingsTab(val label: String, val icon: ImageVector) {
     ADVANCED("Advanced", Icons.Filled.Tune),
     INPUT("Input", Icons.Filled.Keyboard),
     WAYPIPE("Waypipe", Icons.Filled.Wifi),
-    SSH("SSH", Icons.Filled.Lock)
+    SSH("SSH", Icons.Filled.Lock),
+    ABOUT("About", Icons.Filled.Info)
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -126,6 +133,7 @@ fun SettingsDialog(
                         SettingsTab.INPUT -> InputSection(prefs)
                         SettingsTab.WAYPIPE -> WaypipeSection(prefs, localIpAddress, context)
                         SettingsTab.SSH -> SSHSection(prefs)
+                        SettingsTab.ABOUT -> AboutSection(context)
                     }
                 }
             }
@@ -139,8 +147,12 @@ fun SettingsDialog(
 
 @Composable
 private fun DisplaySection(prefs: SharedPreferences) {
-    SettingsSwitchItem(prefs, "forceServerSideDecorations", "Force Server-Side Decorations",
-        "Compositor-drawn window borders", Icons.Filled.BorderOuter, default = true)
+    LockedSwitchItem("Force Server-Side Decorations",
+        "Compositor-drawn window borders (always enabled)", Icons.Filled.BorderOuter,
+        alertTitle = "Force Server-Side Decorations",
+        alertMessage = "Android does not support Client-Side Decoration (CSD). " +
+            "Window decorations must be drawn by the compositor, so Force " +
+            "Server-Side Decorations is always enabled.")
     SettingsSwitchItem(prefs, "autoScale", "Auto Scale",
         "Detect and match Android UI scaling", Icons.Filled.AspectRatio, default = true)
     SettingsSwitchItem(prefs, "respectSafeArea", "Respect Safe Area",
@@ -151,10 +163,10 @@ private fun DisplaySection(prefs: SharedPreferences) {
 private fun GraphicsSection(prefs: SharedPreferences) {
     SettingsSectionHeader("Drivers", Icons.Filled.Speed)
     SettingsDropdownItem(prefs, "vulkanDriver", "Vulkan Driver",
-        "Select Vulkan implementation. None disables Vulkan.", Icons.Filled.Speed, "system",
+        "Select Vulkan implementation. None disables Vulkan.", Icons.Filled.Speed, "None",
         listOf("None", "SwiftShader", "Turnip", "System"))
     SettingsDropdownItem(prefs, "openglDriver", "OpenGL Driver",
-        "Select OpenGL/GLES implementation. None disables OpenGL.", Icons.Filled.GraphicEq, "system",
+        "Select OpenGL/GLES implementation. None disables OpenGL.", Icons.Filled.GraphicEq, "None",
         listOf("None", "ANGLE", "System"))
     SettingsSectionHeader("Features", Icons.Filled.Tune)
     SettingsSwitchItem(prefs, "dmabufEnabled", "DmaBuf Support",
@@ -275,6 +287,36 @@ private fun WaypipeSection(prefs: SharedPreferences, localIp: String?, context: 
 
     Spacer(Modifier.height(8.dp))
 
+    // Waypipe & SSH Logs
+    var showLogsDialog by remember { mutableStateOf(false) }
+    Surface(
+        onClick = { showLogsDialog = true },
+        color = MaterialTheme.colorScheme.surface,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(Modifier.padding(vertical = 12.dp).fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Filled.Description, null, Modifier.size(24.dp),
+                tint = MaterialTheme.colorScheme.secondary)
+            Spacer(Modifier.width(16.dp))
+            Column(Modifier.weight(1f)) {
+                Text("Waypipe & SSH Logs", style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurface)
+                Text("View and copy Waypipe/Dropbear output",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Icon(Icons.Filled.ChevronRight, "Open", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+    if (showLogsDialog) {
+        WaypipeLogsDialog(
+            logPath = File(context.cacheDir, "wawona-runtime/waypipe-stderr.log").absolutePath,
+            onDismiss = { showLogsDialog = false }
+        )
+    }
+
+    Spacer(Modifier.height(8.dp))
+
     // Advanced Waypipe Options
     var showAdvanced by remember { mutableStateOf(false) }
     Surface(
@@ -328,7 +370,8 @@ private fun SSHSection(prefs: SharedPreferences) {
     // Connection settings
     SettingsSectionHeader("Connection", Icons.Filled.Computer)
     SettingsTextInputItem(prefs, "waypipeSSHHost", "SSH Host",
-        "Remote host address", Icons.Filled.Computer, "", KeyboardType.Text)
+        "IP or hostname (use IP on Android; SSH config aliases like \"ssh\" don't resolve)",
+        Icons.Filled.Computer, "", KeyboardType.Text)
     SettingsTextInputItem(prefs, "waypipeSSHUser", "SSH User",
         "SSH username", Icons.Filled.Person, "", KeyboardType.Text)
 
@@ -414,8 +457,183 @@ private fun SSHSection(prefs: SharedPreferences) {
         }
     }
 
-    pingResult?.let { TestResultCard(it) }
-    sshResult?.let { TestResultCard(it) }
+    val ctx = LocalContext.current
+    pingResult?.let { TestResultCard(it, ctx) }
+    sshResult?.let { TestResultCard(it, ctx) }
+}
+
+@Composable
+private fun AboutSection(context: Context) {
+    val uriHandler = LocalUriHandler.current
+    val version = try {
+        val pkg = context.packageManager.getPackageInfo(context.packageName, 0)
+        val v = pkg.versionName ?: "1.0"
+        if (v.startsWith("v")) v else "v$v"
+    } catch (_: Exception) { "v1.0" }
+
+    Column(
+        Modifier.fillMaxWidth(),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Spacer(Modifier.height(24.dp))
+        Image(
+            painter = painterResource(com.aspauldingcode.wawona.R.drawable.ic_launcher_foreground),
+            contentDescription = null,
+            Modifier.size(100.dp)
+        )
+        Spacer(Modifier.height(16.dp))
+        Text("Wawona",
+            style = MaterialTheme.typography.headlineLarge.copy(fontWeight = FontWeight.Bold),
+            color = MaterialTheme.colorScheme.onSurface)
+        Spacer(Modifier.height(4.dp))
+        Text("Version $version",
+            style = MaterialTheme.typography.bodyLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Spacer(Modifier.height(24.dp))
+        Text("Alex Spaulding",
+            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
+            color = MaterialTheme.colorScheme.onSurface)
+        Spacer(Modifier.height(16.dp))
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            OutlinedButton(
+                onClick = { uriHandler.openUri("https://ko-fi.com/aspauldingcode") },
+                modifier = Modifier.weight(1f),
+                shape = RoundedCornerShape(12.dp)
+            ) { Text("Ko-fi") }
+            OutlinedButton(
+                onClick = { uriHandler.openUri("https://github.com/sponsors/aspauldingcode") },
+                modifier = Modifier.weight(1f),
+                shape = RoundedCornerShape(12.dp)
+            ) { Text("GitHub Sponsors") }
+        }
+        Spacer(Modifier.height(12.dp))
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            TextButton(
+                onClick = { uriHandler.openUri("https://github.com/aspauldingcode") }
+            ) { Text("GitHub") }
+            TextButton(
+                onClick = { uriHandler.openUri("https://www.linkedin.com/in/aspauldingcode/") }
+            ) { Text("LinkedIn") }
+        }
+        Spacer(Modifier.height(24.dp))
+        SettingsSectionHeader("Dependencies", Icons.Filled.Inventory)
+        Spacer(Modifier.height(8.dp))
+        AboutDependencyRow("Waypipe", "v0.10.6", "Remote Wayland display proxy")
+        AboutDependencyRow("libwayland", "v1.23", "Wayland protocol library")
+        AboutDependencyRow("xkbcommon", "v1.7.0", "Keyboard handling library")
+        AboutDependencyRow("LZ4", "v1.9", "Fast compression algorithm")
+        AboutDependencyRow("Zstd", "v1.5", "Zstandard compression")
+        AboutDependencyRow("libffi", "v3.4", "Foreign function interface")
+        AboutDependencyRow("SwiftShader", "v2024", "Vulkan software renderer")
+        AboutDependencyRow("Dropbear", "v2025.89", "SSH client for Android")
+        AboutDependencyRow("OpenSSL", "v3.4", "Cryptography library")
+        Spacer(Modifier.height(32.dp))
+    }
+}
+
+@Composable
+private fun AboutDependencyRow(name: String, version: String, description: String) {
+    val displayVersion = if (version.startsWith("v")) version else "v$version"
+    Surface(
+        Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(Icons.Filled.Inventory2, null, Modifier.size(20.dp),
+                tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.8f))
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(name, style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
+                    color = MaterialTheme.colorScheme.onSurface)
+                Text(description, style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Text(displayVersion, style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Medium),
+                color = MaterialTheme.colorScheme.primary)
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Waypipe Logs Dialog
+// ═══════════════════════════════════════════════════════════════════════════
+
+@Composable
+private fun WaypipeLogsDialog(logPath: String, onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    val clipboardManager = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+    var logContent by remember { mutableStateOf("Loading...") }
+    var refreshTrigger by remember { mutableStateOf(0) }
+    LaunchedEffect(logPath, refreshTrigger) {
+        logContent = withContext(Dispatchers.IO) {
+            try {
+                File(logPath).readText().ifEmpty { "(No logs yet. Run Waypipe to generate output.)" }
+            } catch (_: Exception) {
+                "(Log file not found or empty. Run Waypipe to generate output.)"
+            }
+        }
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Waypipe & SSH Logs") },
+        text = {
+            Column {
+                Text("Path: $logPath",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("Logs appear when Waypipe runs. Tap Refresh to reload.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.height(8.dp))
+                Surface(
+                    Modifier.fillMaxWidth().heightIn(max = 300.dp),
+                    shape = RoundedCornerShape(8.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                ) {
+                    Column(
+                        Modifier.fillMaxSize()
+                            .verticalScroll(rememberScrollState())
+                            .padding(12.dp)
+                    ) {
+                        Text(logContent,
+                            style = MaterialTheme.typography.bodySmall,
+                            fontFamily = FontFamily.Monospace)
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(onClick = { refreshTrigger++ }) {
+                    Icon(Icons.Filled.Refresh, null, Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Refresh")
+                }
+                Button(onClick = onDismiss) { Text("Close") }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = {
+                clipboardManager.setPrimaryClip(ClipData.newPlainText("Waypipe Logs", logContent))
+            }) {
+                Icon(Icons.Filled.ContentCopy, null, Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Copy to clipboard")
+            }
+        }
+    )
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -423,19 +641,35 @@ private fun SSHSection(prefs: SharedPreferences) {
 // ═══════════════════════════════════════════════════════════════════════════
 
 @Composable
-fun TestResultCard(result: String) {
+fun TestResultCard(result: String, context: Context) {
     val isOk = result.startsWith("OK")
+    val clipboardManager = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
     Surface(
         Modifier.fillMaxWidth().padding(vertical = 4.dp),
         shape = RoundedCornerShape(12.dp),
         color = if (isOk) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f)
         else MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.5f)
     ) {
-        Text(result, Modifier.padding(12.dp),
-            style = MaterialTheme.typography.bodySmall,
-            fontFamily = FontFamily.Monospace,
-            color = if (isOk) MaterialTheme.colorScheme.onPrimaryContainer
-            else MaterialTheme.colorScheme.onErrorContainer)
+        Row(
+            Modifier.fillMaxWidth().padding(12.dp),
+            verticalAlignment = Alignment.Top
+        ) {
+            Text(result, Modifier.weight(1f),
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+                color = if (isOk) MaterialTheme.colorScheme.onPrimaryContainer
+                else MaterialTheme.colorScheme.onErrorContainer)
+            IconButton(
+                onClick = {
+                    clipboardManager.setPrimaryClip(ClipData.newPlainText("SSH Test Result", result))
+                },
+                modifier = Modifier.size(36.dp)
+            ) {
+                Icon(Icons.Filled.ContentCopy, contentDescription = "Copy to clipboard",
+                    tint = if (isOk) MaterialTheme.colorScheme.onPrimaryContainer
+                    else MaterialTheme.colorScheme.onErrorContainer)
+            }
+        }
     }
 }
 
@@ -455,6 +689,55 @@ fun SettingsSectionHeader(title: String, icon: ImageVector) {
             style = MaterialTheme.typography.titleMedium.copy(
                 fontWeight = FontWeight.SemiBold, letterSpacing = (-0.01).sp),
             color = MaterialTheme.colorScheme.primary)
+    }
+}
+
+@Composable
+fun LockedSwitchItem(
+    title: String, description: String, icon: ImageVector,
+    alertTitle: String, alertMessage: String
+) {
+    var showDialog by remember { mutableStateOf(false) }
+    Surface(
+        onClick = { showDialog = true },
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.2f)
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+                Icon(icon, null, Modifier.size(24.dp),
+                    tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.4f))
+                Spacer(Modifier.width(16.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(title, style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.Medium),
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+                    Spacer(Modifier.height(4.dp))
+                    Text(description, style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f))
+                }
+            }
+            Spacer(Modifier.width(16.dp))
+            Switch(checked = true, onCheckedChange = { showDialog = true }, enabled = false,
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = MaterialTheme.colorScheme.primary,
+                    checkedTrackColor = MaterialTheme.colorScheme.primaryContainer
+                ))
+        }
+    }
+    if (showDialog) {
+        AlertDialog(
+            onDismissRequest = { showDialog = false },
+            title = { Text(alertTitle) },
+            text = { Text(alertMessage) },
+            confirmButton = {
+                TextButton(onClick = { showDialog = false }) { Text("OK") }
+            }
+        )
     }
 }
 

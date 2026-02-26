@@ -159,52 +159,57 @@
 @implementation WWNPreferences
 
 #if TARGET_OS_IPHONE
-static UIImage *WWNLogoForStyle(UIUserInterfaceStyle style) {
-  NSArray<NSString *> *preferredNames = nil;
-  NSArray<NSString *> *fallbackNames = nil;
-
-  if (style == UIUserInterfaceStyleDark) {
-    preferredNames = @[
-      @"Wawona-iOS-Light-1024x1024@1x.png", @"Wawona-iOS-Light-1024x1024@1x",
-      @"Wawona-iOS-Light-1024x1024", @"Wawona-iOS-Light"
-    ];
-    fallbackNames = @[
-      @"Wawona-iOS-Dark-1024x1024@1x.png", @"Wawona-iOS-Dark-1024x1024@1x",
-      @"Wawona-iOS-Dark-1024x1024", @"Wawona-iOS-Dark"
-    ];
-  } else {
-    preferredNames = @[
-      @"Wawona-iOS-Dark-1024x1024@1x.png", @"Wawona-iOS-Dark-1024x1024@1x",
-      @"Wawona-iOS-Dark-1024x1024", @"Wawona-iOS-Dark"
-    ];
-    fallbackNames = @[
-      @"Wawona-iOS-Light-1024x1024@1x.png", @"Wawona-iOS-Light-1024x1024@1x",
-      @"Wawona-iOS-Light-1024x1024", @"Wawona-iOS-Light"
-    ];
-  }
-
+/// Load the About-header logo using the same cascading strategy as macOS:
+/// always prefer the dark variant, with direct bundle-path fallback to
+/// bypass iOS's @1x scale-suffix interpretation.
+static UIImage *WWNAboutLogo(void) {
   NSBundle *bundle = [NSBundle mainBundle];
-  NSArray<NSString *> *allNames =
-      [preferredNames arrayByAddingObjectsFromArray:fallbackNames];
-  for (NSString *name in allNames) {
-    UIImage *img = [UIImage imageNamed:name];
-    if (img) {
-      return img;
-    }
+  NSFileManager *fm = [NSFileManager defaultManager];
+  UIImage *img = nil;
 
-    NSString *base = [name stringByDeletingPathExtension];
-    NSString *ext = [name pathExtension];
-    if (ext.length == 0) {
-      ext = @"png";
-    }
-    NSString *path = [bundle pathForResource:base ofType:ext];
-    if (path.length > 0) {
-      img = [UIImage imageWithContentsOfFile:path];
-      if (img) {
-        return img;
-      }
-    }
+  img = [UIImage imageNamed:@"Wawona-iOS-Dark-1024x1024@1x.png"];
+  if (img) return img;
+
+  NSString *path =
+      [bundle pathForResource:@"Wawona-iOS-Dark-1024x1024@1x" ofType:@"png"];
+  if (path) {
+    img = [UIImage imageWithContentsOfFile:path];
+    if (img) return img;
   }
+
+  path = [bundle pathForResource:@"Wawona-iOS-Dark-1024x1024" ofType:@"png"];
+  if (path) {
+    img = [UIImage imageWithContentsOfFile:path];
+    if (img) return img;
+  }
+
+  NSString *bundleRoot = [bundle bundlePath];
+  NSString *direct =
+      [bundleRoot stringByAppendingPathComponent:
+                      @"Wawona-iOS-Dark-1024x1024@1x.png"];
+  if ([fm fileExistsAtPath:direct]) {
+    img = [UIImage imageWithContentsOfFile:direct];
+    if (img) return img;
+  }
+
+  direct = [bundleRoot stringByAppendingPathComponent:
+                           @"Wawona-iOS-Dark-1024x1024.png"];
+  if ([fm fileExistsAtPath:direct]) {
+    img = [UIImage imageWithContentsOfFile:direct];
+    if (img) return img;
+  }
+
+  img = [UIImage imageNamed:@"Wawona"];
+  if (img) return img;
+
+  path = [bundle pathForResource:@"Wawona" ofType:@"png"];
+  if (path) {
+    img = [UIImage imageWithContentsOfFile:path];
+    if (img) return img;
+  }
+
+  img = [UIImage imageNamed:@"Wawona-iOS-Light-1024x1024@1x.png"];
+  if (img) return img;
 
   return nil;
 }
@@ -290,8 +295,13 @@ static UIImage *WWNLogoForStyle(UIUserInterfaceStyle style) {
   static BOOL sHasCheckedForceSSD = NO;
 
   NSUserDefaults *defs = [NSUserDefaults standardUserDefaults];
-  if ([defs objectForKey:@"ForceServerSideDecorations"]) {
-    BOOL enabled = [defs boolForKey:@"ForceServerSideDecorations"];
+#if TARGET_OS_IPHONE
+  // iOS: CSD not supported; Force SSD is always on.
+  BOOL enabled = YES;
+#else
+  BOOL enabled = [defs boolForKey:@"ForceServerSideDecorations"];
+#endif
+  if ([defs objectForKey:@"ForceServerSideDecorations"] || enabled) {
     if (!sHasCheckedForceSSD || sLastForceSSD != enabled) {
       sLastForceSSD = enabled;
       sHasCheckedForceSSD = YES;
@@ -3063,6 +3073,12 @@ static UIImage *WWNLogoForStyle(UIUserInterfaceStyle style) {
       sw.enabled = NO;
       cell.textLabel.textColor = [UIColor secondaryLabelColor];
       cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+    // iOS: Force SSD is always on; CSD is not supported on iOS.
+    } else if ([item.key isEqualToString:@"ForceServerSideDecorations"]) {
+      sw.on = YES;
+      sw.enabled = NO;
+      cell.textLabel.textColor = [UIColor secondaryLabelColor];
+      cell.selectionStyle = UITableViewCellSelectionStyleDefault;
     } else {
       sw.on = [[NSUserDefaults standardUserDefaults] boolForKey:item.key];
     }
@@ -3209,37 +3225,107 @@ static UIImage *WWNLogoForStyle(UIUserInterfaceStyle style) {
                 }];
     }
   } else if (item.type == WSettingHeader) {
-    // Special header cell with centered content
-    cell.textLabel.font = [UIFont boldSystemFontOfSize:20];
-    cell.textLabel.textAlignment = NSTextAlignmentCenter;
-    cell.detailTextLabel.text = item.desc;
-    cell.detailTextLabel.textAlignment = NSTextAlignmentCenter;
-    cell.detailTextLabel.numberOfLines = 0;
-    cell.selectionStyle = UITableViewCellSelectionStyleNone;
-    cell.accessoryType = UITableViewCellAccessoryNone;
+    // Android-style About header: vertically stacked, centered layout.
+    // Use a different reuse identifier so Auto Layout doesn't collide
+    // with the standard Value1 cells.
+    static NSString *const kHeaderID = @"AboutHeader";
+    UITableViewCell *headerCell =
+        [tv dequeueReusableCellWithIdentifier:kHeaderID];
 
-    // Load profile image if URL provided or use adaptive local logo
-    NSString *imgURL = item.imageURL ?: item.imageName;
-    if ([imgURL isEqualToString:@"WWNAdaptiveLogo"] ||
-        [imgURL containsString:@"Wawona-iOS-"]) {
-      cell.imageView.image =
-          WWNLogoForStyle(self.traitCollection.userInterfaceStyle);
-      cell.imageView.layer.cornerRadius = 0;
-      cell.imageView.clipsToBounds = YES;
-      [cell setNeedsLayout];
-    } else if (imgURL) {
-      [[WWNImageLoader sharedLoader]
-          loadImageFromURL:imgURL
-                completion:^(WImage _Nullable image) {
-                  if (image &&
-                      [cell.textLabel.text isEqualToString:item.title]) {
-                    cell.imageView.image = image;
-                    cell.imageView.layer.cornerRadius = 30;
-                    cell.imageView.clipsToBounds = YES;
-                    [cell setNeedsLayout];
-                  }
-                }];
+    if (!headerCell) {
+      headerCell =
+          [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault
+                                 reuseIdentifier:kHeaderID];
+      headerCell.selectionStyle = UITableViewCellSelectionStyleNone;
+      headerCell.backgroundColor = [UIColor clearColor];
+
+      UIStackView *stack = [[UIStackView alloc] init];
+      stack.axis = UILayoutConstraintAxisVertical;
+      stack.alignment = UIStackViewAlignmentCenter;
+      stack.spacing = 0;
+      stack.translatesAutoresizingMaskIntoConstraints = NO;
+      stack.tag = 900;
+      [headerCell.contentView addSubview:stack];
+
+      [NSLayoutConstraint activateConstraints:@[
+        [stack.topAnchor
+            constraintEqualToAnchor:headerCell.contentView.topAnchor
+                           constant:24],
+        [stack.bottomAnchor
+            constraintEqualToAnchor:headerCell.contentView.bottomAnchor
+                           constant:-24],
+        [stack.leadingAnchor
+            constraintEqualToAnchor:headerCell.contentView.leadingAnchor
+                           constant:20],
+        [stack.trailingAnchor
+            constraintEqualToAnchor:headerCell.contentView.trailingAnchor
+                           constant:-20]
+      ]];
+
+      // Logo
+      UIImageView *logo = [[UIImageView alloc] init];
+      logo.contentMode = UIViewContentModeScaleAspectFit;
+      logo.tag = 901;
+      [stack addArrangedSubview:logo];
+      [NSLayoutConstraint activateConstraints:@[
+        [logo.widthAnchor constraintEqualToConstant:100],
+        [logo.heightAnchor constraintEqualToConstant:100]
+      ]];
+
+      [stack setCustomSpacing:16 afterView:logo];
+
+      // App title
+      UILabel *titleLabel = [[UILabel alloc] init];
+      titleLabel.font =
+          [UIFont systemFontOfSize:28 weight:UIFontWeightBold];
+      titleLabel.textAlignment = NSTextAlignmentCenter;
+      titleLabel.tag = 902;
+      [stack addArrangedSubview:titleLabel];
+
+      [stack setCustomSpacing:4 afterView:titleLabel];
+
+      // Version
+      UILabel *versionLabel = [[UILabel alloc] init];
+      versionLabel.font = [UIFont systemFontOfSize:15];
+      versionLabel.textColor = [UIColor secondaryLabelColor];
+      versionLabel.textAlignment = NSTextAlignmentCenter;
+      versionLabel.tag = 903;
+      [stack addArrangedSubview:versionLabel];
+
+      [stack setCustomSpacing:12 afterView:versionLabel];
+
+      // Description
+      UILabel *descLabel = [[UILabel alloc] init];
+      descLabel.font = [UIFont systemFontOfSize:15];
+      descLabel.textColor = [UIColor secondaryLabelColor];
+      descLabel.textAlignment = NSTextAlignmentCenter;
+      descLabel.numberOfLines = 0;
+      descLabel.tag = 904;
+      [stack addArrangedSubview:descLabel];
     }
+
+    // Populate
+    UIImageView *logo =
+        [headerCell.contentView viewWithTag:901];
+    UILabel *titleLabel =
+        (UILabel *)[headerCell.contentView viewWithTag:902];
+    UILabel *versionLabel =
+        (UILabel *)[headerCell.contentView viewWithTag:903];
+    UILabel *descLabel =
+        (UILabel *)[headerCell.contentView viewWithTag:904];
+
+    UIImage *logoImage = WWNAboutLogo();
+    logo.image = logoImage;
+
+    titleLabel.text = item.title;
+
+    NSString *ver = [self getWWNVersion];
+    versionLabel.text =
+        [NSString stringWithFormat:@"Version %@", ver];
+
+    descLabel.text = item.desc;
+
+    return headerCell;
   }
   return cell;
 }
@@ -3296,6 +3382,21 @@ static UIImage *WWNLogoForStyle(UIUserInterfaceStyle style) {
     UIAlertController *alert = [UIAlertController
         alertControllerWithTitle:item.title
                          message:@"iOS does not allow disabling this feature."
+                  preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK"
+                                              style:UIAlertActionStyleDefault
+                                            handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+    return;
+  }
+  // Force SSD is fixed on iOS; CSD not supported.
+  if ([item.key isEqualToString:@"ForceServerSideDecorations"]) {
+    UIAlertController *alert = [UIAlertController
+        alertControllerWithTitle:item.title
+                         message:@"iOS does not support Client-Side Decoration "
+                                  "(CSD). Window decorations must be drawn by "
+                                  "the compositor, so Force Server-Side "
+                                  "Decorations is always enabled."
                   preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"OK"
                                               style:UIAlertActionStyleDefault
@@ -4183,18 +4284,32 @@ static UIImage *WWNLogoForStyle(UIUserInterfaceStyle style) {
     if (item.imageURL || item.imageName) {
       self.headerImageView.hidden = NO;
 
-      // Load the adaptive Wawona icon using standard AppKit resolution.
-      // This will find Wawona.icon bundle on macOS 26+.
-      NSImage *icon = [NSImage imageNamed:@"Wawona"];
-
-      // Fallback: try loading specific PNGs if imageNamed fails or we want a
-      // specific style
+      // Prefer the dark variant for the Settings > About header image.
+      NSImage *icon = [NSImage imageNamed:@"Wawona-iOS-Dark-1024x1024@1x.png"];
       if (!icon) {
         NSString *darkPath = [[NSBundle mainBundle]
             pathForResource:@"Wawona-iOS-Dark-1024x1024@1x"
                      ofType:@"png"];
         if (darkPath) {
           icon = [[NSImage alloc] initWithContentsOfFile:darkPath];
+        }
+      }
+      if (!icon) {
+        icon = [NSImage imageNamed:@"Wawona"];
+      }
+      if (!icon) {
+        NSString *pngPath =
+            [[NSBundle mainBundle] pathForResource:@"Wawona" ofType:@"png"];
+        if (pngPath) {
+          icon = [[NSImage alloc] initWithContentsOfFile:pngPath];
+        }
+      }
+      if (!icon) {
+        NSString *lightPath = [[NSBundle mainBundle]
+            pathForResource:@"Wawona-iOS-Light-1024x1024@1x"
+                     ofType:@"png"];
+        if (lightPath) {
+          icon = [[NSImage alloc] initWithContentsOfFile:lightPath];
         }
       }
 

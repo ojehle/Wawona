@@ -634,7 +634,7 @@ EOF
     
     # Create .desktop file for launcher
     mkdir -p $out/share/applications
-    cat > $out/share/clients/foot.desktop << 'EOF'
+    cat > $out/share/applications/foot.desktop << 'EOF'
 [Desktop Entry]
 Name=Foot Terminal
 Comment=Fast, lightweight Wayland terminal

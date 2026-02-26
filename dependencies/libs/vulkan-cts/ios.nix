@@ -2,30 +2,45 @@
   lib,
   pkgs,
   buildPackages,
-  common ? null,
   buildModule,
+  buildTargets ? "deqp-vk",
 }:
 
 let
-  sources = import ./sources.nix {
-    inherit (pkgs) fetchurl fetchFromGitHub;
-  };
+  common = import ./common.nix { inherit pkgs; };
   xcodeUtils = import ../../utils/xcode-wrapper.nix { inherit lib pkgs; };
   kosmickrisp = buildModule.buildForIOS "kosmickrisp" { };
 in
 pkgs.stdenv.mkDerivation (finalAttrs: {
   pname = "vulkan-cts-ios";
-  version = "1.4.5.0";
+  version = common.version;
 
-  src = pkgs.fetchFromGitHub {
-    owner = "KhronosGroup";
-    repo = "VK-GL-CTS";
-    rev = "vulkan-cts-${finalAttrs.version}";
-    hash = "sha256-cbXSelRPCCH52xczWaxqftbimHe4PyIKZqySQSFTHos=";
-  };
+  src = common.src;
 
-  prePatch = ''
-    ${sources.prePatch}
+  prePatch = common.prePatch + ''
+    # vksCacheBuilder.cpp uses system() which is unavailable on iOS
+    substituteInPlace external/vulkancts/vkscserver/vksCacheBuilder.cpp \
+      --replace 'int returnValue     = system(command.c_str());' \
+      'int returnValue;
+#if defined(__IPHONE_OS_VERSION_MIN_REQUIRED)
+        returnValue = -1;  /* system() unavailable on iOS */
+#else
+        returnValue = system(command.c_str());
+#endif'
+
+    # tcuIOSPlatform.mm needs OpenGL ES headers for GL_RENDERBUFFER etc.
+    substituteInPlace framework/platform/ios/tcuIOSPlatform.mm \
+      --replace '#include "tcuIOSPlatform.hh"' \
+      '#include "tcuIOSPlatform.hh"
+#include <OpenGLES/ES2/gl.h>'
+
+    # ContextFactory::createContext signature: add sharedContext param (3rd arg)
+    substituteInPlace framework/platform/ios/tcuIOSPlatform.hh \
+      --replace 'createContext(const glu::RenderConfig &config, const tcu::CommandLine &cmdLine) const' \
+      'createContext(const glu::RenderConfig &config, const tcu::CommandLine &cmdLine, const glu::RenderContext *sharedContext) const'
+    substituteInPlace framework/platform/ios/tcuIOSPlatform.mm \
+      --replace 'const tcu::CommandLine &) const' \
+      'const tcu::CommandLine &, const glu::RenderContext *) const'
   '';
 
   nativeBuildInputs = with buildPackages; [
@@ -78,8 +93,8 @@ pkgs.stdenv.mkDerivation (finalAttrs: {
     set(CMAKE_CXX_COMPILER "$IOS_CXX")
     set(CMAKE_SYSROOT "$SDKROOT")
     set(CMAKE_OSX_SYSROOT "$SDKROOT")
-    set(CMAKE_C_FLAGS "-mios-simulator-version-min=15.0")
-    set(CMAKE_CXX_FLAGS "-mios-simulator-version-min=15.0")
+    set(CMAKE_C_FLAGS "-mios-simulator-version-min=15.0 -DGLES_SILENCE_DEPRECATION")
+    set(CMAKE_CXX_FLAGS "-mios-simulator-version-min=15.0 -DGLES_SILENCE_DEPRECATION")
     set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
     set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
     set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
@@ -88,20 +103,61 @@ pkgs.stdenv.mkDerivation (finalAttrs: {
 
   cmakeFlags = [
     "-DCMAKE_TOOLCHAIN_FILE=ios-toolchain.cmake"
+    "-DDEQP_TARGET=ios"
+    "-DDE_OS=DE_OS_IOS"
     "-DCMAKE_INSTALL_BINDIR=bin"
     "-DCMAKE_INSTALL_LIBDIR=lib"
     "-DCMAKE_INSTALL_INCLUDEDIR=include"
-    "-DSELECTED_BUILD_TARGETS=deqp-vk"
-    (lib.cmakeFeature "FETCHCONTENT_SOURCE_DIR_SHADERC" "${sources.shaderc-src}")
+    "-DSELECTED_BUILD_TARGETS=${buildTargets}"
+    (lib.cmakeFeature "FETCHCONTENT_SOURCE_DIR_SHADERC" "${common.sources.shaderc-src}")
   ];
 
   postInstall = ''
-    test ! -e $out
+    mkdir -p $out/Applications $out/bin $out/archive-dir
+    if [ -d deqp.app ]; then
+      cp -a deqp.app $out/Applications/
+    else
+      [ -f external/vulkancts/modules/vulkan/deqp-vk ] && cp -a external/vulkancts/modules/vulkan/deqp-vk $out/bin/ || true
+      [ -d external/vulkancts/modules/vulkan/vulkan ] && cp -a external/vulkancts/modules/vulkan/vulkan $out/archive-dir/ || true
+      [ -d external/vulkancts/modules/vulkan/vk-default ] && cp -a external/vulkancts/modules/vulkan/vk-default $out/ || true
+    fi
+  '';
 
-    mkdir -p $out/bin $out/archive-dir
-    cp -a external/vulkancts/modules/vulkan/deqp-vk $out/bin/ || true
-    cp -a external/vulkancts/modules/vulkan/vulkan $out/archive-dir/ || true
-    cp -a external/vulkancts/modules/vulkan/vk-default $out/ || true
+  postFixup = ''
+    mkdir -p $out/bin
+    cat > $out/bin/vulkan-cts-ios-run <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+CTS_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+APP_PATH="$CTS_DIR/Applications/deqp.app"
+
+if [ ! -d "$APP_PATH" ]; then
+  echo "Error: deqp.app not found at $APP_PATH"
+  exit 1
+fi
+
+SIM_NAME="Vulkan CTS iOS Simulator"
+DEV_TYPE="com.apple.CoreSimulator.SimDeviceType.iPhone-16-Pro"
+RUNTIME=$(xcrun simctl list runtimes 2>/dev/null | grep -i "iOS" | grep -v "unavailable" | awk '{print $NF}' | tail -1)
+if [ -z "$RUNTIME" ]; then
+  echo "Error: No iOS runtime found. Install Xcode and an iOS simulator runtime."
+  exit 1
+fi
+
+SIM_UDID=$(xcrun simctl list devices 2>/dev/null | grep "$SIM_NAME" | grep -v "unavailable" | grep -oE '[0-9A-F]{8}-([0-9A-F]{4}-){3}[0-9A-F]{12}' | head -1)
+if [ -z "$SIM_UDID" ]; then
+  echo "Creating simulator '$SIM_NAME'..."
+  SIM_UDID=$(xcrun simctl create "$SIM_NAME" "$DEV_TYPE" "$RUNTIME")
+fi
+
+xcrun simctl boot "$SIM_UDID" 2>/dev/null || true
+open -a Simulator 2>/dev/null || true
+echo "Installing Vulkan CTS (deqp.app) to simulator..."
+xcrun simctl install "$SIM_UDID" "$APP_PATH"
+echo "Launching Vulkan CTS..."
+xcrun simctl launch "$SIM_UDID" com.drawelements.deqp "$@"
+SCRIPT
+    chmod +x $out/bin/vulkan-cts-ios-run
   '';
 
   meta = {

@@ -3,6 +3,9 @@ package com.aspauldingcode.wawona
 import android.content.Context
 import android.content.SharedPreferences
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.view.inputmethod.InputMethodManager
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.WindowInsetsController
@@ -13,24 +16,17 @@ import androidx.activity.enableEdgeToEdge
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
-import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.spring
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.scaleIn
-import androidx.compose.animation.scaleOut
-import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
-import androidx.compose.foundation.layout.windowInsetsPadding
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -38,6 +34,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -47,6 +44,9 @@ import kotlinx.coroutines.delay
 class MainActivity : ComponentActivity(), SurfaceHolder.Callback {
 
     private lateinit var prefs: SharedPreferences
+    private var surfaceReady = false
+    private val resizeHandler = Handler(Looper.getMainLooper())
+    private var pendingResize: Runnable? = null
 
     companion object {
         val CompositorBackground = Color(0xFF0F1018)
@@ -96,8 +96,9 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback {
                 }
             }
 
-            WawonaNative.nativeInit()
-            WLog.d("ACTIVITY", "nativeInit completed successfully")
+            WawonaNative.nativeInit(cacheDir.absolutePath)
+            WawonaNative.nativeSetDisplayDensity(resources.displayMetrics.density)
+            WLog.d("ACTIVITY", "nativeInit completed successfully (density=${resources.displayMetrics.density})")
         } catch (e: Exception) {
             WLog.e("ACTIVITY", "Fatal error in onCreate: ${e.message}")
             throw e
@@ -105,26 +106,58 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback {
     }
 
     override fun surfaceCreated(holder: SurfaceHolder) {
-        WLog.d("SURFACE", "surfaceCreated")
-        try {
-            WawonaNative.nativeSetSurface(holder.surface)
-            WawonaSettings.apply(prefs)
-        } catch (e: Exception) {
-            WLog.e("SURFACE", "Error in surfaceCreated: ${e.message}")
-        }
+        WLog.d("SURFACE", "surfaceCreated (waiting for surfaceChanged with final dimensions)")
     }
 
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
         WLog.d("SURFACE", "surfaceChanged: format=$format, width=$width, height=$height")
+
+        if (!surfaceReady) {
+            try {
+                WawonaNative.nativeSetSurface(holder.surface)
+                surfaceReady = true
+                WawonaNative.nativeSyncOutputSize(width, height)
+                WawonaSettings.apply(prefs)
+            } catch (e: Exception) {
+                WLog.e("SURFACE", "Error in initial surfaceChanged: ${e.message}")
+            }
+            return
+        }
+
+        pendingResize?.let { resizeHandler.removeCallbacks(it) }
+        val resize = Runnable {
+            WLog.d("SURFACE", "Applying deferred resize: ${width}x${height}")
+            try {
+                WawonaNative.nativeResizeSurface(width, height)
+                WawonaSettings.apply(prefs)
+            } catch (e: Exception) {
+                WLog.e("SURFACE", "Error in deferred surfaceChanged: ${e.message}")
+            }
+        }
+        pendingResize = resize
+        resizeHandler.postDelayed(resize, 200)
     }
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
         WLog.d("SURFACE", "surfaceDestroyed")
+        pendingResize?.let { resizeHandler.removeCallbacks(it) }
+        pendingResize = null
         try {
             WawonaNative.nativeDestroySurface()
+            surfaceReady = false
         } catch (e: Exception) {
             WLog.e("SURFACE", "Error in surfaceDestroyed: ${e.message}")
         }
+    }
+
+    override fun onDestroy() {
+        WLog.d("ACTIVITY", "onDestroy — shutting down compositor core")
+        try {
+            WawonaNative.nativeShutdown()
+        } catch (e: Exception) {
+            WLog.e("ACTIVITY", "Error in nativeShutdown: ${e.message}")
+        }
+        super.onDestroy()
     }
 }
 
@@ -141,66 +174,57 @@ fun WawonaApp(
 
     val activity = context as? ComponentActivity
     
-    val westonEnabled = prefs.getBoolean("westonSimpleSHMEnabled", false)
-    LaunchedEffect(westonEnabled) {
-        if (westonEnabled && !WawonaNative.nativeIsWestonSimpleSHMRunning()) {
-            WawonaNative.nativeRunWestonSimpleSHM()
-        } else if (!westonEnabled && WawonaNative.nativeIsWestonSimpleSHMRunning()) {
+    var westonSimpleShmEnabled by remember {
+        mutableStateOf(prefs.getBoolean("westonSimpleSHMEnabled", false))
+    }
+    var nativeWestonEnabled by remember {
+        mutableStateOf(prefs.getBoolean("westonEnabled", false))
+    }
+    var nativeWestonTerminalEnabled by remember {
+        mutableStateOf(prefs.getBoolean("westonTerminalEnabled", false))
+    }
+
+    DisposableEffect(prefs) {
+        val listener = SharedPreferences.OnSharedPreferenceChangeListener { sp, key ->
+            when (key) {
+                "westonSimpleSHMEnabled" ->
+                    westonSimpleShmEnabled = sp.getBoolean("westonSimpleSHMEnabled", false)
+                "westonEnabled" ->
+                    nativeWestonEnabled = sp.getBoolean("westonEnabled", false)
+                "westonTerminalEnabled" ->
+                    nativeWestonTerminalEnabled = sp.getBoolean("westonTerminalEnabled", false)
+            }
+        }
+        prefs.registerOnSharedPreferenceChangeListener(listener)
+        onDispose { prefs.unregisterOnSharedPreferenceChangeListener(listener) }
+    }
+
+    LaunchedEffect(westonSimpleShmEnabled, nativeWestonEnabled, nativeWestonTerminalEnabled) {
+        // Android Weston/weston-terminal are currently compatibility stubs.
+        // Route all three toggles to the in-process weston-simple-shm client so
+        // enabling from Settings has immediate visible behavior.
+        val shouldRunCompatClient =
+            westonSimpleShmEnabled || nativeWestonEnabled || nativeWestonTerminalEnabled
+        val isRunning = WawonaNative.nativeIsWestonSimpleSHMRunning()
+
+        if (shouldRunCompatClient && !isRunning) {
+            val launched = WawonaNative.nativeRunWestonSimpleSHM()
+            if (launched) {
+                WLog.i(
+                    "WESTON",
+                    "Compatibility Weston client launched (simple-shm backend)"
+                )
+            } else {
+                WLog.e("WESTON", "Failed to launch compatibility Weston client")
+            }
+        } else if (!shouldRunCompatClient && isRunning) {
             WawonaNative.nativeStopWestonSimpleSHM()
+            WLog.i("WESTON", "Compatibility Weston client stopped")
         }
     }
 
-    val nativeWestonEnabled = prefs.getBoolean("westonEnabled", false)
-    var nativeWestonProcess by remember { mutableStateOf<java.lang.Process?>(null) }
-    LaunchedEffect(nativeWestonEnabled) {
-        if (nativeWestonEnabled && nativeWestonProcess == null) {
-            try {
-                val libDir = context.applicationInfo.nativeLibraryDir
-                val procBuilder = ProcessBuilder("$libDir/libweston_bin.so")
-                    .redirectErrorStream(true)
-                
-                val tmpDir = System.getenv("TMPDIR") ?: "/data/local/tmp"
-                procBuilder.environment()["XDG_RUNTIME_DIR"] = "$tmpDir/wawona-runtime"
-                procBuilder.environment()["WAYLAND_DISPLAY"] = "wayland-0"
-                
-                val proc = procBuilder.start()
-                nativeWestonProcess = proc
-                WLog.i("WESTON", "Native Weston launched")
-            } catch (e: Exception) {
-                WLog.e("WESTON", "Failed to launch Native Weston: ${e.message}")
-            }
-        } else if (!nativeWestonEnabled && nativeWestonProcess != null) {
-            nativeWestonProcess?.destroy()
-            nativeWestonProcess = null
-            WLog.i("WESTON", "Native Weston stopped")
-        }
-    }
-
-    val nativeWestonTerminalEnabled = prefs.getBoolean("westonTerminalEnabled", false)
-    var nativeWestonTerminalProcess by remember { mutableStateOf<java.lang.Process?>(null) }
-    LaunchedEffect(nativeWestonTerminalEnabled) {
-        if (nativeWestonTerminalEnabled && nativeWestonTerminalProcess == null) {
-            try {
-                val libDir = context.applicationInfo.nativeLibraryDir
-                val procBuilder = ProcessBuilder("$libDir/libweston-terminal_bin.so")
-                    .redirectErrorStream(true)
-                
-                val tmpDir = System.getenv("TMPDIR") ?: "/data/local/tmp"
-                procBuilder.environment()["XDG_RUNTIME_DIR"] = "$tmpDir/wawona-runtime"
-                procBuilder.environment()["WAYLAND_DISPLAY"] = "wayland-0"
-                
-                val proc = procBuilder.start()
-                nativeWestonTerminalProcess = proc
-                WLog.i("WESTON", "Native Weston Terminal launched")
-            } catch (e: Exception) {
-                WLog.e("WESTON", "Failed to launch Native Weston Terminal: ${e.message}")
-            }
-        } else if (!nativeWestonTerminalEnabled && nativeWestonTerminalProcess != null) {
-            nativeWestonTerminalProcess?.destroy()
-            nativeWestonTerminalProcess = null
-            WLog.i("WESTON", "Native Weston Terminal stopped")
-        }
-    }
+    var surfaceViewRef by remember { mutableStateOf<WawonaSurfaceView?>(null) }
+    var hadWindow by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         while (true) {
@@ -208,6 +232,28 @@ fun WawonaApp(
                 isWaypipeRunning = WawonaNative.nativeIsWaypipeRunning()
                 windowTitle = WawonaNative.nativeGetFocusedWindowTitle()
                 ScreencopyHelper.pollAndCapture(activity?.window)
+                val hasWindow = windowTitle.isNotEmpty()
+                if (hasWindow && !hadWindow) {
+                    surfaceViewRef?.requestFocus()
+                    val w = surfaceViewRef?.width ?: 0
+                    val h = surfaceViewRef?.height ?: 0
+                    if (w > 0 && h > 0) {
+                        try {
+                            WawonaNative.nativeSyncOutputSize(w, h)
+                        } catch (_: Exception) { }
+                    }
+                }
+                hadWindow = hasWindow
+
+                // Propagate the Wayland client's window title to the Android
+                // Activity so it appears in the Recents / Overview screen,
+                // mirroring how weston-terminal relays OSC 0/2 title changes.
+                if (windowTitle.isNotEmpty()) {
+                    activity?.title = windowTitle
+                    activity?.setTaskDescription(
+                        android.app.ActivityManager.TaskDescription(windowTitle)
+                    )
+                }
             } catch (_: Exception) { }
             delay(500)
         }
@@ -261,10 +307,15 @@ fun WawonaApp(
         }
     }
 
+    val density = LocalDensity.current
+    val imeBottom = with(density) { WindowInsets.ime.getBottom(this) }
+    val showAccessoryBar = imeBottom > 0
+
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(MainActivity.CompositorBackground)
+            .windowInsetsPadding(WindowInsets.ime)
     ) {
         AndroidView(
             factory = { ctx: Context ->
@@ -272,6 +323,7 @@ fun WawonaApp(
                     holder.addCallback(surfaceCallback)
                 }
             },
+            update = { view -> surfaceViewRef = view },
             modifier = Modifier
                 .fillMaxSize()
                 .then(
@@ -283,34 +335,46 @@ fun WawonaApp(
                 )
         )
 
-        WaypipeStatusBanner(
-            isRunning = isWaypipeRunning,
-            sshEnabled = wpSshEnabled,
-            sshHost = wpSshHost,
-            sshUser = wpSshUser,
-            remoteCommand = wpRemoteCommand,
-            windowTitle = windowTitle,
-            onStopClick = { stopWaypipe() },
-            modifier = Modifier
-                .align(Alignment.TopCenter)
-                .windowInsetsPadding(WindowInsets.safeDrawing)
-        )
+        if (showAccessoryBar) {
+            ModifierAccessoryBar(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth(),
+                onDismissKeyboard = {
+                    val imm = context.getSystemService(android.content.Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+                    val window = (context as? ComponentActivity)?.window
+                    val view = window?.currentFocus
+                    if (view != null && imm != null) {
+                        imm.hideSoftInputFromWindow(view.windowToken, 0)
+                    }
+                }
+            )
+        }
 
         ExpressiveFabMenu(
             modifier = Modifier
                 .align(Alignment.BottomEnd)
                 .windowInsetsPadding(WindowInsets.safeDrawing)
-                .padding(24.dp),
+                .padding(
+                    start = 24.dp,
+                    top = 24.dp,
+                    end = 24.dp,
+                    bottom = if (showAccessoryBar) 24.dp + 80.dp else 24.dp
+                ),
             isWaypipeRunning = isWaypipeRunning,
             onSettingsClick = { showSettings = true },
             onRunWaypipeClick = { launchWaypipe() },
-            onStopWaypipeClick = { stopWaypipe() }
+            onStopWaypipeClick = { stopWaypipe() },
+            onMenuClosed = { surfaceViewRef?.requestFocus() }
         )
 
         if (showSettings) {
             SettingsDialog(
                 prefs = prefs,
-                onDismiss = { showSettings = false },
+                onDismiss = {
+                    showSettings = false
+                    surfaceViewRef?.requestFocus()
+                },
                 onApply = { WawonaSettings.apply(prefs) }
             )
         }

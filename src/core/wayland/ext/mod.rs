@@ -98,7 +98,13 @@ pub fn register(_state: &mut CompositorState, dh: &DisplayHandle) {
     data_control::register_data_control(dh);
     workspace::register_workspace(dh);
     background_effect::register_background_effect(dh);
-    fullscreen_shell::register_fullscreen_shell(dh);
+
+    if _state.advertise_fullscreen_shell {
+        fullscreen_shell::register_fullscreen_shell(dh);
+        crate::wlog!(crate::util::logging::COMPOSITOR, "Fullscreen shell advertised (user setting enabled)");
+    } else {
+        crate::wlog!(crate::util::logging::COMPOSITOR, "Fullscreen shell NOT advertised (user setting disabled)");
+    }
 
     // ── Desktop-only protocols (feature-gated) ────────────────────
     #[cfg(feature = "desktop-protocols")]

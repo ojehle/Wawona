@@ -75,6 +75,10 @@ class WawonaSurfaceView(context: Context) : SurfaceView(context) {
     override fun onCheckIsTextEditor(): Boolean = true
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        if (event.actionMasked == MotionEvent.ACTION_DOWN && !hasFocus()) {
+            requestFocus()
+        }
+
         val ts = (event.eventTime % Int.MAX_VALUE).toInt()
         val touchpadMode = prefs.getBoolean("touchpadMode", false)
 
@@ -86,23 +90,28 @@ class WawonaSurfaceView(context: Context) : SurfaceView(context) {
             MotionEvent.ACTION_DOWN -> {
                 val idx = event.actionIndex
                 WawonaNative.nativeTouchDown(event.getPointerId(idx), event.getX(idx), event.getY(idx), ts)
+                WawonaNative.nativeTouchFrame()
             }
             MotionEvent.ACTION_POINTER_DOWN -> {
                 val idx = event.actionIndex
                 WawonaNative.nativeTouchDown(event.getPointerId(idx), event.getX(idx), event.getY(idx), ts)
+                WawonaNative.nativeTouchFrame()
             }
             MotionEvent.ACTION_MOVE -> {
                 for (i in 0 until event.pointerCount) {
                     WawonaNative.nativeTouchMotion(event.getPointerId(i), event.getX(i), event.getY(i), ts)
                 }
+                WawonaNative.nativeTouchFrame()
             }
             MotionEvent.ACTION_UP -> {
                 val idx = event.actionIndex
                 WawonaNative.nativeTouchUp(event.getPointerId(idx), ts)
+                WawonaNative.nativeTouchFrame()
             }
             MotionEvent.ACTION_POINTER_UP -> {
                 val idx = event.actionIndex
                 WawonaNative.nativeTouchUp(event.getPointerId(idx), ts)
+                WawonaNative.nativeTouchFrame()
             }
             MotionEvent.ACTION_CANCEL -> {
                 WawonaNative.nativeTouchCancel()
@@ -198,12 +207,23 @@ class WawonaSurfaceView(context: Context) : SurfaceView(context) {
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
         WawonaNative.nativeKeyEvent(keyCode, 1, (event.eventTime % Int.MAX_VALUE).toInt())
+        if (!isModifierKeyCode(keyCode)) {
+            ModifierState.clearStickyModifiers()
+        }
         return true
     }
 
     override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
         WawonaNative.nativeKeyEvent(keyCode, 0, (event.eventTime % Int.MAX_VALUE).toInt())
         return true
+    }
+
+    private fun isModifierKeyCode(keyCode: Int): Boolean = when (keyCode) {
+        KeyEvent.KEYCODE_SHIFT_LEFT, KeyEvent.KEYCODE_SHIFT_RIGHT,
+        KeyEvent.KEYCODE_CTRL_LEFT, KeyEvent.KEYCODE_CTRL_RIGHT,
+        KeyEvent.KEYCODE_ALT_LEFT, KeyEvent.KEYCODE_ALT_RIGHT,
+        KeyEvent.KEYCODE_META_LEFT, KeyEvent.KEYCODE_META_RIGHT -> true
+        else -> false
     }
 
     override fun onGenericMotionEvent(event: MotionEvent): Boolean {

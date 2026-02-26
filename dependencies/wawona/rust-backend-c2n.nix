@@ -283,6 +283,7 @@ let
           pkgs.libxkbcommon
           pkgs.libffi
           pkgs.openssl
+          pkgs.vulkan-loader
           (nativeDeps.libwayland or toolchains.macos.libwayland)
         ]
         else if isIOS then [

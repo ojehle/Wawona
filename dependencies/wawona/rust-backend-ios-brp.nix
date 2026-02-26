@@ -3,7 +3,7 @@
 # the host (macOS). buildRustPackage uses cargo which correctly builds
 # host build-deps for build scripts. Use this for iOS device + simulator.
 #
-{ pkgs, lib, workspaceSrc, nativeDeps, wawonaVersion, simulator ? false }:
+{ pkgs, lib, workspaceSrc, nativeDeps, wawonaVersion, wawonaSrc, simulator ? false }:
 
 let
   cargoTarget = if simulator then "aarch64-apple-ios-sim" else "aarch64-apple-ios";
@@ -16,6 +16,7 @@ let
   };
   buildModule = import ../toolchains/default.nix {
     inherit (pkgs) lib pkgs stdenv buildPackages;
+    inherit wawonaSrc;
   };
   xcodeUtils = import ../utils/xcode-wrapper.nix { inherit (pkgs) lib pkgs; };
 in

@@ -1,6 +1,8 @@
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -24,6 +26,7 @@
 
 // Settings (for Vulkan driver configuration)
 #import "WWNSettings.h"
+#import "../../ui/Settings/WWNPreferencesManager.h"
 
 // C FFI for Rust Compositor window events
 typedef struct CWindowInfo {
@@ -44,6 +47,7 @@ extern void wawona_window_info_free(CWindowInfo *info);
 //
 
 #import "../../launcher/WWNLauncherClient.h"
+#import "../ios/WWNSceneDelegate.h"
 #import "../../ui/Settings/WWNPreferences.h"
 #import "../../ui/Settings/WWNSettingsSplitViewController.h"
 
@@ -95,7 +99,8 @@ extern void wawona_window_info_free(CWindowInfo *info);
   // Use a reasonable initial size; the scene delegate will set the
   // actual output dimensions once the UIWindowScene is available.
   CGSize screenSize = CGSizeMake(390, 844);
-  CGFloat scale = 3.0;
+  BOOL autoScale = [[WWNPreferencesManager sharedManager] autoScale];
+  CGFloat scale = autoScale ? 3.0 : 1.0;
 
   [compositor setOutputWidth:(uint32_t)screenSize.width
                       height:(uint32_t)screenSize.height
@@ -118,9 +123,13 @@ extern void wawona_window_info_free(CWindowInfo *info);
     configurationForConnectingSceneSession:
         (UISceneSession *)connectingSceneSession
                                    options:(UISceneConnectionOptions *)options {
-  return
+  (void)application;
+  (void)options;
+  UISceneConfiguration *config =
       [[UISceneConfiguration alloc] initWithName:@"Default Configuration"
                                      sessionRole:connectingSceneSession.role];
+  config.delegateClass = [WWNSceneDelegate class];
+  return config;
 }
 
 - (void)applicationWillTerminate:(UIApplication *)application {
@@ -132,6 +141,9 @@ extern void wawona_window_info_free(CWindowInfo *info);
 
 int main(int argc, char *argv[]) {
   @autoreleasepool {
+    setbuf(stdout, NULL);
+    setbuf(stderr, NULL);
+
     // Ignore SIGPIPE — broken pipes from waypipe/SSH connections must not
     // terminate the app.  The underlying write() returns EPIPE instead.
     signal(SIGPIPE, SIG_IGN);
@@ -154,6 +166,58 @@ int main(int argc, char *argv[]) {
 extern volatile pid_t g_active_waypipe_pgid;
 
 // Global cleanup for atexit
+static int g_instance_lock_fd = -1;
+
+static void release_instance_lock(void) {
+  if (g_instance_lock_fd >= 0) {
+    flock(g_instance_lock_fd, LOCK_UN);
+    close(g_instance_lock_fd);
+    g_instance_lock_fd = -1;
+  }
+}
+
+static void activate_existing_instance(void) {
+  NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+  if (!bundleID || bundleID.length == 0) {
+    bundleID = @"com.aspauldingcode.Wawona";
+  }
+  pid_t currentPID = [[NSProcessInfo processInfo] processIdentifier];
+  NSArray<NSRunningApplication *> *runningApps =
+      [NSRunningApplication runningApplicationsWithBundleIdentifier:bundleID];
+  for (NSRunningApplication *app in runningApps) {
+    if (app.processIdentifier != currentPID && !app.terminated) {
+      [app activateWithOptions:NSApplicationActivateAllWindows |
+                                NSApplicationActivateIgnoringOtherApps];
+      break;
+    }
+  }
+}
+
+static BOOL acquire_single_instance_lock(void) {
+  NSString *lockDir = [NSString stringWithFormat:@"/tmp/wawona-%d", getuid()];
+  [[NSFileManager defaultManager]
+      createDirectoryAtPath:lockDir
+withIntermediateDirectories:YES
+                 attributes:@{NSFilePosixPermissions : @0700}
+                      error:nil];
+  NSString *lockPath = [lockDir stringByAppendingPathComponent:@"instance.lock"];
+
+  g_instance_lock_fd = open([lockPath fileSystemRepresentation],
+                            O_CREAT | O_RDWR, 0600);
+  if (g_instance_lock_fd < 0) {
+    // If lock setup fails, do not block startup.
+    WWNLog("MAIN", @"Warning: failed to open single-instance lock file");
+    return YES;
+  }
+
+  if (flock(g_instance_lock_fd, LOCK_EX | LOCK_NB) != 0) {
+    close(g_instance_lock_fd);
+    g_instance_lock_fd = -1;
+    return NO;
+  }
+  return YES;
+}
+
 static void cleanup_on_exit(void) {
   static int cleaning_up = 0;
   if (cleaning_up) {
@@ -165,6 +229,7 @@ static void cleanup_on_exit(void) {
 
   // Stop Rust compositor
   [[WWNCompositorBridge sharedBridge] stop];
+  release_instance_lock();
 }
 
 // Emergency crash handler - must be strictly async-signal-safe
@@ -256,15 +321,21 @@ int main(int argc, char *argv[]) {
     for (int i = 1; i < argc; i++) {
       if (strcmp(argv[i], "--version") == 0 || strcmp(argv[i], "-v") == 0) {
 #ifdef WAWONA_VERSION
-        printf("WWN v%s\n", WAWONA_VERSION);
+        printf("Wawona v%s\n", WAWONA_VERSION);
 #else
-        printf("WWN unknown\n");
+        printf("Wawona unknown\n");
 #endif
         return 0;
       }
     }
 
     WWNLog("MAIN", @"WWN - Wayland Compositor for macOS");
+
+    if (!acquire_single_instance_lock()) {
+      WWNLog("MAIN", @"Another Wawona instance is already running; exiting.");
+      activate_existing_instance();
+      return 0;
+    }
 
     [[NSProcessInfo processInfo] disableAutomaticTermination:@"KeepAlive"];
     [[NSProcessInfo processInfo] disableSuddenTermination];
@@ -400,12 +471,21 @@ int main(int argc, char *argv[]) {
     WWNLog("MAIN", @"Starting Rust-based WWN compositor (macOS)...");
 
     NSScreen *mainScreen = [NSScreen mainScreen];
-    CGSize screenSize = mainScreen.frame.size;
     CGFloat scale = mainScreen.backingScaleFactor;
 
+    // Initial output dimensions = the default window content size that
+    // handleWindowCreated: will use for nested compositors and large
+    // clients.  Using the macOS display size here would make Wayland
+    // clients (especially nested compositors like Weston) render at the
+    // full screen resolution even though they're in a windowed frame.
+    CGFloat screenW = mainScreen.frame.size.width;
+    CGFloat screenH = mainScreen.frame.size.height;
+    uint32_t outputW = (uint32_t)fmin(1024, screenW * 0.75);
+    uint32_t outputH = (uint32_t)fmin(768, screenH * 0.75);
+
     WWNCompositorBridge *rustCompositor = [WWNCompositorBridge sharedBridge];
-    [rustCompositor setOutputWidth:(uint32_t)screenSize.width
-                            height:(uint32_t)screenSize.height
+    [rustCompositor setOutputWidth:outputW
+                            height:outputH
                              scale:(float)scale];
 
     // Set initial SSD state

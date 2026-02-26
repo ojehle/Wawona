@@ -4,12 +4,17 @@ import android.content.SharedPreferences
 
 object WawonaSettings {
     fun apply(prefs: SharedPreferences) {
-        val forceServerSideDecorations = prefs.getBoolean("forceServerSideDecorations", true)
+        // Android: CSD not supported; Force SSD is always on.
+        val forceServerSideDecorations = true
         
-        // Auto Scale (Android) maps to autoRetinaScaling for native compatibility
-        // Support both old and new keys for backward compatibility
-        val autoScale = prefs.getBoolean("autoScale", true) || 
-                       prefs.getBoolean("autoRetinaScaling", true)
+        // Auto Scale (Android) maps to autoRetinaScaling for native compatibility.
+        // Primary key is "autoScale" (from the UI toggle); fall back to legacy
+        // "autoRetinaScaling" only when the primary key was never written.
+        val autoScale = if (prefs.contains("autoScale")) {
+            prefs.getBoolean("autoScale", true)
+        } else {
+            prefs.getBoolean("autoRetinaScaling", true)
+        }
         
         val renderingBackend = prefs.getInt("renderingBackend", 0)
         val respectSafeArea = prefs.getBoolean("respectSafeArea", true)
@@ -53,8 +58,8 @@ object WawonaSettings {
 
         // Graphics Driver selection (Settings > Graphics > Drivers)
         // UI stores display strings (e.g. "SwiftShader"); normalize to lowercase for native
-        val vulkanDriver = (prefs.getString("vulkanDriver", "system") ?: "system").lowercase()
-        val openglDriver = (prefs.getString("openglDriver", "system") ?: "system").lowercase()
+        val vulkanDriver = (prefs.getString("vulkanDriver", "none") ?: "none").lowercase()
+        val openglDriver = (prefs.getString("openglDriver", "none") ?: "none").lowercase()
         
         WawonaNative.nativeApplySettings(
             forceServerSideDecorations,

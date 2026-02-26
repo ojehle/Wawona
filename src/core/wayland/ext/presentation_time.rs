@@ -78,7 +78,11 @@ impl GlobalDispatch<wp_presentation::WpPresentation, ()> for CompositorState {
         _global_data: &(),
         data_init: &mut wayland_server::DataInit<'_, Self>,
     ) {
-        data_init.init(resource, ());
+        let presentation = data_init.init(resource, ());
+        // CLOCK_MONOTONIC = 1 on Linux/Darwin.  The protocol requires
+        // clock_id to be sent before any presented event so clients
+        // (notably waypipe) know which clock domain timestamps use.
+        presentation.clock_id(1);
     }
 }
 

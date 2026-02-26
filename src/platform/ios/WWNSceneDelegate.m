@@ -143,31 +143,38 @@
 - (void)preferencesDidChange:(NSNotification *)note {
   dispatch_async(dispatch_get_main_queue(), ^{
     [self applyRespectSafeAreaPreference];
+    [self updateOutputSizeFromContainerForced:YES];
   });
 }
 
 #pragma mark - Output Size
 
 - (void)updateOutputSizeFromContainer {
+  [self updateOutputSizeFromContainerForced:NO];
+}
+
+- (void)updateOutputSizeFromContainerForced:(BOOL)forced {
   CGRect bounds = self.compositorContainer.bounds;
   if (bounds.size.width <= 0 || bounds.size.height <= 0)
     return;
 
   CGSize sz = bounds.size;
-  if (CGSizeEqualToSize(sz, self.lastOutputSize))
+  if (!forced && CGSizeEqualToSize(sz, self.lastOutputSize))
     return;
   self.lastOutputSize = sz;
 
   UIWindowScene *ws = self.window.windowScene;
-  CGFloat scale = ws.screen.scale;
+  CGFloat screenScale = ws.screen.scale;
+  BOOL autoScale = [[WWNPreferencesManager sharedManager] autoScale];
+  float wlScale = autoScale ? (float)screenScale : 1.0f;
 
   WWNCompositorBridge *compositor = [WWNCompositorBridge sharedBridge];
   [compositor setOutputWidth:(uint32_t)sz.width
                       height:(uint32_t)sz.height
-                       scale:(float)scale];
+                       scale:wlScale];
 
-  WWNLog("SCENE", @"Output size updated to %.0fx%.0f @ %.1fx",
-        sz.width, sz.height, scale);
+  WWNLog("SCENE", @"Output size: %.0fx%.0f @ %.1fx (auto-scale %@)",
+        sz.width, sz.height, wlScale, autoScale ? @"ON" : @"OFF");
 }
 
 #pragma mark - Settings Button
@@ -261,7 +268,9 @@
     child.frame = containerBounds;
   }
 
-  // Update the Wayland output
+  // Update the Wayland output.  The bridge coalesces rapid resize events
+  // so at most one block is on the compositor queue; _compositorTick
+  // flushes the Wayland socket every frame.
   [self updateOutputSizeFromContainer];
 }
 

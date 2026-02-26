@@ -1,7 +1,7 @@
 #import "WWNCompositorView_ios.h"
-#import "WWNCompositorBridge.h"
 #import "../../ui/Settings/WWNPreferencesManager.h"
 #import "../../util/WWNLog.h"
+#import "WWNCompositorBridge.h"
 #import <QuartzCore/QuartzCore.h>
 
 // ===========================================================================
@@ -102,6 +102,21 @@ enum {
   KEY_RIGHTSHIFT = 54,
   KEY_LEFTALT = 56,
   KEY_SPACE = 57,
+  KEY_CAPSLOCK = 58,
+  KEY_F1 = 59,
+  KEY_F2 = 60,
+  KEY_F3 = 61,
+  KEY_F4 = 62,
+  KEY_F5 = 63,
+  KEY_F6 = 64,
+  KEY_F7 = 65,
+  KEY_F8 = 66,
+  KEY_F9 = 67,
+  KEY_F10 = 68,
+  KEY_F11 = 87,
+  KEY_F12 = 88,
+  KEY_RIGHTCTRL = 97,
+  KEY_RIGHTALT = 100,
   KEY_HOME = 102,
   KEY_UP = 103,
   KEY_PAGEUP = 104,
@@ -110,7 +125,9 @@ enum {
   KEY_END = 107,
   KEY_DOWN = 108,
   KEY_PAGEDOWN = 109,
+  KEY_DELETE = 111,
   KEY_LEFTMETA = 125,
+  KEY_RIGHTMETA = 126,
 };
 
 // Linux button codes (input-event-codes.h)
@@ -287,6 +304,152 @@ static BOOL charToLinuxKeycode(unichar ch, uint32_t *outKeycode,
 }
 
 // ---------------------------------------------------------------------------
+// HID Usage Page 0x07 (Keyboard) → Linux input-event-codes keycode mapping.
+// Used by pressesBegan/pressesEnded to translate physical keyboard events.
+// ---------------------------------------------------------------------------
+static uint32_t hidUsageToLinuxKeycode(long hidUsage) {
+  // Letters: HID 0x04 (A) .. 0x1D (Z)
+  if (hidUsage >= 0x04 && hidUsage <= 0x1D) {
+    static const uint32_t map[26] = {
+        KEY_A, KEY_B, KEY_C, KEY_D, KEY_E, KEY_F, KEY_G, KEY_H, KEY_I,
+        KEY_J, KEY_K, KEY_L, KEY_M, KEY_N, KEY_O, KEY_P, KEY_Q, KEY_R,
+        KEY_S, KEY_T, KEY_U, KEY_V, KEY_W, KEY_X, KEY_Y, KEY_Z,
+    };
+    return map[hidUsage - 0x04];
+  }
+  // Digits: HID 0x1E (1) .. 0x26 (9), 0x27 (0)
+  if (hidUsage >= 0x1E && hidUsage <= 0x26)
+    return KEY_1 + (uint32_t)(hidUsage - 0x1E);
+  if (hidUsage == 0x27)
+    return KEY_0;
+
+  switch (hidUsage) {
+  case 0x28:
+    return KEY_ENTER;
+  case 0x29:
+    return KEY_ESC;
+  case 0x2A:
+    return KEY_BACKSPACE;
+  case 0x2B:
+    return KEY_TAB;
+  case 0x2C:
+    return KEY_SPACE;
+  case 0x2D:
+    return KEY_MINUS;
+  case 0x2E:
+    return KEY_EQUAL;
+  case 0x2F:
+    return KEY_LEFTBRACE;
+  case 0x30:
+    return KEY_RIGHTBRACE;
+  case 0x31:
+    return KEY_BACKSLASH;
+  case 0x33:
+    return KEY_SEMICOLON;
+  case 0x34:
+    return KEY_APOSTROPHE;
+  case 0x35:
+    return KEY_GRAVE;
+  case 0x36:
+    return KEY_COMMA;
+  case 0x37:
+    return KEY_DOT;
+  case 0x38:
+    return KEY_SLASH;
+  case 0x39:
+    return KEY_CAPSLOCK;
+  case 0x3A:
+    return KEY_F1;
+  case 0x3B:
+    return KEY_F2;
+  case 0x3C:
+    return KEY_F3;
+  case 0x3D:
+    return KEY_F4;
+  case 0x3E:
+    return KEY_F5;
+  case 0x3F:
+    return KEY_F6;
+  case 0x40:
+    return KEY_F7;
+  case 0x41:
+    return KEY_F8;
+  case 0x42:
+    return KEY_F9;
+  case 0x43:
+    return KEY_F10;
+  case 0x44:
+    return KEY_F11;
+  case 0x45:
+    return KEY_F12;
+  case 0x4A:
+    return KEY_HOME;
+  case 0x4B:
+    return KEY_PAGEUP;
+  case 0x4C:
+    return KEY_DELETE;
+  case 0x4D:
+    return KEY_END;
+  case 0x4E:
+    return KEY_PAGEDOWN;
+  case 0x4F:
+    return KEY_RIGHT;
+  case 0x50:
+    return KEY_LEFT;
+  case 0x51:
+    return KEY_DOWN;
+  case 0x52:
+    return KEY_UP;
+  case 0xE0:
+    return KEY_LEFTCTRL;
+  case 0xE1:
+    return KEY_LEFTSHIFT;
+  case 0xE2:
+    return KEY_LEFTALT;
+  case 0xE3:
+    return KEY_LEFTMETA;
+  case 0xE4:
+    return KEY_RIGHTCTRL;
+  case 0xE5:
+    return KEY_RIGHTSHIFT;
+  case 0xE6:
+    return KEY_RIGHTALT;
+  case 0xE7:
+    return KEY_RIGHTMETA;
+  default:
+    return KEY_RESERVED;
+  }
+}
+
+/// Returns YES if the given Linux keycode is a modifier key.
+static BOOL isModifierKeycode(uint32_t keycode) {
+  return keycode == KEY_LEFTSHIFT || keycode == KEY_RIGHTSHIFT ||
+         keycode == KEY_LEFTCTRL || keycode == KEY_RIGHTCTRL ||
+         keycode == KEY_LEFTALT || keycode == KEY_RIGHTALT ||
+         keycode == KEY_LEFTMETA || keycode == KEY_RIGHTMETA;
+}
+
+/// Returns the XKB modifier bit for a Linux modifier keycode, or 0.
+static uint32_t modifierBitForKeycode(uint32_t keycode) {
+  switch (keycode) {
+  case KEY_LEFTSHIFT:
+  case KEY_RIGHTSHIFT:
+    return (1 << 0); // XKB_MOD_SHIFT
+  case KEY_LEFTCTRL:
+  case KEY_RIGHTCTRL:
+    return (1 << 2); // XKB_MOD_CTRL
+  case KEY_LEFTALT:
+  case KEY_RIGHTALT:
+    return (1 << 3); // XKB_MOD_ALT
+  case KEY_LEFTMETA:
+  case KEY_RIGHTMETA:
+    return (1 << 6); // XKB_MOD_SUPER
+  default:
+    return 0;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // XKB modifier bit masks (must match the minimal keymap modifier_map order)
 // ---------------------------------------------------------------------------
 static const uint32_t XKB_MOD_SHIFT = (1 << 0);
@@ -349,9 +512,9 @@ typedef NS_ENUM(NSInteger, WWNTouchInputMode) {
   UIView *_accessoryBar;
 
   // Touchpad mode state
-  CGPoint _pointerPos;        // Virtual cursor position (view coords)
-  BOOL _pointerEntered;       // Whether we've sent pointer enter
-  CGPoint _prevTouchPoint;    // Previous single-finger position
+  CGPoint _pointerPos;     // Virtual cursor position (view coords)
+  BOOL _pointerEntered;    // Whether we've sent pointer enter
+  CGPoint _prevTouchPoint; // Previous single-finger position
   NSTimeInterval _touchStartTime;
   CGFloat _touchTotalMovement;
   NSInteger _activeTouchCount; // Current simultaneous finger count
@@ -366,11 +529,15 @@ typedef NS_ENUM(NSInteger, WWNTouchInputMode) {
   float _cursorHotspotX;
   float _cursorHotspotY;
 
+  // Physical (hardware) keyboard state — suppresses insertText: when active
+  NSInteger _pressedPhysicalKeyCount;
+  uint32_t _physicalModifiers; // XKB depressed mask from physical keys
+
   // UITextInput proxy state (for Text Assist / autocorrect mode)
   NSMutableString *_textBuffer;
   NSInteger _cursorIndex;
-  NSRange _markedRange;    // NSNotFound location = no marked text
-  NSRange _selectedRange;  // single cursor when length == 0
+  NSRange _markedRange;   // NSNotFound location = no marked text
+  NSRange _selectedRange; // single cursor when length == 0
   NSDictionary *_markedTextStyle;
   UITextInputStringTokenizer *_tokenizer;
   BOOL _textAssistEnabled;
@@ -430,9 +597,10 @@ typedef NS_ENUM(NSInteger, WWNTouchInputMode) {
 - (void)safeAreaInsetsDidChange {
   [super safeAreaInsetsDidChange];
   UIEdgeInsets insets = self.safeAreaInsets;
-  WWNLog("IOS_VIEW", @"Safe Area Insets changed: top=%.1f bottom=%.1f left=%.1f "
-        @"right=%.1f",
-        insets.top, insets.bottom, insets.left, insets.right);
+  WWNLog("IOS_VIEW",
+         @"Safe Area Insets changed: top=%.1f bottom=%.1f left=%.1f "
+         @"right=%.1f",
+         insets.top, insets.bottom, insets.left, insets.right);
 
   [[WWNCompositorBridge sharedBridge]
       setSafeAreaInsetsTop:(int32_t)insets.top
@@ -443,7 +611,15 @@ typedef NS_ENUM(NSInteger, WWNTouchInputMode) {
 
 - (void)layoutSubviews {
   [super layoutSubviews];
+
+  // Snap the content layer to the new bounds immediately.  Without this,
+  // UIKit's rotation animation context captures the frame change and
+  // animates it, stretching the old buffer for the animation duration and
+  // preventing new content from appearing until the animation completes.
+  [CATransaction begin];
+  [CATransaction setDisableActions:YES];
   _contentLayer.frame = self.bounds;
+  [CATransaction commit];
 
   if (self.bounds.size.width > 0 && self.bounds.size.height > 0) {
     [[WWNCompositorBridge sharedBridge]
@@ -458,8 +634,7 @@ typedef NS_ENUM(NSInteger, WWNTouchInputMode) {
 // ---------------------------------------------------------------------------
 
 - (WWNTouchInputMode)_readInputMode {
-  NSString *type =
-      [[WWNPreferencesManager sharedManager] touchInputType];
+  NSString *type = [[WWNPreferencesManager sharedManager] touchInputType];
   if ([type isEqualToString:@"Touchpad"]) {
     return WWNTouchInputModeTouchpad;
   }
@@ -486,8 +661,7 @@ typedef NS_ENUM(NSInteger, WWNTouchInputMode) {
   CGFloat rowHeight = 38;
   CGFloat vPad = 2;
 
-  UIView *bar = [[UIView alloc]
-      initWithFrame:CGRectMake(0, 0, 400, barHeight)];
+  UIView *bar = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 400, barHeight)];
   bar.autoresizingMask = UIViewAutoresizingFlexibleWidth;
 
   // Background: Liquid Glass on iOS 26+, dark chrome blur on older versions.
@@ -502,8 +676,8 @@ typedef NS_ENUM(NSInteger, WWNTouchInputMode) {
         UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     [bar addSubview:glassView];
   } else {
-    UIBlurEffect *blur =
-        [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemChromeMaterialDark];
+    UIBlurEffect *blur = [UIBlurEffect
+        effectWithStyle:UIBlurEffectStyleSystemChromeMaterialDark];
     UIVisualEffectView *blurView =
         [[UIVisualEffectView alloc] initWithEffect:blur];
     blurView.frame = bar.bounds;
@@ -536,33 +710,25 @@ typedef NS_ENUM(NSInteger, WWNTouchInputMode) {
   ]];
 
   // Row 1
-  [row1 addArrangedSubview:[self _keyButton:@"ESC"
-                                     action:@selector(_tapESC)]];
-  [row1 addArrangedSubview:[self _keyButton:@"`"
-                                     action:@selector(_tapGrave)]];
-  [row1 addArrangedSubview:[self _keyButton:@"TAB"
-                                     action:@selector(_tapTab)]];
-  [row1 addArrangedSubview:[self _keyButton:@"/"
-                                     action:@selector(_tapSlash)]];
-  [row1 addArrangedSubview:[self _keyButton:@"—"
-                                     action:@selector(_tapMinus)]];
-  [row1 addArrangedSubview:[self _keyButton:@"HOME"
-                                     action:@selector(_tapHome)]];
+  [row1 addArrangedSubview:[self _keyButton:@"ESC" action:@selector(_tapESC)]];
+  [row1 addArrangedSubview:[self _keyButton:@"`" action:@selector(_tapGrave)]];
+  [row1 addArrangedSubview:[self _keyButton:@"TAB" action:@selector(_tapTab)]];
+  [row1 addArrangedSubview:[self _keyButton:@"/" action:@selector(_tapSlash)]];
+  [row1 addArrangedSubview:[self _keyButton:@"—" action:@selector(_tapMinus)]];
+  [row1
+      addArrangedSubview:[self _keyButton:@"HOME" action:@selector(_tapHome)]];
   [row1
       addArrangedSubview:[self _keyButton:@"↑" action:@selector(_tapArrowUp)]];
-  [row1 addArrangedSubview:[self _keyButton:@"END"
-                                     action:@selector(_tapEnd)]];
+  [row1 addArrangedSubview:[self _keyButton:@"END" action:@selector(_tapEnd)]];
   [row1 addArrangedSubview:[self _keyButton:@"PGUP"
                                      action:@selector(_tapPageUp)]];
 
   // Row 2
-  UIButton *shiftBtn =
-      [self _keyButton:@"⇧" action:@selector(_tapModShift:)];
+  UIButton *shiftBtn = [self _keyButton:@"⇧" action:@selector(_tapModShift:)];
   shiftBtn.tag = kTagModShift;
   [row2 addArrangedSubview:shiftBtn];
 
-  UIButton *ctrlBtn =
-      [self _keyButton:@"CTRL" action:@selector(_tapModCtrl:)];
+  UIButton *ctrlBtn = [self _keyButton:@"CTRL" action:@selector(_tapModCtrl:)];
   ctrlBtn.tag = kTagModCtrl;
   [row2 addArrangedSubview:ctrlBtn];
 
@@ -899,17 +1065,17 @@ static const NSTimeInterval kDoubleTapThreshold = 0.4;
 - (BOOL)becomeFirstResponder {
   // Re-read text assist setting before activating keyboard so changes
   // in Settings take effect the next time the keyboard appears.
-  _textAssistEnabled =
-      [[WWNPreferencesManager sharedManager] enableTextAssist];
+  _textAssistEnabled = [[WWNPreferencesManager sharedManager] enableTextAssist];
 
   BOOL result = [super becomeFirstResponder];
   if (result) {
-    WWNLog("IOS_VIEW", @"Became first responder for window %llu (textAssist=%d)",
-          self.wwnWindowId, _textAssistEnabled);
+    WWNLog("IOS_VIEW",
+           @"Became first responder for window %llu (textAssist=%d)",
+           self.wwnWindowId, _textAssistEnabled);
     _keyboardActive = YES;
 
     [[WWNCompositorBridge sharedBridge] setWindowActivated:self.wwnWindowId
-                                                   active:YES];
+                                                    active:YES];
     [self _sendKeyboardEnterIfNeeded];
   }
   return result;
@@ -919,13 +1085,13 @@ static const NSTimeInterval kDoubleTapThreshold = 0.4;
   BOOL result = [super resignFirstResponder];
   if (result) {
     WWNLog("IOS_VIEW", @"Resigned first responder for window %llu",
-          self.wwnWindowId);
+           self.wwnWindowId);
     _keyboardActive = NO;
     [self _sendKeyboardLeave];
     [self _clearAllModifiers];
 
     [[WWNCompositorBridge sharedBridge] setWindowActivated:self.wwnWindowId
-                                                   active:NO];
+                                                    active:NO];
   }
   return result;
 }
@@ -942,8 +1108,15 @@ static const NSTimeInterval kDoubleTapThreshold = 0.4;
   if (text.length == 0)
     return;
 
+  // Physical keyboard events are handled in pressesBegan:/pressesEnded:
+  // which send raw keycodes. Suppress the duplicate insertText: that iOS's
+  // text input system fires as a side-effect of the same key press.
+  if (_pressedPhysicalKeyCount > 0) {
+    return;
+  }
+
   WWNLog("IOS_VIEW", @"insertText: \"%@\" (len=%lu) for window %llu", text,
-        (unsigned long)text.length, self.wwnWindowId);
+         (unsigned long)text.length, self.wwnWindowId);
 
   [self _sendKeyboardEnterIfNeeded];
 
@@ -959,13 +1132,11 @@ static const NSTimeInterval kDoubleTapThreshold = 0.4;
   if (_textAssistEnabled) {
     if (_markedRange.location != NSNotFound) {
       [_textBuffer replaceCharactersInRange:_markedRange withString:text];
-      _selectedRange =
-          NSMakeRange(_markedRange.location + text.length, 0);
+      _selectedRange = NSMakeRange(_markedRange.location + text.length, 0);
       _markedRange = NSMakeRange(NSNotFound, 0);
     } else {
       [_textBuffer insertString:text atIndex:_selectedRange.location];
-      _selectedRange =
-          NSMakeRange(_selectedRange.location + text.length, 0);
+      _selectedRange = NSMakeRange(_selectedRange.location + text.length, 0);
     }
     [bridge textInputPreeditString:@"" cursorBegin:0 cursorEnd:0];
     [bridge textInputCommitString:text];
@@ -1054,7 +1225,8 @@ static const NSTimeInterval kDoubleTapThreshold = 0.4;
         [bridge injectKeyWithKeycode:keycode pressed:YES timestamp:ts];
         [bridge injectKeyWithKeycode:keycode pressed:NO timestamp:ts + 1];
         if (extraShift) {
-          [bridge injectKeyWithKeycode:KEY_LEFTSHIFT pressed:NO
+          [bridge injectKeyWithKeycode:KEY_LEFTSHIFT
+                               pressed:NO
                              timestamp:ts + 2];
           [bridge injectModifiersWithDepressed:mods latched:0 locked:0 group:0];
         }
@@ -1082,6 +1254,11 @@ static const NSTimeInterval kDoubleTapThreshold = 0.4;
 }
 
 - (void)deleteBackward {
+  // Physical backspace is already handled in pressesBegan:
+  if (_pressedPhysicalKeyCount > 0) {
+    return;
+  }
+
   WWNLog("IOS_VIEW", @"deleteBackward for window %llu", self.wwnWindowId);
 
   [self.inputDelegate textWillChange:self];
@@ -1103,7 +1280,7 @@ static const NSTimeInterval kDoubleTapThreshold = 0.4;
 
     WWNCompositorBridge *bridge = [WWNCompositorBridge sharedBridge];
     [bridge textInputDeleteSurrounding:(uint32_t)deleteRange.length
-                             afterLength:0];
+                           afterLength:0];
     [self.inputDelegate selectionDidChange:self];
     [self.inputDelegate textDidChange:self];
     return;
@@ -1117,6 +1294,10 @@ static const NSTimeInterval kDoubleTapThreshold = 0.4;
 // ---------------------------------------------------------------------------
 #pragma mark - UITextInputTraits
 // ---------------------------------------------------------------------------
+
+- (UITextAutocapitalizationType)autocapitalizationType {
+  return UITextAutocapitalizationTypeNone;
+}
 
 - (UITextAutocorrectionType)autocorrectionType {
   return _textAssistEnabled ? UITextAutocorrectionTypeYes
@@ -1181,7 +1362,7 @@ static const NSTimeInterval kDoubleTapThreshold = 0.4;
   NSRange replaceRange = NSMakeRange(start, MAX(0, end - start));
 
   WWNLog("IOS_VIEW", @"replaceRange: [%ld,%ld) with \"%@\"", (long)start,
-        (long)end, text);
+         (long)end, text);
 
   [self.inputDelegate textWillChange:self];
   [self.inputDelegate selectionWillChange:self];
@@ -1191,9 +1372,8 @@ static const NSTimeInterval kDoubleTapThreshold = 0.4;
   uint32_t deleteBefore = 0;
   uint32_t deleteAfter = 0;
   if (replaceRange.location < (NSUInteger)_selectedRange.location) {
-    deleteBefore =
-        (uint32_t)MIN(_selectedRange.location - replaceRange.location,
-                      replaceRange.length);
+    deleteBefore = (uint32_t)MIN(
+        _selectedRange.location - replaceRange.location, replaceRange.length);
   }
   if (NSMaxRange(replaceRange) > NSMaxRange(_selectedRange)) {
     deleteAfter =
@@ -1205,8 +1385,7 @@ static const NSTimeInterval kDoubleTapThreshold = 0.4;
   }
 
   [_textBuffer replaceCharactersInRange:replaceRange withString:text];
-  _selectedRange =
-      NSMakeRange(replaceRange.location + text.length, 0);
+  _selectedRange = NSMakeRange(replaceRange.location + text.length, 0);
 
   if (text.length > 0) {
     [bridge textInputCommitString:text];
@@ -1260,17 +1439,16 @@ static const NSTimeInterval kDoubleTapThreshold = 0.4;
       [_textBuffer insertString:text atIndex:insertAt];
       _markedRange = NSMakeRange(insertAt, 0);
     }
-    _markedRange =
-        NSMakeRange(_markedRange.location, text.length);
-    _selectedRange = NSMakeRange(
-        _markedRange.location + selectedRange.location, selectedRange.length);
+    _markedRange = NSMakeRange(_markedRange.location, text.length);
+    _selectedRange = NSMakeRange(_markedRange.location + selectedRange.location,
+                                 selectedRange.length);
   } else {
     if (_markedRange.location == NSNotFound) {
       _markedRange = NSMakeRange(0, 0);
     }
     _markedRange = NSMakeRange(_markedRange.location, text.length);
-    _selectedRange = NSMakeRange(
-        _markedRange.location + selectedRange.location, selectedRange.length);
+    _selectedRange = NSMakeRange(_markedRange.location + selectedRange.location,
+                                 selectedRange.length);
   }
 
   [bridge textInputPreeditString:text
@@ -1416,11 +1594,9 @@ static const NSTimeInterval kDoubleTapThreshold = 0.4;
 
 // --- Writing direction ---
 
-- (UITextWritingDirection)baseWritingDirectionForPosition:
-                              (nonnull UITextPosition *)position
-                                             inDirection:
-                                                 (UITextStorageDirection)
-                                                     direction {
+- (UITextWritingDirection)
+    baseWritingDirectionForPosition:(nonnull UITextPosition *)position
+                        inDirection:(UITextStorageDirection)direction {
   return UITextWritingDirectionLeftToRight;
 }
 
@@ -1435,8 +1611,7 @@ static const NSTimeInterval kDoubleTapThreshold = 0.4;
 
 - (id<UITextInputTokenizer>)tokenizer {
   if (!_tokenizer) {
-    _tokenizer =
-        [[UITextInputStringTokenizer alloc] initWithTextInput:self];
+    _tokenizer = [[UITextInputStringTokenizer alloc] initWithTextInput:self];
   }
   return _tokenizer;
 }
@@ -1467,12 +1642,10 @@ static const NSTimeInterval kDoubleTapThreshold = 0.4;
     _currentInputMode = [self _readInputMode];
     // Show/hide cursor layer based on input mode
     if (_cursorLayer.contents) {
-      _cursorLayer.hidden =
-          (_currentInputMode != WWNTouchInputModeTouchpad);
+      _cursorLayer.hidden = (_currentInputMode != WWNTouchInputModeTouchpad);
     }
   }
-  _activeTouchCount =
-      (NSInteger)[[event touchesForView:self] count];
+  _activeTouchCount = (NSInteger)[[event touchesForView:self] count];
 
   if (_currentInputMode == WWNTouchInputModeTouchpad) {
     [self _touchpad_touchesBegan:touches withEvent:event];
@@ -1486,8 +1659,7 @@ static const NSTimeInterval kDoubleTapThreshold = 0.4;
 }
 
 - (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
-  _activeTouchCount =
-      (NSInteger)[[event touchesForView:self] count];
+  _activeTouchCount = (NSInteger)[[event touchesForView:self] count];
 
   if (_currentInputMode == WWNTouchInputModeTouchpad) {
     [self _touchpad_touchesMoved:touches withEvent:event];
@@ -1537,6 +1709,7 @@ static const NSTimeInterval kDoubleTapThreshold = 0.4;
     int32_t touchId = (int32_t)touch.hash;
     [bridge injectTouchDown:touchId x:loc.x y:loc.y timestamp:ts];
   }
+  [bridge injectTouchFrame];
 }
 
 - (void)_multitouch_touchesMoved:(NSSet<UITouch *> *)touches
@@ -1549,6 +1722,7 @@ static const NSTimeInterval kDoubleTapThreshold = 0.4;
     int32_t touchId = (int32_t)touch.hash;
     [bridge injectTouchMotion:touchId x:loc.x y:loc.y timestamp:ts];
   }
+  [bridge injectTouchFrame];
 }
 
 - (void)_multitouch_touchesEnded:(NSSet<UITouch *> *)touches
@@ -1560,6 +1734,7 @@ static const NSTimeInterval kDoubleTapThreshold = 0.4;
     int32_t touchId = (int32_t)touch.hash;
     [bridge injectTouchUp:touchId timestamp:ts];
   }
+  [bridge injectTouchFrame];
 }
 
 // ===========================================================================
@@ -1726,10 +1901,12 @@ static const NSTimeInterval kDoubleTapThreshold = 0.4;
 }
 
 // ---------------------------------------------------------------------------
-#pragma mark - Physical Keyboard Support (iPad, Bluetooth keyboards)
+#pragma mark - Physical Keyboard Support (iPad, Bluetooth, Simulator passthrough)
 // ---------------------------------------------------------------------------
 
 - (NSArray<UIKeyCommand *> *)keyCommands {
+  // UIKeyCommand is still needed for keys that iOS intercepts before
+  // pressesBegan fires (Escape is one such key on some iOS versions).
   NSMutableArray *commands = [NSMutableArray array];
   [commands
       addObject:[UIKeyCommand keyCommandWithInput:UIKeyInputEscape
@@ -1741,6 +1918,117 @@ static const NSTimeInterval kDoubleTapThreshold = 0.4;
 - (void)handleEscape:(UIKeyCommand *)command {
   uint32_t ts = [self _timestampMs];
   [self _sendKeyPress:KEY_ESC withShift:NO timestamp:ts];
+}
+
+- (void)pressesBegan:(NSSet<UIPress *> *)presses
+           withEvent:(UIPressesEvent *)event {
+  if (@available(iOS 13.4, *)) {
+    WWNCompositorBridge *bridge = [WWNCompositorBridge sharedBridge];
+    uint32_t ts = [self _timestampMs];
+    BOOL handled = NO;
+
+    for (UIPress *press in presses) {
+      UIKey *key = press.key;
+      if (!key)
+        continue;
+
+      uint32_t kc = hidUsageToLinuxKeycode(key.keyCode);
+      if (kc == KEY_RESERVED)
+        continue;
+
+      handled = YES;
+      _pressedPhysicalKeyCount++;
+
+      [self _sendKeyboardEnterIfNeeded];
+
+      [bridge injectKeyWithKeycode:kc pressed:YES timestamp:ts];
+
+      if (isModifierKeycode(kc)) {
+        _physicalModifiers |= modifierBitForKeycode(kc);
+        [bridge injectModifiersWithDepressed:_physicalModifiers
+                                     latched:0
+                                      locked:0
+                                       group:0];
+      }
+    }
+
+    if (!handled) {
+      [super pressesBegan:presses withEvent:event];
+    }
+  } else {
+    [super pressesBegan:presses withEvent:event];
+  }
+}
+
+- (void)pressesEnded:(NSSet<UIPress *> *)presses
+           withEvent:(UIPressesEvent *)event {
+  if (@available(iOS 13.4, *)) {
+    WWNCompositorBridge *bridge = [WWNCompositorBridge sharedBridge];
+    uint32_t ts = [self _timestampMs];
+    BOOL handled = NO;
+
+    for (UIPress *press in presses) {
+      UIKey *key = press.key;
+      if (!key)
+        continue;
+
+      uint32_t kc = hidUsageToLinuxKeycode(key.keyCode);
+      if (kc == KEY_RESERVED)
+        continue;
+
+      handled = YES;
+      if (_pressedPhysicalKeyCount > 0)
+        _pressedPhysicalKeyCount--;
+
+      [bridge injectKeyWithKeycode:kc pressed:NO timestamp:ts];
+
+      if (isModifierKeycode(kc)) {
+        _physicalModifiers &= ~modifierBitForKeycode(kc);
+        [bridge injectModifiersWithDepressed:_physicalModifiers
+                                     latched:0
+                                      locked:0
+                                       group:0];
+      }
+    }
+
+    if (!handled) {
+      [super pressesEnded:presses withEvent:event];
+    }
+  } else {
+    [super pressesEnded:presses withEvent:event];
+  }
+}
+
+- (void)pressesCancelled:(NSSet<UIPress *> *)presses
+               withEvent:(UIPressesEvent *)event {
+  if (@available(iOS 13.4, *)) {
+    WWNCompositorBridge *bridge = [WWNCompositorBridge sharedBridge];
+    uint32_t ts = [self _timestampMs];
+
+    for (UIPress *press in presses) {
+      UIKey *key = press.key;
+      if (!key)
+        continue;
+
+      uint32_t kc = hidUsageToLinuxKeycode(key.keyCode);
+      if (kc == KEY_RESERVED)
+        continue;
+
+      if (_pressedPhysicalKeyCount > 0)
+        _pressedPhysicalKeyCount--;
+
+      [bridge injectKeyWithKeycode:kc pressed:NO timestamp:ts];
+
+      if (isModifierKeycode(kc)) {
+        _physicalModifiers &= ~modifierBitForKeycode(kc);
+        [bridge injectModifiersWithDepressed:_physicalModifiers
+                                     latched:0
+                                      locked:0
+                                       group:0];
+      }
+    }
+  }
+  [super pressesCancelled:presses withEvent:event];
 }
 
 // ---------------------------------------------------------------------------
@@ -1759,8 +2047,7 @@ static const NSTimeInterval kDoubleTapThreshold = 0.4;
     _cursorHotspotY = hotspotY;
 
     // Show cursor only in touchpad mode
-    _cursorLayer.hidden =
-        (_currentInputMode != WWNTouchInputModeTouchpad);
+    _cursorLayer.hidden = (_currentInputMode != WWNTouchInputModeTouchpad);
     [self _repositionCursorLayer];
   } else {
     _cursorLayer.contents = nil;
@@ -1773,11 +2060,9 @@ static const NSTimeInterval kDoubleTapThreshold = 0.4;
 - (void)_repositionCursorLayer {
   [CATransaction begin];
   [CATransaction setDisableActions:YES];
-  _cursorLayer.position =
-      CGPointMake(_pointerPos.x - _cursorHotspotX +
-                      _cursorLayer.bounds.size.width / 2.0,
-                  _pointerPos.y - _cursorHotspotY +
-                      _cursorLayer.bounds.size.height / 2.0);
+  _cursorLayer.position = CGPointMake(
+      _pointerPos.x - _cursorHotspotX + _cursorLayer.bounds.size.width / 2.0,
+      _pointerPos.y - _cursorHotspotY + _cursorLayer.bounds.size.height / 2.0);
   [CATransaction commit];
 }
 
@@ -1788,7 +2073,7 @@ static const NSTimeInterval kDoubleTapThreshold = 0.4;
 - (void)_sendKeyboardEnterIfNeeded {
   if (!_keyboardEnterSent && self.wwnWindowId > 0) {
     WWNLog("IOS_VIEW", @"Sending keyboard enter for window %llu",
-          self.wwnWindowId);
+           self.wwnWindowId);
     [[WWNCompositorBridge sharedBridge]
         injectKeyboardEnterForWindow:self.wwnWindowId
                                 keys:@[]];
@@ -1799,7 +2084,7 @@ static const NSTimeInterval kDoubleTapThreshold = 0.4;
 - (void)_sendKeyboardLeave {
   if (_keyboardEnterSent && self.wwnWindowId > 0) {
     WWNLog("IOS_VIEW", @"Sending keyboard leave for window %llu",
-          self.wwnWindowId);
+           self.wwnWindowId);
     [[WWNCompositorBridge sharedBridge]
         injectKeyboardLeaveForWindow:self.wwnWindowId];
     _keyboardEnterSent = NO;

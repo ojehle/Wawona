@@ -216,6 +216,21 @@ pub struct Rect {
     pub height: u32,
 }
 
+/// Normalized content rect within a buffer (0..1 range, FFI-safe).
+#[derive(Debug, Clone, Copy, PartialEq, uniffi::Record)]
+pub struct ContentRect {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+impl Default for ContentRect {
+    fn default() -> Self {
+        Self { x: 0.0, y: 0.0, w: 1.0, h: 1.0 }
+    }
+}
+
 impl Rect {
     pub fn new(x: i32, y: i32, width: u32, height: u32) -> Self {
         Self { x, y, width, height }
@@ -456,6 +471,20 @@ impl ResizeEdge {
             _ => ResizeEdge::None,
         }
     }
+
+    pub fn to_u32(self) -> u32 {
+        match self {
+            ResizeEdge::None => 0,
+            ResizeEdge::Top => 1,
+            ResizeEdge::Bottom => 2,
+            ResizeEdge::Left => 4,
+            ResizeEdge::TopLeft => 5,
+            ResizeEdge::BottomLeft => 6,
+            ResizeEdge::Right => 8,
+            ResizeEdge::TopRight => 9,
+            ResizeEdge::BottomRight => 10,
+        }
+    }
 }
 
 impl Default for ResizeEdge {
@@ -580,6 +609,8 @@ pub enum WindowEvent {
 
     // Minimize/close requests
     MinimizeRequested { window_id: WindowId },
+    MaximizeRequested { window_id: WindowId },
+    UnmaximizeRequested { window_id: WindowId },
     CloseRequested { window_id: WindowId },
 
     // Cursor shape change (from wp_cursor_shape protocol)
@@ -1136,6 +1167,9 @@ pub struct RenderNode {
     /// For toplevels/popups this equals (x, y) since they are their own anchor.
     pub anchor_output_x: i32,
     pub anchor_output_y: i32,
+    /// Normalized content rect within the buffer (0..1 range).
+    /// Default [0,0,1,1] = full buffer. Non-default when CSD geometry crops content.
+    pub content_rect: ContentRect,
 }
 
 impl RenderNode {
@@ -1159,6 +1193,7 @@ impl RenderNode {
             damage: vec![],
             anchor_output_x: 0,
             anchor_output_y: 0,
+            content_rect: ContentRect::default(),
         }
     }
 }

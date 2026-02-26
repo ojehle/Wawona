@@ -48,10 +48,10 @@ let
   epollShim = buildModule.buildForIOS "epoll-shim" { inherit simulator; };
 
   # Build wayland-scanner for the build architecture (host)
-  waylandScanner = pkgs.stdenv.mkDerivation {
+  waylandScanner = buildPackages.stdenv.mkDerivation {
     name = "wayland-scanner-host";
     inherit src;
-    nativeBuildInputs = with pkgs; [
+    nativeBuildInputs = with buildPackages; [
       meson
       ninja
       pkg-config

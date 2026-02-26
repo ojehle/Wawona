@@ -1,4 +1,4 @@
-{ lib, pkgs, buildModule, wawonaSrc, wawonaVersion, rustBackendMacOS ? null, rustBackendIOS ? null, rustBackendIOSSim ? null, rustBackendAndroid ? null, weston ? null, waypipe ? null, androidSDK ? null, androidSrc ? null, ... }:
+{ lib, pkgs, buildModule, wawonaSrc, wawonaVersion, pkgsAndroid, pkgsIos, rustBackendMacOS ? null, rustBackendIOS ? null, rustBackendIOSSim ? null, rustBackendAndroid ? null, weston ? null, waypipe ? null, androidSDK ? null, androidSrc ? null, ... }:
 
 # Central entry point for Wawona applications.
 # Returns: { ios, macos, android, common, generators }
@@ -18,6 +18,8 @@ let
   apps = {
     ios = pkgs.callPackage ./ios.nix {
       inherit buildModule wawonaSrc wawonaVersion;
+      weston = buildModule.buildForIOS "weston" { };
+      targetPkgs = pkgsIos;
       rustBackend = rustBackendIOS;
       rustBackendSim = rustBackendIOSSim;
     };
@@ -29,6 +31,7 @@ let
 
     android = pkgs.callPackage ./android.nix {
       inherit buildModule wawonaVersion androidSDK;
+      targetPkgs = pkgsAndroid;
       wawonaSrc = if androidSrc != null then androidSrc else wawonaSrc;
       rustBackend = rustBackendAndroid;
     };
@@ -39,12 +42,33 @@ let
 
     generators = {
       xcodegen = pkgs.callPackage ../generators/xcodegen.nix {
-         inherit wawonaVersion rustBackendIOS rustBackendIOSSim rustBackendMacOS;
+         inherit wawonaVersion rustBackendIOS rustBackendIOSSim rustBackendMacOS wawonaSrc buildModule;
+         targetPkgs = pkgs;
          rustPlatform = pkgs.rustPlatform;
+         libwaylandIOS = buildModule.buildForIOS "libwayland" { };
+         xkbcommonIOS = buildModule.buildForIOS "xkbcommon" { };
+         pixmanIOS = buildModule.buildForIOS "pixman" { };
+         libffiIOS = buildModule.buildForIOS "libffi" { };
+         opensslIOS = buildModule.buildForIOS "openssl" { };
+         libssh2IOS = buildModule.buildForIOS "libssh2" { };
+         mbedtlsIOS = buildModule.buildForIOS "mbedtls" { };
+         zstdIOS = buildModule.buildForIOS "zstd" { };
+         lz4IOS = buildModule.buildForIOS "lz4" { };
+         epollShimIOS = buildModule.buildForIOS "epoll-shim" { };
+         waypipeIOS = buildModule.buildForIOS "waypipe" { };
+         westonSimpleShmIOS = buildModule.buildForIOS "weston-simple-shm" { };
+         westonIOS = buildModule.buildForIOS "weston" { };
+         cairoIOS = null;
+         pangoIOS = null;
+         glibIOS = null;
+         harfbuzzIOS = null;
+         fontconfigIOS = null;
+         freetypeIOS = null;
+         libpngIOS = null;
       };
       gradlegen = pkgs.callPackage ../generators/gradlegen.nix {
         wawonaAndroidProject = apps.android.project or null;
-        inherit wawonaSrc;
+        inherit wawonaSrc wawonaVersion;
       };
     };
   };

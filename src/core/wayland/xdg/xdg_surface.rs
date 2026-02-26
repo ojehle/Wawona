@@ -33,10 +33,10 @@ impl Dispatch<xdg_surface::XdgSurface, u32> for CompositorState {
                     let window_id = state.next_window_id();
                     let mut window = Window::new(window_id, data.surface_id);
                     
-                     // Get output dimensions for initial size
-                    let (initial_width, initial_height, scale) = {
+                    // Get output dimensions for initial size (already logical)
+                    let (initial_width, initial_height) = {
                         let output = state.primary_output();
-                        (output.width, output.height, output.scale)
+                        (output.width, output.height)
                     };
 
                     window.width = initial_width as i32;
@@ -44,6 +44,8 @@ impl Dispatch<xdg_surface::XdgSurface, u32> for CompositorState {
                     
                     // Create toplevel data (wl_surface_id, xdg_surface_id)
                     let mut toplevel_data = XdgToplevelData::new(window_id, data.surface_id, surface_id);
+                    toplevel_data.width = initial_width;
+                    toplevel_data.height = initial_height;
                     // Store the window ID (u32) as user data for the toplevel resource
                     let toplevel: wayland_protocols::xdg::shell::server::xdg_toplevel::XdgToplevel = data_init.init(id, window_id);
                     toplevel_data.resource = Some(toplevel.clone());
@@ -58,24 +60,34 @@ impl Dispatch<xdg_surface::XdgSurface, u32> for CompositorState {
                     // Add window to state
                     state.add_window(window);
                     
-                    // Send initial configure
-                    // Use logical coordinates (physical / scale)
-                    let logical_width = (initial_width as f32 / scale) as i32;
-                    let logical_height = (initial_height as f32 / scale) as i32;
-                    
-                    // Generate configure serial
+                    // Send initial configure.
+                    // When Force SSD is active the platform window has a native
+                    // titlebar that reduces the usable content area below the
+                    // full output size.  Sending (0, 0) here defers the size
+                    // decision to the client and avoids the nested compositor
+                    // latching onto the raw output dimensions before the correct
+                    // content-area size arrives via the subsequent injectWindowResize
+                    // that handleWindowCreated: fires after NSWindow is created.
+                    //
+                    // For non-SSD (CSD) windows we continue to send the output
+                    // size as a hint so the client can size itself reasonably.
                     let serial = state.next_serial();
                     
-                    // State byte array expects sequence of u32s. 
-                    // State::Activated is usually the correct starting state for new windows in Wawona.
                     let mut states: Vec<u8> = vec![];
                     states.extend_from_slice(&((wayland_protocols::xdg::shell::server::xdg_toplevel::State::Activated as u32).to_ne_bytes()));
                     
-                    crate::wlog!(crate::util::logging::COMPOSITOR, 
-                        "Configuring xdg_toplevel: window={} surface={} size={}x{} states={:?} serial={}", 
-                        window_id, data.surface_id, logical_width, logical_height, states, serial);
+                    let (configure_w, configure_h) = match state.decoration_policy {
+                        crate::core::state::DecorationPolicy::ForceServer => (0u32, 0u32),
+                        _ => (initial_width, initial_height),
+                    };
 
-                    toplevel.configure(logical_width, logical_height, states);
+                    crate::wlog!(crate::util::logging::COMPOSITOR, 
+                        "Configuring xdg_toplevel: window={} surface={} size={}x{} (force_ssd={}) states={:?} serial={}", 
+                        window_id, data.surface_id, configure_w, configure_h,
+                        matches!(state.decoration_policy, crate::core::state::DecorationPolicy::ForceServer),
+                        states, serial);
+
+                    toplevel.configure(configure_w as i32, configure_h as i32, states);
                     resource.configure(serial);
                     
                     // Set surface role
@@ -102,7 +114,7 @@ impl Dispatch<xdg_surface::XdgSurface, u32> for CompositorState {
                             width: initial_width,
                             height: initial_height,
                             decoration_mode: state.decoration_mode_for_new_window(),
-                            fullscreen_shell: state.decoration_mode_for_new_window() == crate::core::window::DecorationMode::ServerSide,
+                            fullscreen_shell: false,
                         }
                     );
                 }

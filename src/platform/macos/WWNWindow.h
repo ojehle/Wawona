@@ -5,6 +5,7 @@
 @interface WWNWindow : NSWindow <NSWindowDelegate>
 @property(nonatomic, assign) uint64_t wwnWindowId;
 @property(nonatomic, assign) BOOL processingResize;
+@property(nonatomic, strong) NSEvent *lastMouseDownEvent;
 @end
 
 @interface WWNView : NSView <NSTextInputClient>

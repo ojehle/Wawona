@@ -44,7 +44,8 @@ impl GlobalDispatch<wl_seat::WlSeat, SeatGlobal> for CompositorState {
         // Send capabilities
         seat.capabilities(
             wl_seat::Capability::Pointer | 
-            wl_seat::Capability::Keyboard
+            wl_seat::Capability::Keyboard |
+            wl_seat::Capability::Touch
         );
         
         // Send name (version 2+)

@@ -1,4 +1,5 @@
 use crate::util::geometry::Rect;
+use crate::ffi::types::ContentRect;
 
 /// Represents a node in the scene graph.
 /// A node can be a surface, a container for other nodes, or a decorator.
@@ -13,7 +14,11 @@ pub struct SceneNode {
     pub scale: f32,
     pub opacity: f32,
     pub visible: bool,
-    pub children: Vec<u32>, // IDs of child nodes
+    pub children: Vec<u32>,
+    /// Normalized content rect within the buffer (0..1 range).
+    /// Default is [0, 0, 1, 1] (full buffer).
+    /// Non-default when xdg_surface.set_window_geometry crops to a CSD content area.
+    pub content_rect: ContentRect,
 }
 
 impl SceneNode {
@@ -29,6 +34,7 @@ impl SceneNode {
             opacity: 1.0,
             visible: true,
             children: Vec::new(),
+            content_rect: ContentRect::default(),
         }
     }
 

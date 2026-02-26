@@ -253,11 +253,15 @@ pub extern "C" fn waypipe_main(argc: c_int, argv: *const *const c_char) -> c_int
 #[no_mangle]
 pub fn waypipe_run_main(args: Vec<String>) -> i32 {
     set_global_args(args);
-    match w_main() {
-        Ok(_) => 0,
-        Err(e) => {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| w_main())) {
+        Ok(Ok(_)) => 0,
+        Ok(Err(e)) => {
             wplog!("WAYPIPE-CORE", "Error: {:?}", e);
             1
+        }
+        Err(panic_info) => {
+            wplog!("WAYPIPE-CORE", "Panic caught (prevented abort): {:?}", panic_info);
+            2
         }
     }
 }
@@ -294,6 +298,47 @@ with open(file_path, "w") as f:
 print("Injected waypipe_main C entry point")
 INJECT_MAIN_EOF
   echo "✓ Injected waypipe_main"
+
+  # Fix clap argument parsing: use injected args instead of std::env::args().
+  # Without this, clap reads the Android app's process args (e.g. the package
+  # name), fails to parse, and calls std::process::exit() — which kills the
+  # entire app since waypipe runs as a linked library, not a standalone binary.
+  python3 <<'CLAP_PY'
+from pathlib import Path
+target = Path("src/lib.rs")
+if not target.exists():
+    target = Path("src/main.rs")
+if target.exists():
+    s = target.read_text()
+    old = "let matches = command.get_matches()"
+    new = 'let matches = command.try_get_matches_from(get_args()).map_err(|e| format!("Argument parsing failed: {}", e))?'
+    if old in s:
+        s = s.replace(old, new)
+        target.write_text(s)
+        print(f"✓ Patched clap get_matches in {target}")
+    else:
+        print(f"Note: command.get_matches() not found in {target} (already patched or pattern differs)")
+CLAP_PY
+
+  # Fix logger initialization: use .ok() instead of .unwrap() so that
+  # re-entering waypipe_main (second "Run Waypipe" in same app instance)
+  # doesn't panic with SetLoggerError when the global logger is already set.
+  python3 <<'LOGGER_PY'
+from pathlib import Path
+target = Path("src/lib.rs")
+if not target.exists():
+    target = Path("src/main.rs")
+if target.exists():
+    s = target.read_text()
+    old = "log::set_boxed_logger(Box::new(logger)).unwrap()"
+    new = "let _ = log::set_boxed_logger(Box::new(logger))"
+    if old in s:
+        s = s.replace(old, new)
+        target.write_text(s)
+        print(f"✓ Patched logger init (.unwrap -> let _) in {target}")
+    else:
+        print(f"Note: set_boxed_logger().unwrap() not found in {target} (already patched or pattern differs)")
+LOGGER_PY
 fi
 
 # Add with_libssh2 feature stub (empty — no ssh2 dep on Android).

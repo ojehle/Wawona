@@ -244,9 +244,11 @@ impl KeyboardState {
         state: wl_keyboard::KeyState,
         focused_client: Option<&wayland_server::Client>,
     ) {
-        for kbd in &self.resources {
-            if focused_client.is_none() || kbd.client().as_ref() == focused_client {
-                kbd.key(serial, time, key, state);
+        if let Some(focused) = focused_client {
+            for kbd in &self.resources {
+                if kbd.client().as_ref() == Some(focused) {
+                    kbd.key(serial, time, key, state);
+                }
             }
         }
     }
@@ -257,15 +259,17 @@ impl KeyboardState {
         serial: u32,
         focused_client: Option<&wayland_server::Client>,
     ) {
-        for kbd in &self.resources {
-            if focused_client.is_none() || kbd.client().as_ref() == focused_client {
-                kbd.modifiers(
-                    serial,
-                    self.mods_depressed,
-                    self.mods_latched,
-                    self.mods_locked,
-                    self.mods_group,
-                );
+        if let Some(focused) = focused_client {
+            for kbd in &self.resources {
+                if kbd.client().as_ref() == Some(focused) {
+                    kbd.modifiers(
+                        serial,
+                        self.mods_depressed,
+                        self.mods_latched,
+                        self.mods_locked,
+                        self.mods_group,
+                    );
+                }
             }
         }
     }

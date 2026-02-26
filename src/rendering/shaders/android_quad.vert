@@ -14,11 +14,21 @@ layout(push_constant) uniform PushConstants {
     float extent_y;
     float opacity;
     float _pad;
+    float content_rect_x;
+    float content_rect_y;
+    float content_rect_w;
+    float content_rect_h;
 } pc;
 
 void main() {
     float ndc_x = (pc.pos_x + inPosition.x * pc.size_x) / pc.extent_x * 2.0 - 1.0;
-    float ndc_y = 1.0 - (pc.pos_y + inPosition.y * pc.size_y) / pc.extent_y * 2.0;
+    float ndc_y = (pc.pos_y + inPosition.y * pc.size_y) / pc.extent_y * 2.0 - 1.0;
     gl_Position = vec4(ndc_x, ndc_y, 0.0, 1.0);
-    fragTexCoord = inTexCoord;
+    
+    // Apply normalization/cropping to texture coordinates.
+    // content_rect is already normalized (0..1) on the Rust side.
+    fragTexCoord = vec2(
+        pc.content_rect_x + inTexCoord.x * pc.content_rect_w,
+        pc.content_rect_y + inTexCoord.y * pc.content_rect_h
+    );
 }

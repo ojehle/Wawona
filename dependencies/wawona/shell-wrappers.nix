@@ -1,0 +1,82 @@
+let
+  macosEnv = ''
+    export XDG_RUNTIME_DIR="/tmp/wawona-$(id -u)"
+    export WAYLAND_DISPLAY="''${WAYLAND_DISPLAY:-wayland-0}"
+    if [ ! -d "$XDG_RUNTIME_DIR" ]; then
+      mkdir -p "$XDG_RUNTIME_DIR"
+      chmod 700 "$XDG_RUNTIME_DIR"
+    fi
+  '';
+in {
+  unixWrapper = pkgs: name: bin:
+    pkgs.writeShellScriptBin name ''
+      export XDG_RUNTIME_DIR="''${XDG_RUNTIME_DIR:-/tmp/$(id -u)-runtime}"
+      export WAYLAND_DISPLAY="''${WAYLAND_DISPLAY:-wayland-0}"
+      exec ${bin} "$@"
+    '';
+
+  inherit macosEnv;
+
+  macosWrapper = pkgs: wawona: pkgs.writeShellScriptBin "wawona" ''
+    ${macosEnv}
+    APP="${wawona}/Applications/Wawona.app"
+    if [ "''${1:-}" = "--debug" ] || [ "''${WAWONA_LLDB:-0}" = "1" ]; then
+      [ "''${1:-}" = "--debug" ] && shift
+      echo "[DEBUG] Starting Wawona under LLDB..."
+      exec ${pkgs.lldb}/bin/lldb -o run -o "bt all" -- "$APP/Contents/MacOS/Wawona" "$@"
+    else
+      exec "$APP/Contents/MacOS/Wawona" "$@"
+    fi
+  '';
+
+  waypipeWrapper = pkgs: waypipe: pkgs.writeShellScriptBin "waypipe" ''
+    ${macosEnv}
+    # Point Vulkan loader at KosmicKrisp ICD if available and not overridden
+    if [ -z "''${VK_DRIVER_FILES:-}" ]; then
+      # Check app bundle first (when launched from Wawona.app)
+      APP_ICD="$(dirname "$(dirname "$0")")/Resources/vulkan/icd.d/kosmickrisp_icd.json"
+      if [ -f "$APP_ICD" ]; then
+        export VK_DRIVER_FILES="$APP_ICD"
+      fi
+    fi
+    exec "${waypipe}/bin/waypipe" "$@"
+  '';
+
+  footWrapper = pkgs: foot: pkgs.writeShellScriptBin "foot" ''
+    ${macosEnv}
+
+    # Check if user has a config
+    if [ ! -f "$HOME/.config/foot/foot.ini" ] && [ ! -f "''${XDG_CONFIG_HOME:-$HOME/.config}/foot/foot.ini" ]; then
+      echo "Info: No foot.ini found, using default macOS configuration (Menlo font)"
+      DEFAULT_CONFIG="''${XDG_RUNTIME_DIR}/foot-default.ini"
+      cat > "$DEFAULT_CONFIG" <<EOF
+[main]
+font=Menlo:size=12,Monaco:size=12,monospace:size=12
+dpi-aware=yes
+EOF
+      exec "${foot}/bin/foot" -c "$DEFAULT_CONFIG" "$@"
+    else
+      exec "${foot}/bin/foot" "$@"
+    fi
+  '';
+
+  westonAppWrapper = pkgs: weston: binName: pkgs.writeShellScriptBin binName ''
+    ${macosEnv}
+    exec "${weston}/bin/${binName}" "$@"
+  '';
+
+  iosWrapper = pkgs: wawona: pkgs.writeShellScriptBin "wawona-ios" ''
+    export XDG_RUNTIME_DIR="/tmp/wawona-$(id -u)"
+    exec "${wawona}/bin/wawona-ios-simulator" "$@"
+  '';
+
+  androidWrapper = pkgs: wawona: pkgs.writeShellScriptBin "wawona-android" ''
+    export XDG_RUNTIME_DIR="/tmp/wawona-$(id -u)"
+    exec "${wawona}/bin/wawona-android-run" "$@"
+  '';
+
+  linuxWrapper = pkgs: wawona: pkgs.writeShellScriptBin "wawona" ''
+    export XDG_RUNTIME_DIR="/tmp/wawona-$(id -u)"
+    exec "${wawona}/bin/wawona" "$@"
+  '';
+}

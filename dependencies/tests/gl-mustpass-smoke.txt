@@ -1,0 +1,12 @@
+# GL CTS smoke subset - fast must-pass tests for driver validation
+# Run with: glcts --deqp-caselist-file=... or cts-runner
+dEQP-GLES2.functional.shaders.builtin_functions.common.abs.float_vertex
+dEQP-GLES2.functional.shaders.builtin_functions.common.abs.float_fragment
+dEQP-GLES2.functional.buffer.write.basic
+dEQP-GLES2.functional.texture.specification.basic_2d
+dEQP-GLES2.functional.rbo.renderbuffer_storage
+dEQP-GLES2.functional.fbo.api.gen_framebuffers
+dEQP-GLES2.functional.fbo.api.gen_renderbuffers
+dEQP-GLES3.functional.shaders.builtin_functions.common.abs.float_vertex
+dEQP-GLES3.functional.buffer.write.basic
+dEQP-EGL.functional.create_context.create_gl_context

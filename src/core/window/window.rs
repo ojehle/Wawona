@@ -29,6 +29,13 @@ pub struct Window {
     /// Whether this window is a modal dialog
     pub modal: bool,
     
+    /// CSD geometry offset: the (x, y) origin of the content area within the
+    /// surface buffer.  When the window is cropped to exclude the CSD shadow,
+    /// pointer coordinates from the platform must be shifted by this offset to
+    /// produce correct surface-local coordinates.
+    pub geometry_x: i32,
+    pub geometry_y: i32,
+    
     /// IDs of outputs this window is visible on
     pub outputs: Vec<u32>,
 }
@@ -51,6 +58,8 @@ impl Window {
             activated: false,
             resizing: false,
             modal: false,
+            geometry_x: 0,
+            geometry_y: 0,
             outputs: Vec::new(),
         }
     }

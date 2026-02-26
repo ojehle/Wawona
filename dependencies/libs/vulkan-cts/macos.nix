@@ -1,30 +1,21 @@
+# Vulkan CTS for macOS (uses KosmicKrisp when provided)
 {
   lib,
   pkgs,
-  common ? null,
-  buildModule ? null,
   kosmickrisp ? null,
+  buildTargets ? "deqp-vk",
 }:
 
 let
-  sources = import ./sources.nix {
-    inherit (pkgs) fetchurl fetchFromGitHub;
-  };
+  common = import ./common.nix { inherit pkgs; };
 in
 pkgs.stdenv.mkDerivation (finalAttrs: {
   pname = "vulkan-cts-macos";
-  version = "1.4.5.0";
+  version = common.version;
 
-  src = pkgs.fetchFromGitHub {
-    owner = "KhronosGroup";
-    repo = "VK-GL-CTS";
-    rev = "vulkan-cts-${finalAttrs.version}";
-    hash = "sha256-cbXSelRPCCH52xczWaxqftbimHe4PyIKZqySQSFTHos=";
-  };
+  src = common.src;
 
-  prePatch = ''
-    ${sources.prePatch}
-  '';
+  prePatch = common.prePatch;
 
   nativeBuildInputs = with pkgs; [
     cmake
@@ -54,19 +45,19 @@ pkgs.stdenv.mkDerivation (finalAttrs: {
     "-DCMAKE_INSTALL_LIBDIR=lib"
     "-DCMAKE_INSTALL_INCLUDEDIR=include"
     "-DDEQP_TARGET=osx"
-    "-DSELECTED_BUILD_TARGETS=deqp-vk"
+    "-DSELECTED_BUILD_TARGETS=${buildTargets}"
     (lib.cmakeFeature "DGLSLANG_INSTALL_DIR" "${pkgs.glslang}")
     (lib.cmakeFeature "DSPIRV_HEADERS_INSTALL_DIR" "${pkgs.spirv-headers}")
-    (lib.cmakeFeature "FETCHCONTENT_SOURCE_DIR_SHADERC" "${sources.shaderc-src}")
+    (lib.cmakeFeature "FETCHCONTENT_SOURCE_DIR_SHADERC" "${common.sources.shaderc-src}")
   ];
 
   postInstall = ''
-    test ! -e $out
-
     mkdir -p $out/bin $out/archive-dir
-    cp -a external/vulkancts/modules/vulkan/deqp-vk $out/bin/
-    cp -a external/vulkancts/modules/vulkan/vulkan $out/archive-dir/
-    cp -a external/vulkancts/modules/vulkan/vk-default $out/
+    [ -f external/vulkancts/modules/vulkan/deqp-vk ] && cp -a external/vulkancts/modules/vulkan/deqp-vk $out/bin/ || true
+    [ -d external/vulkancts/modules/vulkan/vulkan ] && cp -a external/vulkancts/modules/vulkan/vulkan $out/archive-dir/ || true
+    [ -d external/vulkancts/modules/vulkan/vk-default ] && cp -a external/vulkancts/modules/vulkan/vk-default $out/ || true
+    [ -f external/openglcts/modules/glcts ] && cp -a external/openglcts/modules/glcts $out/bin/ || true
+    [ -f external/openglcts/modules/cts-runner ] && cp -a external/openglcts/modules/cts-runner $out/bin/ || true
   '';
 
   postFixup = let
@@ -75,10 +66,12 @@ pkgs.stdenv.mkDerivation (finalAttrs: {
       then "${kosmickrisp}/share/vulkan/icd.d/kosmickrisp_icd.json"
       else "";
   in ''
-    install_name_tool -add_rpath "${vulkanLoader}/lib" $out/bin/deqp-vk || true
-    wrapProgram $out/bin/deqp-vk \
-      --add-flags "--deqp-archive-dir=$out/archive-dir" \
-      ${lib.optionalString (kosmickrisp != null) ''--set VK_DRIVER_FILES "${icdPath}"''}
+    if [ -f $out/bin/deqp-vk ]; then
+      install_name_tool -add_rpath "${vulkanLoader}/lib" $out/bin/deqp-vk || true
+      wrapProgram $out/bin/deqp-vk \
+        --add-flags "--deqp-archive-dir=$out/archive-dir" \
+        ${lib.optionalString (kosmickrisp != null) ''--set VK_DRIVER_FILES "${icdPath}"''}
+    fi
   '';
 
   meta = {

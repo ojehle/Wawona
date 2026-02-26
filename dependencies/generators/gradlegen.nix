@@ -1,6 +1,14 @@
-{ pkgs, stdenv, lib, wawonaAndroidProject ? null, wawonaSrc ? null }:
+{ pkgs, stdenv, lib, wawonaAndroidProject ? null, wawonaSrc ? null, wawonaVersion ? "v1.0" }:
 
 let
+  versionName = if wawonaVersion == null || wawonaVersion == "" then "v1.0"
+    else if lib.hasPrefix "v" wawonaVersion then wawonaVersion
+    else "v${wawonaVersion}";
+  androidIconAssets =
+    if wawonaSrc != null && builtins.pathExists ./android-icon-assets.nix then
+      pkgs.callPackage ./android-icon-assets.nix { inherit wawonaSrc; }
+    else
+      null;
   buildGradle = pkgs.writeText "build.gradle.kts" ''
     buildscript {
         repositories {
@@ -30,7 +38,7 @@ let
                 minSdk = 36
                 targetSdk = 36
                 versionCode = 1
-                versionName = "1.0"
+                versionName = "${versionName}"
             }
 
         buildTypes {
@@ -73,14 +81,14 @@ let
         implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
         implementation("androidx.activity:activity-compose:1.9.3")
         implementation(platform("androidx.compose:compose-bom:2024.10.01"))
-        implementation("androidx.compose.ui:ui")
-        implementation("androidx.compose.ui:ui-graphics")
-        implementation("androidx.compose.ui:ui-tooling-preview")
-        implementation("androidx.compose.foundation:foundation")
+        implementation("androidx.compose.ui:ui:1.7.5")
+        implementation("androidx.compose.ui:ui-graphics:1.7.5")
+        implementation("androidx.compose.ui:ui-tooling-preview:1.7.5")
+        implementation("androidx.compose.foundation:foundation:1.7.5")
         implementation("androidx.compose.material3:material3:1.3.1")
-        implementation("androidx.compose.material3:material3-window-size-class")
-        implementation("androidx.compose.material:material-icons-extended")
-        implementation("androidx.compose.animation:animation")
+        implementation("androidx.compose.material3:material3-window-size-class:1.3.1")
+        implementation("androidx.compose.material:material-icons-extended:1.7.5")
+        implementation("androidx.compose.animation:animation:1.7.5")
         
         implementation("androidx.appcompat:appcompat:1.7.0")
         implementation("androidx.fragment:fragment-ktx:1.8.9")
@@ -119,28 +127,47 @@ let
     rootProject.name = "Wawona"
   '';
 
-  # Script to copy project to current directory.
+  # Script to generate Android Studio project in _GEN-android/ (gitignored).
   # When wawonaAndroidProject is available (pre-built Android project with jniLibs),
-  # copies the full project for Android Studio. Otherwise falls back to gradle files only.
+  # copies the full project. Otherwise falls back to gradle files + sources only.
+  projectPath = if wawonaAndroidProject != null then toString wawonaAndroidProject else "";
+  outDir = "_GEN-android";
   generateScript = pkgs.writeShellScriptBin "gradlegen" ''
     set -e
-    if [ -n "${toString wawonaAndroidProject}" ] && [ -d "${wawonaAndroidProject}" ]; then
-      echo "Copying full Android project (backend + native libs) to current directory..."
-      cp -r ${wawonaAndroidProject}/* .
-      chmod -R u+w build.gradle.kts settings.gradle.kts 2>/dev/null || true
-      echo "Project ready. Open this directory in Android Studio and select device/emulator."
+    OUT="${outDir}"
+
+    # Clean previous run (handles read-only Nix store copies)
+    if [ -d "$OUT" ]; then
+      chmod -R u+w "$OUT" 2>/dev/null || true
+      rm -rf "$OUT"
+    fi
+    mkdir -p "$OUT"
+
+    if [ -n "${projectPath}" ] && [ -d "${projectPath}" ]; then
+      echo "Copying full Android project (backend + native libs) to $OUT/..."
+      cp -r ${projectPath}/* "$OUT/"
+      chmod -R u+w "$OUT" 2>/dev/null || true
+      echo ""
+      echo "Project ready at $OUT/"
+      echo "Open $OUT/ in Android Studio and select device/emulator."
     else
-      cp ${buildGradle} build.gradle.kts
-      cp ${settingsGradle} settings.gradle.kts
-      chmod u+w build.gradle.kts settings.gradle.kts
+      cp ${buildGradle} "$OUT/build.gradle.kts"
+      cp ${settingsGradle} "$OUT/settings.gradle.kts"
+      chmod u+w "$OUT/build.gradle.kts" "$OUT/settings.gradle.kts"
       if [ -n "${toString wawonaSrc}" ] && [ -d "${wawonaSrc}/src/platform/android" ]; then
-        mkdir -p java res
-        cp -r ${wawonaSrc}/src/platform/android/java/* java/ 2>/dev/null || true
-        cp -r ${wawonaSrc}/src/platform/android/res/* res/ 2>/dev/null || true
-        cp ${wawonaSrc}/src/platform/android/AndroidManifest.xml . 2>/dev/null || true
-        echo "Generated gradle files + Android sources (no jniLibs - run nix build .#wawona-android first for full project)"
+        mkdir -p "$OUT/java" "$OUT/res"
+        cp -r ${wawonaSrc}/src/platform/android/java/* "$OUT/java/" 2>/dev/null || true
+        cp -r ${wawonaSrc}/src/platform/android/res/* "$OUT/res/" 2>/dev/null || true
+        cp ${wawonaSrc}/src/platform/android/AndroidManifest.xml "$OUT/" 2>/dev/null || true
+        chmod -R u+w "$OUT/res" 2>/dev/null || true
+        if [ -n "${toString androidIconAssets}" ] && [ -d "${androidIconAssets}/res" ]; then
+          cp -r ${androidIconAssets}/res/* "$OUT/res/"
+          chmod -R u+w "$OUT/res" 2>/dev/null || true
+          echo "Merged Wawona launcher icon assets"
+        fi
+        echo "Generated gradle files + Android sources in $OUT/ (no jniLibs - run nix build .#wawona-android first for full project)"
       else
-        echo "Generated build.gradle.kts and settings.gradle.kts"
+        echo "Generated build.gradle.kts and settings.gradle.kts in $OUT/"
       fi
     fi
   '';

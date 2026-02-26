@@ -17,9 +17,16 @@ object WawonaNative {
         }
     }
 
-    external fun nativeInit()
+    external fun nativeInit(cacheDir: String)
     external fun nativeSetSurface(surface: Surface)
     external fun nativeDestroySurface()
+    /** Fast resize: recreate swapchain only, no full teardown. */
+    external fun nativeResizeSurface(width: Int, height: Int)
+    /** Lightweight output sync: update compositor output size without touching the render pipeline. */
+    external fun nativeSyncOutputSize(width: Int, height: Int)
+    external fun nativeShutdown()
+    /** Set the Android display density for auto-scale computation (DisplayMetrics.density). */
+    external fun nativeSetDisplayDensity(density: Float)
     external fun nativeUpdateSafeArea(left: Int, top: Int, right: Int, bottom: Int)
     external fun nativeApplySettings(
         forceServerSideDecorations: Boolean,
@@ -55,6 +62,10 @@ object WawonaNative {
     external fun nativeTouchFrame()
 
     external fun nativeKeyEvent(keycode: Int, state: Int, timestampMs: Int)
+    /** Inject key by Linux evdev keycode (for accessory bar). */
+    external fun nativeInjectKey(linuxKeycode: Int, pressed: Boolean, timestampMs: Int)
+    /** Set XKB modifier state (for accessory bar sticky/locked modifiers). */
+    external fun nativeInjectModifiers(depressed: Int, latched: Int, locked: Int, group: Int)
     external fun nativePointerAxis(axis: Int, value: Float, timestampMs: Int)
     external fun nativePointerMotion(x: Double, y: Double, timestampMs: Int)
     external fun nativePointerButton(buttonCode: Int, state: Int, timestampMs: Int)

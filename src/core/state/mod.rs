@@ -55,6 +55,7 @@ use crate::core::wayland::xdg::xdg_foreign::XdgForeignState;
 use crate::core::render::scene::Scene;
 use crate::core::render::damage::SceneDamage;
 use crate::core::render::node::SceneNode;
+use crate::ffi::types::ContentRect;
 use crate::core::wayland::xdg::xdg_output::XdgOutputState;
 use crate::core::wayland::xdg::decoration::DecorationState;
 
@@ -849,8 +850,8 @@ impl SeatState {
         self.pointer.broadcast_leave(serial, surface);
     }
 
-    pub fn broadcast_pointer_frame(&mut self, _focused_client: Option<&wayland_server::Client>) {
-        self.pointer.broadcast_frame();
+    pub fn broadcast_pointer_frame(&mut self, focused_client: Option<&wayland_server::Client>) {
+        self.pointer.broadcast_frame(focused_client);
     }
 
     pub fn broadcast_pointer_axis(&mut self, time: u32, axis: wl_pointer::Axis, value: f64, focused_client: Option<&wayland_server::Client>) {
@@ -1289,6 +1290,9 @@ pub struct CompositorState {
     /// Keyboard repeat delay (ms)
     pub keyboard_repeat_delay: i32,
     
+    /// Whether to advertise zwp_fullscreen_shell_v1
+    pub advertise_fullscreen_shell: bool,
+    
     // =========================================================================
     // ID Generators
     // =========================================================================
@@ -1350,14 +1354,15 @@ pub struct CompositorState {
 
 impl CompositorState {
     pub fn new(config: Option<crate::core::compositor::CompositorConfig>) -> Self {
-        let decoration_policy = if let Some(cfg) = config {
-             if cfg.force_ssd {
+        let (decoration_policy, advertise_fullscreen_shell) = if let Some(cfg) = config {
+             let policy = if cfg.force_ssd {
                  DecorationPolicy::ForceServer
              } else {
                  DecorationPolicy::default()
-             }
+             };
+             (policy, cfg.advertise_fullscreen_shell)
         } else {
-            DecorationPolicy::default()
+            (DecorationPolicy::default(), false)
         };
 
         Self {
@@ -1382,6 +1387,7 @@ impl CompositorState {
             decoration_policy,
             keyboard_repeat_rate: 33,
             keyboard_repeat_delay: 500,
+            advertise_fullscreen_shell,
             next_surface_id: 1,
             next_window_id: 1,
             serial: 0,
@@ -1657,38 +1663,40 @@ mod tests {
 }
 
 impl CompositorState {
-    /// Fire presentation feedback for committed surfaces
+    /// Fire presentation feedback for committed surfaces.
+    /// Only sends `presented` for feedbacks whose surface has been committed;
+    /// uncommitted feedbacks are retained for the next cycle.
     pub fn fire_presentation_feedback(&mut self) {
         let now = SystemTime::now();
         let duration = now.duration_since(UNIX_EPOCH).unwrap();
-        
-        // High 32 bits and Low 32 bits of tv_sec
+
         let tv_sec_hi = (duration.as_secs() >> 32) as u32;
         let tv_sec_lo = (duration.as_secs() & 0xFFFFFFFF) as u32;
         let tv_nsec = duration.subsec_nanos();
-        
+
         let refresh_nsec = 16_666_666; // 60Hz default
-        
-        // Use presentation_time module for constants
+
         use wayland_protocols::wp::presentation_time::server::wp_presentation_feedback;
         let flags = wp_presentation_feedback::Kind::Vsync;
-        
-        let remaining = Vec::new();
-        
+
+        let mut remaining = Vec::new();
+
         for feedback in self.ext.presentation.feedbacks.drain(..) {
-             // In a real implementation: check if surface was actually updated this frame.
-             // Here we assume immediate presentation.
-             feedback.callback.presented(
-                 tv_sec_hi,
-                 tv_sec_lo,
-                 tv_nsec,
-                 refresh_nsec,
-                 0, // seq_hi
-                 0, // seq_lo
-                 flags
-             );
+            if feedback.committed {
+                feedback.callback.presented(
+                    tv_sec_hi,
+                    tv_sec_lo,
+                    tv_nsec,
+                    refresh_nsec,
+                    0, // seq_hi
+                    0, // seq_lo
+                    flags,
+                );
+            } else {
+                remaining.push(feedback);
+            }
         }
-        
+
         self.ext.presentation.feedbacks = remaining;
     }
 }

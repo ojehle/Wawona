@@ -131,11 +131,11 @@ int renderer_android_create_pipeline(
     goto err;
   }
 
-  /* Push constants: 8 floats = 32 bytes */
+  /* Push constants: 12 floats = 48 bytes */
   VkPushConstantRange push_range = {
       .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
       .offset = 0,
-      .size = 32,
+      .size = 48,
   };
 
   /* Descriptor set layout: single combined image sampler */
@@ -785,11 +785,21 @@ void renderer_android_draw_quads(VkCommandBuffer cmd_buf,
     if (view == VK_NULL_HANDLE)
       continue;
 
-    float pc[8] = {n->x,  n->y,  n->width,   n->height,
-                   ext_x, ext_y, n->opacity, 0};
+    float pc[12] = {n->x,
+                    n->y,
+                    n->width,
+                    n->height,
+                    ext_x,
+                    ext_y,
+                    n->opacity,
+                    0,
+                    n->content_rect_x,
+                    n->content_rect_y,
+                    n->content_rect_w,
+                    n->content_rect_h};
     vkCmdPushConstants(
         cmd_buf, s_renderer->pipeline_layout,
-        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 32, pc);
+        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 48, pc);
 
     /* Use a descriptor set - we need to create/update per draw or use a simpler
      * path. Vulkan requires a descriptor set for the sampler. We can use
@@ -862,10 +872,11 @@ void renderer_android_draw_cursor(VkCommandBuffer cmd_buf,
   if (ext_y < 1)
     ext_y = 1;
 
-  float pc[8] = {pos_x, pos_y, (float)cw, (float)ch, ext_x, ext_y, 1.0f, 0};
+  float pc[12] = {pos_x, pos_y, (float)cw, (float)ch, ext_x, ext_y,
+                  1.0f,  0,     0.0f,      0.0f,      1.0f,  1.0f};
   vkCmdPushConstants(cmd_buf, s_renderer->pipeline_layout,
                      VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                     0, 32, pc);
+                     0, 48, pc);
 
   VkDescriptorSet set;
   VkDescriptorSetAllocateInfo alloc_info = {

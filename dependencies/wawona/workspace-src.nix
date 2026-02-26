@@ -83,6 +83,28 @@ if p.exists():
     p.write_text(s)
     print(f"Patched Cargo.toml version to ${wawonaVersion}")
 
+# Patch wawona version in Cargo.lock to match the patched Cargo.toml.
+# cargo metadata --locked fails when Cargo.toml version != Cargo.lock version.
+wawona_version = "${wawonaVersion}"
+lock = Path("Cargo.lock")
+if lock.exists():
+    content = lock.read_text()
+    in_wawona = False
+    lines = content.splitlines(True)
+    out = []
+    for line in lines:
+        if line.strip() == 'name = "wawona"':
+            in_wawona = True
+        elif in_wawona and line.strip().startswith("version = "):
+            out.append(f'version = "{wawona_version}"\n')
+            in_wawona = False
+            continue
+        elif in_wawona and line.strip().startswith("["):
+            in_wawona = False
+        out.append(line)
+    lock.write_text("".join(out))
+    print(f"Patched wawona version to {wawona_version} in Cargo.lock")
+
 # Android uses OpenSSH (fork/exec), not libssh2. The shared Cargo.lock
 # lists ssh2 as a waypipe dep (from iOS patches). Strip it so
 # `cargo metadata --locked` doesn't require ssh2 in waypipe's Cargo.toml.

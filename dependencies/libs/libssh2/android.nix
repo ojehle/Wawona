@@ -24,8 +24,13 @@ pkgs.stdenv.mkDerivation {
   patches = [ ];
   nativeBuildInputs = with buildPackages; [
     cmake
+    pkgs.python3
   ];
   buildInputs = [ openssl-android ];
+  postPatch = ''
+    echo "=== Applying streamlocal patch to libssh2 ==="
+    ${pkgs.bash}/bin/bash ${./patch-streamlocal.sh}
+  '';
   preConfigure = ''
     export NIX_CFLAGS_COMPILE=""
     export NIX_CXXFLAGS_COMPILE=""

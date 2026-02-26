@@ -2,20 +2,41 @@
   pkgs,
   rustPlatform,
   wawonaVersion,
+  wawonaSrc,
+  buildModule,
+  targetPkgs ? null,
   TEAM_ID ? null,
   rustBackendIOS,
   rustBackendIOSSim ? null,
   rustBackendMacOS ? null,
   includeMacOSTarget ? (rustBackendMacOS != null),
+  # Individual dependencies to avoid recursion
+  libwaylandIOS ? null,
+  xkbcommonIOS ? null,
+  pixmanIOS ? null,
+  libffiIOS ? null,
+  opensslIOS ? null,
+  libssh2IOS ? null,
+  mbedtlsIOS ? null,
+  zstdIOS ? null,
+  lz4IOS ? null,
+  epollShimIOS ? null,
+  waypipeIOS ? null,
+  westonSimpleShmIOS ? null,
+  westonIOS ? null,
+  cairoIOS ? null,
+  pangoIOS ? null,
+  glibIOS ? null,
+  harfbuzzIOS ? null,
+  fontconfigIOS ? null,
+  freetypeIOS ? null,
+  libpngIOS ? null,
 }:
 
 let
   lib = pkgs.lib;
   buildPackages = pkgs.buildPackages;
-  buildModule = import ../toolchains/default.nix {
-    inherit (pkgs) lib pkgs stdenv buildPackages;
-  };
-  common = import ../wawona/common.nix { inherit lib pkgs; wawonaSrc = ../..; };
+  common = import ../wawona/common.nix { inherit lib pkgs wawonaSrc; };
   xcodeUtils = import ../utils/xcode-wrapper.nix { inherit lib pkgs TEAM_ID; };
 
   # Dependency version strings (must match the tags/versions in dependencies/libs/*)
@@ -99,17 +120,25 @@ let
       }
 
       echo "Re-tagging iOS device C libraries for iOS Simulator..."
-      retag "${buildModule.ios.libwayland}/lib"
-      retag "${buildModule.ios.xkbcommon}/lib"
-      retag "${buildModule.ios.libffi}/lib"
-      retag "${buildModule.ios.pixman}/lib"
-      retag "${buildModule.ios.zstd}/lib"
-      retag "${buildModule.ios.lz4}/lib"
-      retag "${buildModule.ios.libssh2}/lib"
-      retag "${buildModule.ios.mbedtls}/lib"
+      retag "${(buildModule.buildForIOS "libwayland" { })}/lib"
+      retag "${(buildModule.buildForIOS "xkbcommon" { })}/lib"
+      retag "${(buildModule.buildForIOS "libffi" { })}/lib"
+      retag "${(buildModule.buildForIOS "pixman" { })}/lib"
+      retag "${(buildModule.buildForIOS "zstd" { })}/lib"
+      retag "${(buildModule.buildForIOS "lz4" { })}/lib"
+      retag "${(buildModule.buildForIOS "libssh2" { })}/lib"
+      retag "${(buildModule.buildForIOS "mbedtls" { })}/lib"
       retag "${opensslIOS}/lib"
-      retag "${buildModule.ios."epoll-shim"}/lib"
-      retag "${buildModule.ios."weston-simple-shm"}/lib"
+      retag "${(buildModule.buildForIOS "epoll-shim" { })}/lib"
+      retag "${(buildModule.buildForIOS "weston-simple-shm" { })}/lib"
+      retag "${(buildModule.buildForIOS "weston" { })}/lib"
+      retag "${targetPkgs.cairo}/lib"
+      retag "${targetPkgs.pango}/lib"
+      retag "${targetPkgs.glib}/lib"
+      retag "${targetPkgs.harfbuzz}/lib"
+      retag "${targetPkgs.fontconfig}/lib"
+      retag "${targetPkgs.freetype}/lib"
+      retag "${targetPkgs.libpng}/lib"
       
       # Use native simulator build for waypipe (no retagging needed)
       cp "${buildModule.buildForIOS "waypipe" { simulator = true; }}/lib/libwaypipe.a" "$out/lib/"
@@ -165,8 +194,8 @@ let
         ];
         HEADER_SEARCH_PATHS = [
           "$(inherited)"
-          "${buildModule.ios.libwayland}/include"
-          "${buildModule.ios.xkbcommon}/include"
+          "${libwaylandIOS}/include"
+          "${xkbcommonIOS}/include"
           "${rustBackendIOS}/include"
           "$(SRCROOT)/src"
           "$(SRCROOT)/src/rendering"
@@ -175,6 +204,8 @@ let
           "$(SRCROOT)/src/extensions"
           "$(SRCROOT)/src/platform/macos"
           "$(SRCROOT)/src/platform/ios"
+          "${pixmanIOS}/include"
+          "${opensslIOS}/include"
         ];
       };
     };
@@ -188,7 +219,7 @@ let
             excludes = commonExcludes ++ ["*Window*" "*MacOS*" "*Popup*"];
           }
           { path = "src/platform/ios"; excludes = commonExcludes; }
-          { path = "src/ui"; excludes = commonExcludes ++ ["About/**"]; }
+          { path = "src/ui"; excludes = commonExcludes; }
           { path = "src/rendering"; excludes = commonExcludes; }
           { path = "src/apple_backend.h"; type = "file"; }
           { path = "src/config.h"; type = "file"; }
@@ -225,35 +256,39 @@ let
             ];
             "OTHER_LDFLAGS[sdk=iphoneos*]" = [
               "$(inherited)"
-              "-L${buildModule.ios.libwayland}/lib"
-              "-L${buildModule.ios.xkbcommon}/lib"
-              "-L${buildModule.ios.libffi}/lib"
-              "-L${buildModule.ios.pixman}/lib"
-              "-L${buildModule.ios.zstd}/lib"
-              "-L${buildModule.ios.lz4}/lib"
-              "-L${buildModule.ios.libssh2}/lib"
-              "-L${buildModule.ios.mbedtls}/lib"
+              "-L${libwaylandIOS}/lib"
+              "-L${xkbcommonIOS}/lib"
+              "-L${libffiIOS}/lib"
+              "-L${pixmanIOS}/lib"
+              "-L${zstdIOS}/lib"
+              "-L${lz4IOS}/lib"
+              "-L${libssh2IOS}/lib"
+              "-L${mbedtlsIOS}/lib"
               "-L${opensslIOS}/lib"
-              "-L${buildModule.ios."epoll-shim"}/lib"
-              "-L${buildModule.ios.waypipe}/lib"
-              "-L${buildModule.ios."weston-simple-shm"}/lib"
-              "-lxkbcommon"
-              "-lwayland-client"
-              "-lffi"
-              "-lpixman-1"
-              "-lzstd"
-              "-llz4"
-              "-lz"
-              "-lssh2"
-              "-lmbedcrypto"
-              "-lmbedx509"
-              "-lmbedtls"
-              "-lssl"
-              "-lcrypto"
-              "-lepoll-shim"
-              "-lwaypipe"
-              "-lweston_simple_shm"
-              "${rustBackendIOS}/lib/libwawona.a"
+              "-L${epollShimIOS}/lib"
+              "-L${waypipeIOS}/lib"
+               "-L${westonSimpleShmIOS}/lib"
+               "-L${westonIOS}/lib"
+               "-lxkbcommon"
+               "-lwayland-client"
+               "-lffi"
+               "-lpixman-1"
+               "-lzstd"
+               "-llz4"
+               "-lz"
+               "-lssh2"
+               "-lmbedcrypto"
+               "-lmbedx509"
+               "-lmbedtls"
+               "-lssl"
+               "-lcrypto"
+               "-lepoll-shim"
+               "-lwaypipe"
+               "-lweston_simple_shm"
+               "-lweston-13"
+               "-lweston-desktop-13"
+               "-lweston-terminal"
+               "${rustBackendIOS}/lib/libwawona.a"
             ];
             "OTHER_LDFLAGS[sdk=iphonesimulator*]" = [
               "$(inherited)"
@@ -271,10 +306,13 @@ let
               "-lmbedtls"
               "-lssl"
               "-lcrypto"
-              "-lepoll-shim"
-              "-lwaypipe"
-              "-lweston_simple_shm"
-              "${iosSimLibs}/lib/libwawona.a"
+               "-lepoll-shim"
+               "-lwaypipe"
+               "-lweston_simple_shm"
+               "-lweston-13"
+               "-lweston-desktop-13"
+               "-lweston-terminal"
+               "${iosSimLibs}/lib/libwawona.a"
             ];
             GCC_PREPROCESSOR_DEFINITIONS = [
               "$(inherited)"
@@ -283,10 +321,10 @@ let
             ] ++ versionDefs;
             HEADER_SEARCH_PATHS = [
               "$(inherited)"
-              "${buildModule.ios.libwayland}/include"
-              "${buildModule.ios.libwayland}/include/wayland"
-              "${buildModule.ios.xkbcommon}/include"
-              "${buildModule.ios.libssh2}/include"
+              "${(buildModule.buildForIOS "libwayland" { })}/include"
+              "${(buildModule.buildForIOS "libwayland" { })}/include/wayland"
+              "${(buildModule.buildForIOS "xkbcommon" { })}/include"
+              "${(buildModule.buildForIOS "libssh2" { })}/include"
               "${rustBackendIOS}/include"
             ];
           };
@@ -327,8 +365,8 @@ let
           {
             name = "Bundle Waypipe & sshpass";
             script = ''
-              WAYPIPE_SRC="${buildModule.macos.waypipe}/bin/waypipe"
-              SSHPASS_SRC="${buildModule.macos.sshpass}/bin/sshpass"
+              WAYPIPE_SRC="${(buildModule.buildForMacOS "waypipe" { })}/bin/waypipe"
+              SSHPASS_SRC="${(buildModule.buildForMacOS "sshpass" { })}/bin/sshpass"
               DEST="$BUILT_PRODUCTS_DIR/$CONTENTS_FOLDER_PATH/MacOS"
 
               if [ -f "$WAYPIPE_SRC" ]; then
@@ -355,9 +393,9 @@ let
             CODE_SIGN_STYLE = "Automatic";
             HEADER_SEARCH_PATHS = [
               "$(inherited)"
-              "${buildModule.macos.libwayland}/include"
-              "${buildModule.macos.libwayland}/include/wayland"
-              "${buildModule.macos.xkbcommon}/include"
+              "${(buildModule.buildForMacOS "libwayland" { })}/include"
+              "${(buildModule.buildForMacOS "libwayland" { })}/include/wayland"
+              "${(buildModule.buildForMacOS "xkbcommon" { })}/include"
               "${rustBackendMacOS}/include"
               "$(SRCROOT)/src"
               "$(SRCROOT)/src/rendering"
@@ -368,8 +406,8 @@ let
             ];
             OTHER_LDFLAGS = [
               "$(inherited)"
-              "-L${buildModule.macos.libwayland}/lib"
-              "-L${buildModule.macos.xkbcommon}/lib"
+              "-L${(buildModule.buildForMacOS "libwayland" { })}/lib"
+              "-L${(buildModule.buildForMacOS "xkbcommon" { })}/lib"
               "-L${pkgs.pixman}/lib"
               "-L${pkgs.openssl.out}/lib"
               "-lxkbcommon"
@@ -378,6 +416,7 @@ let
               "-lpixman-1"
               "-lssl"
               "-lcrypto"
+              "-lz"
               "${rustBackendMacOS}/lib/libwawona.a"
             ];
             GCC_PREPROCESSOR_DEFINITIONS = [

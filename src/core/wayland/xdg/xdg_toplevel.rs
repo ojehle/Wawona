@@ -116,6 +116,16 @@ impl Dispatch<xdg_toplevel::XdgToplevel, u32> for CompositorState {
                 // 4. Send configure
                 tracing::debug!("Maximized to {}x{} on output {}", clamped_w, clamped_h, output_id);
                 state.send_toplevel_configure(client_id.clone(), toplevel_id, clamped_w, clamped_h);
+                
+                // 5. Push event for platform
+                if let Some(wid) = window_id {
+                    state.pending_compositor_events.push(
+                        crate::core::compositor::CompositorEvent::WindowMaximized {
+                            window_id: wid,
+                            maximized: true,
+                        }
+                    );
+                }
             }
             xdg_toplevel::Request::UnsetMaximized => {
                 tracing::debug!("xdg_toplevel.unset_maximized for toplevel {}", toplevel_id);
@@ -152,6 +162,17 @@ impl Dispatch<xdg_toplevel::XdgToplevel, u32> for CompositorState {
                 };
                 
                 state.send_toplevel_configure(client_id.clone(), toplevel_id, restore_w, restore_h);
+                
+                // Push event for platform
+                let window_id = state.xdg.toplevels.get(&(client_id.clone(), toplevel_id)).map(|t| t.window_id);
+                if let Some(wid) = window_id {
+                    state.pending_compositor_events.push(
+                        crate::core::compositor::CompositorEvent::WindowMaximized {
+                            window_id: wid,
+                            maximized: false,
+                        }
+                    );
+                }
             }
             xdg_toplevel::Request::SetFullscreen { output } => {
                 tracing::debug!("xdg_toplevel.set_fullscreen for toplevel {}", toplevel_id);

@@ -68,12 +68,12 @@
 			<key>Titles</key>
 			<array>
 				<string>Multi-Touch</string>
-				<string>Trackpad</string>
+				<string>Touchpad</string>
 			</array>
 			<key>Values</key>
 			<array>
 				<string>Multi-Touch</string>
-				<string>Trackpad</string>
+				<string>Touchpad</string>
 			</array>
 		</dict>
 		<!-- Swap CMD with ALT -->

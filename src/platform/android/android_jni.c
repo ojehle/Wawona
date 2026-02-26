@@ -18,6 +18,7 @@
 #include <android/choreographer.h>
 #include <android/log.h>
 #include <android/looper.h>
+#include <android/native_window.h>
 #include <android/native_window_jni.h>
 #include <jni.h>
 #include <pthread.h>
@@ -96,6 +97,7 @@ extern CBufferData *WWNCorePopPendingBuffer(void *core);
 extern void WWNBufferDataFree(CBufferData *data);
 extern void WWNCoreNotifyFramePresented(void *core, uint32_t surface_id,
                                         uint64_t buffer_id, uint32_t timestamp);
+extern void WWNCoreFlushClients(void *core);
 
 /* Window events - drain and apply title to UI */
 enum {
@@ -177,7 +179,7 @@ extern int g_simple_shm_running;
 
 // JNI Function Prototypes
 JNIEXPORT void JNICALL Java_com_aspauldingcode_wawona_WawonaNative_nativeInit(
-    JNIEnv *env, jobject thiz);
+    JNIEnv *env, jobject thiz, jstring cacheDir);
 JNIEXPORT void JNICALL
 Java_com_aspauldingcode_wawona_WawonaNative_nativeSetSurface(JNIEnv *env,
                                                              jobject thiz,
@@ -185,6 +187,22 @@ Java_com_aspauldingcode_wawona_WawonaNative_nativeSetSurface(JNIEnv *env,
 JNIEXPORT void JNICALL
 Java_com_aspauldingcode_wawona_WawonaNative_nativeDestroySurface(JNIEnv *env,
                                                                  jobject thiz);
+JNIEXPORT void JNICALL
+Java_com_aspauldingcode_wawona_WawonaNative_nativeResizeSurface(JNIEnv *env,
+                                                                jobject thiz,
+                                                                jint width,
+                                                                jint height);
+JNIEXPORT void JNICALL
+Java_com_aspauldingcode_wawona_WawonaNative_nativeSyncOutputSize(JNIEnv *env,
+                                                                 jobject thiz,
+                                                                 jint width,
+                                                                 jint height);
+JNIEXPORT void JNICALL
+Java_com_aspauldingcode_wawona_WawonaNative_nativeShutdown(JNIEnv *env,
+                                                           jobject thiz);
+JNIEXPORT void JNICALL
+Java_com_aspauldingcode_wawona_WawonaNative_nativeSetDisplayDensity(
+    JNIEnv *env, jobject thiz, jfloat density);
 JNIEXPORT void JNICALL
 Java_com_aspauldingcode_wawona_WawonaNative_nativeUpdateSafeArea(
     JNIEnv *env, jobject thiz, jint left, jint top, jint right, jint bottom);
@@ -257,6 +275,14 @@ Java_com_aspauldingcode_wawona_WawonaNative_nativeTouchFrame(JNIEnv *env,
 JNIEXPORT void JNICALL
 Java_com_aspauldingcode_wawona_WawonaNative_nativeKeyEvent(
     JNIEnv *env, jobject thiz, jint keycode, jint state, jint timestampMs);
+JNIEXPORT void JNICALL
+Java_com_aspauldingcode_wawona_WawonaNative_nativeInjectKey(
+    JNIEnv *env, jobject thiz, jint linuxKeycode, jboolean pressed,
+    jint timestampMs);
+JNIEXPORT void JNICALL
+Java_com_aspauldingcode_wawona_WawonaNative_nativeInjectModifiers(
+    JNIEnv *env, jobject thiz, jint depressed, jint latched, jint locked,
+    jint group);
 JNIEXPORT void JNICALL
 Java_com_aspauldingcode_wawona_WawonaNative_nativePointerAxis(
     JNIEnv *env, jobject thiz, jint axis, jfloat value, jint timestampMs);
@@ -342,6 +368,9 @@ static int g_rawSafeAreaTop = 0;
 static int g_rawSafeAreaRight = 0;
 static int g_rawSafeAreaBottom = 0;
 
+// Display density from Android (set by nativeSetDisplayDensity)
+static float g_display_density = 1.0f;
+
 // Compositor core pointer (set when Rust core is initialised)
 static void *g_core = NULL;
 
@@ -351,12 +380,13 @@ static void *g_core = NULL;
 #define XKB_MOD_CTRL (1 << 2)
 #define XKB_MOD_ALT (1 << 3)
 #define XKB_MOD_NUM (1 << 4)
-#define XKB_MOD_LOGO (1 << 5) /* Super/Meta */
+#define XKB_MOD_LOGO (1 << 6) /* Super/Meta = Mod4 */
 static uint32_t g_modifiers_depressed = 0;
 
 /* Single full-screen window id for pointer enter/leave/axis (Android has no
- * multi-window UI) */
-static uint64_t g_pointer_window_id = 1;
+ * multi-window UI).  Starts at 0 so the render loop detects the first real
+ * window and auto-sends keyboard enter. */
+static uint64_t g_pointer_window_id = 0;
 
 /* Active touch count - for pointer enter/leave (inject enter on 0->1, leave on
  * 1->0) */
@@ -364,6 +394,38 @@ static int g_active_touches = 0;
 
 // iOS Settings 1:1 mapping (for compatibility with iOS version)
 // Now managed by WawonaSettings.c via WWNSettings_UpdateConfig
+
+// ============================================================================
+// Auto-Scale Helpers
+// ============================================================================
+
+static int compute_auto_scale_factor(void) {
+  if (!WWNSettings_GetAutoRetinaScalingEnabled())
+    return 1;
+  if (g_display_density <= 1.0f)
+    return 1;
+  int scale = (int)(g_display_density + 0.5f);
+  if (scale < 1)
+    scale = 1;
+  if (scale > 4)
+    scale = 4;
+  return scale;
+}
+
+static void apply_output_scale(void) {
+  if (!g_core || g_output_width == 0 || g_output_height == 0)
+    return;
+  int sf = compute_auto_scale_factor();
+  uint32_t lw = g_output_width / (uint32_t)sf;
+  uint32_t lh = g_output_height / (uint32_t)sf;
+  if (lw == 0)
+    lw = 1;
+  if (lh == 0)
+    lh = 1;
+  WWNCoreSetOutputSize(g_core, lw, lh, (float)sf);
+  LOGI("Auto-scale: physical=%ux%u density=%.2f scale=%d logical=%ux%u",
+       g_output_width, g_output_height, g_display_density, sf, lw, lh);
+}
 
 // ============================================================================
 // Safe Area Detection
@@ -735,7 +797,7 @@ static int create_swapchain(VkPhysicalDevice pd) {
   sci.imageArrayLayers = 1;
   sci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
   sci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
-  sci.preTransform = caps.currentTransform;
+  sci.preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
   sci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
   sci.presentMode = VK_PRESENT_MODE_FIFO_KHR;
   sci.clipped = VK_TRUE;
@@ -745,6 +807,54 @@ static int create_swapchain(VkPhysicalDevice pd) {
     return -1;
   }
   LOGI("Swapchain created successfully");
+  return 0;
+}
+
+/**
+ * Create swapchain with explicit extent (for resize without full teardown)
+ */
+static int create_swapchain_with_extent(VkPhysicalDevice pd, uint32_t width,
+                                        uint32_t height) {
+  VkSurfaceCapabilitiesKHR caps;
+  VkResult res =
+      vkGetPhysicalDeviceSurfaceCapabilitiesKHR(pd, g_surface, &caps);
+  if (res != VK_SUCCESS) {
+    LOGE("vkGetPhysicalDeviceSurfaceCapabilitiesKHR failed: %d", res);
+    return -1;
+  }
+
+  VkExtent2D ext = {.width = width, .height = height};
+  if (ext.width < caps.minImageExtent.width)
+    ext.width = caps.minImageExtent.width;
+  if (ext.height < caps.minImageExtent.height)
+    ext.height = caps.minImageExtent.height;
+  if (caps.maxImageExtent.width > 0 && ext.width > caps.maxImageExtent.width)
+    ext.width = caps.maxImageExtent.width;
+  if (caps.maxImageExtent.height > 0 && ext.height > caps.maxImageExtent.height)
+    ext.height = caps.maxImageExtent.height;
+
+  LOGI("Swapchain extent (resize): %ux%u", ext.width, ext.height);
+
+  VkSwapchainCreateInfoKHR sci = {
+      .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};
+  sci.surface = g_surface;
+  sci.minImageCount = caps.minImageCount > 2 ? caps.minImageCount : 2;
+  sci.imageFormat = VK_FORMAT_R8G8B8A8_UNORM;
+  sci.imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+  sci.imageExtent = ext;
+  sci.imageArrayLayers = 1;
+  sci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+  sci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+  sci.preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+  sci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+  sci.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+  sci.clipped = VK_TRUE;
+
+  if (vkCreateSwapchainKHR(g_device, &sci, NULL, &g_swapchain) != VK_SUCCESS) {
+    LOGE("vkCreateSwapchainKHR failed (resize)");
+    return -1;
+  }
+  LOGI("Swapchain recreated successfully");
   return 0;
 }
 
@@ -801,7 +911,7 @@ static int create_render_pass(void) {
   colorAttachment.format = VK_FORMAT_R8G8B8A8_UNORM;
   colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
   colorAttachment.loadOp =
-      VK_ATTACHMENT_LOAD_OP_CLEAR; // Clear to background (Dark Blue)
+      VK_ATTACHMENT_LOAD_OP_CLEAR; /* Clear to CompositorBackground (0x0F1018) */
   colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
   colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
   colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
@@ -876,6 +986,9 @@ typedef struct {
   VkCommandPool cmdPool;
   VkExtent2D extent;
   int frame_count;
+  VkSemaphore imageAvailable;
+  VkSemaphore renderFinished;
+  VkFence inFlightFence;
 } RenderFrameCtx;
 
 /** Frame callback invoked at display vsync by AChoreographer (NDK API:
@@ -906,20 +1019,24 @@ static void choreographer_frame_cb(int64_t frameTimeNanos, void *data) {
     }
   }
 
-  res = vkAcquireNextImageKHR(g_device, g_swapchain, UINT64_MAX, VK_NULL_HANDLE,
-                              VK_NULL_HANDLE, &imageIndex);
+  vkWaitForFences(g_device, 1, &ctx->inFlightFence, VK_TRUE, UINT64_MAX);
+
+  res = vkAcquireNextImageKHR(g_device, g_swapchain, UINT64_MAX,
+                              ctx->imageAvailable, VK_NULL_HANDLE, &imageIndex);
   if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR) {
     if (res != VK_ERROR_OUT_OF_DATE_KHR)
       LOGE("vkAcquireNextImageKHR failed: %d", res);
-    return;
+    goto reschedule;
   }
+
+  vkResetFences(g_device, 1, &ctx->inFlightFence);
 
   res = vkBeginCommandBuffer(
       ctx->cmdBuf, &(VkCommandBufferBeginInfo){
                        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
                        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT});
   if (res != VK_SUCCESS)
-    return;
+    goto reschedule;
 
   /* Process pending buffers BEFORE render pass - upload SHM to textures */
   if (g_core) {
@@ -934,7 +1051,9 @@ static void choreographer_frame_cb(int64_t frameTimeNanos, void *data) {
     }
   }
 
-  VkClearValue clearValue = {{{0.0f, 0.0f, 0.0f, 1.0f}}};
+  /* Match CompositorBackground (0x0F1018) to reduce flashing when presenting
+   * empty frames or during waypipe client connect. */
+  VkClearValue clearValue = {{{15.f / 255.f, 16.f / 255.f, 24.f / 255.f, 1.0f}}};
   VkRenderPassBeginInfo rpbi = {.sType =
                                     VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
                                 .renderPass = g_renderPass,
@@ -955,63 +1074,88 @@ static void choreographer_frame_cb(int64_t frameTimeNanos, void *data) {
   VkRect2D scissor = {{0, 0}, ctx->extent};
   vkCmdSetScissor(ctx->cmdBuf, 0, 1, &scissor);
 
-  /* Draw scene nodes as textured quads */
+  /* Draw scene nodes as textured quads; keep scene alive for post-present
+   * notifications so buffer releases happen after the frame is submitted. */
+  CRenderScene *scene = NULL;
   if (g_core) {
-    CRenderScene *scene = WWNCoreGetRenderScene(g_core);
+    scene = WWNCoreGetRenderScene(g_core);
     if (scene) {
       if (scene->count > 0) {
-        g_pointer_window_id =
-            scene->nodes[0].window_id; /* Update for pointer/input focus */
+        uint64_t new_wid = scene->nodes[0].window_id;
+        if (new_wid != g_pointer_window_id) {
+          WWNCoreInjectKeyboardLeave(g_core, g_pointer_window_id);
+          g_pointer_window_id = new_wid;
+          WWNCoreInjectKeyboardEnter(g_core, g_pointer_window_id, NULL, 0, 0);
+          LOGI("Auto-focused keyboard on window %llu",
+               (unsigned long long)g_pointer_window_id);
+        }
+        int sf = compute_auto_scale_factor();
+        uint32_t logical_w = ctx->extent.width / (uint32_t)sf;
+        uint32_t logical_h = ctx->extent.height / (uint32_t)sf;
+        if (logical_w == 0) logical_w = 1;
+        if (logical_h == 0) logical_h = 1;
         renderer_android_draw_quads(ctx->cmdBuf, scene->nodes, scene->count,
-                                    ctx->extent.width, ctx->extent.height);
+                                    logical_w, logical_h);
       }
-      /* Draw cursor after scene nodes */
       if (scene->has_cursor && scene->cursor_buffer_id > 0) {
+        int sf = compute_auto_scale_factor();
+        uint32_t logical_w = ctx->extent.width / (uint32_t)sf;
+        uint32_t logical_h = ctx->extent.height / (uint32_t)sf;
+        if (logical_w == 0) logical_w = 1;
+        if (logical_h == 0) logical_h = 1;
         renderer_android_draw_cursor(
             ctx->cmdBuf, scene->cursor_buffer_id, scene->cursor_x,
             scene->cursor_y, scene->cursor_hotspot_x, scene->cursor_hotspot_y,
-            ctx->extent.width, ctx->extent.height);
+            logical_w, logical_h);
       }
-      for (size_t i = 0; i < scene->count; i++) {
-        CRenderNode *node = &scene->nodes[i];
-        WWNCoreNotifyFramePresented(g_core, node->surface_id, node->buffer_id,
-                                    (uint32_t)(ctx->frame_count * 16));
-      }
-      WWNRenderSceneFree(scene);
     }
   }
 
   vkCmdEndRenderPass(ctx->cmdBuf);
   vkEndCommandBuffer(ctx->cmdBuf);
 
-  VkFence fence;
-  vkCreateFence(
-      g_device,
-      &(VkFenceCreateInfo){.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO}, NULL,
-      &fence);
-  vkQueueSubmit(g_queue, 1,
-                &(VkSubmitInfo){.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-                                .commandBufferCount = 1,
-                                .pCommandBuffers = &ctx->cmdBuf},
-                fence);
-  vkWaitForFences(g_device, 1, &fence, VK_TRUE, UINT64_MAX);
-  vkDestroyFence(g_device, fence, NULL);
+  VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+  VkSubmitInfo submitInfo = {
+      .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+      .waitSemaphoreCount = 1,
+      .pWaitSemaphores = &ctx->imageAvailable,
+      .pWaitDstStageMask = &waitStage,
+      .commandBufferCount = 1,
+      .pCommandBuffers = &ctx->cmdBuf,
+      .signalSemaphoreCount = 1,
+      .pSignalSemaphores = &ctx->renderFinished,
+  };
+  vkQueueSubmit(g_queue, 1, &submitInfo, ctx->inFlightFence);
 
-  res = vkQueuePresentKHR(
-      g_queue, &(VkPresentInfoKHR){.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-                                   .swapchainCount = 1,
-                                   .pSwapchains = &g_swapchain,
-                                   .pImageIndices = &imageIndex});
+  VkPresentInfoKHR presentInfo = {
+      .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+      .waitSemaphoreCount = 1,
+      .pWaitSemaphores = &ctx->renderFinished,
+      .swapchainCount = 1,
+      .pSwapchains = &g_swapchain,
+      .pImageIndices = &imageIndex,
+  };
+  res = vkQueuePresentKHR(g_queue, &presentInfo);
   if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR &&
       res != VK_ERROR_OUT_OF_DATE_KHR) {
     LOGE("vkQueuePresentKHR failed: %d", res);
-    return;
+  }
+
+  if (g_core && scene) {
+    for (size_t i = 0; i < scene->count; i++) {
+      CRenderNode *node = &scene->nodes[i];
+      WWNCoreNotifyFramePresented(g_core, node->surface_id, node->buffer_id,
+                                  (uint32_t)(ctx->frame_count * 16));
+    }
+    WWNRenderSceneFree(scene);
+    WWNCoreFlushClients(g_core);
   }
 
   ctx->frame_count++;
   if (ctx->frame_count % 300 == 0)
     LOGI("Rendered frame %d (vsync)", ctx->frame_count);
 
+reschedule:
   if (g_running) {
     AChoreographer_postFrameCallback(AChoreographer_getInstance(),
                                      choreographer_frame_cb, ctx);
@@ -1075,11 +1219,14 @@ static void *render_thread(void *arg) {
 
   LOGI("Got %u swapchain images", imageCount);
 
-  // Get surface capabilities for extent
-  VkSurfaceCapabilitiesKHR caps;
-  VkPhysicalDevice pd = pick_device();
-  vkGetPhysicalDeviceSurfaceCapabilitiesKHR(pd, g_surface, &caps);
-  VkExtent2D extent = caps.currentExtent;
+  VkExtent2D extent;
+  if (g_output_width > 0 && g_output_height > 0) {
+    extent = (VkExtent2D){.width = g_output_width, .height = g_output_height};
+  } else {
+    VkSurfaceCapabilitiesKHR caps;
+    vkGetPhysicalDeviceSurfaceCapabilitiesKHR(pick_device(), g_surface, &caps);
+    extent = caps.currentExtent;
+  }
 
   // Create Render Pass and Framebuffers
   if (create_image_views(imageCount, images) != 0)
@@ -1124,18 +1271,34 @@ static void *render_thread(void *arg) {
     return NULL;
   }
 
-  // Set output size for the compositor core
-  g_output_width = extent.width;
-  g_output_height = extent.height;
-  if (g_core) {
-    WWNCoreSetOutputSize(g_core, extent.width, extent.height, 1.0f);
-    LOGI("Set compositor output size: %ux%u", extent.width, extent.height);
+  // Set output size for the compositor core.
+  // If nativeResizeSurface already updated g_output_width/height, only update
+  // when the render-thread extent actually differs (avoids clobbering a
+  // correct value with a stale caps.currentExtent).
+  if (g_output_width != extent.width || g_output_height != extent.height ||
+      g_output_width == 0) {
+    g_output_width = extent.width;
+    g_output_height = extent.height;
+    apply_output_scale();
   }
 
-  /* Phase E: Choreographer vsync - prepare Looper and drive frames at display
-   * refresh */
-  RenderFrameCtx frame_ctx = {
-      .cmdBuf = cmdBuf, .cmdPool = cmdPool, .extent = extent, .frame_count = 0};
+  VkSemaphore imageAvailable = VK_NULL_HANDLE;
+  VkSemaphore renderFinished = VK_NULL_HANDLE;
+  VkFence inFlightFence = VK_NULL_HANDLE;
+  VkSemaphoreCreateInfo semCI = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+  VkFenceCreateInfo fenceCI = {.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+                               .flags = VK_FENCE_CREATE_SIGNALED_BIT};
+  vkCreateSemaphore(g_device, &semCI, NULL, &imageAvailable);
+  vkCreateSemaphore(g_device, &semCI, NULL, &renderFinished);
+  vkCreateFence(g_device, &fenceCI, NULL, &inFlightFence);
+
+  RenderFrameCtx frame_ctx = {.cmdBuf = cmdBuf,
+                               .cmdPool = cmdPool,
+                               .extent = extent,
+                               .frame_count = 0,
+                               .imageAvailable = imageAvailable,
+                               .renderFinished = renderFinished,
+                               .inFlightFence = inFlightFence};
 
   ALooper_prepare(0);
   AChoreographer_postFrameCallback(AChoreographer_getInstance(),
@@ -1148,6 +1311,9 @@ static void *render_thread(void *arg) {
   }
 
   vkDeviceWaitIdle(g_device);
+  vkDestroySemaphore(g_device, imageAvailable, NULL);
+  vkDestroySemaphore(g_device, renderFinished, NULL);
+  vkDestroyFence(g_device, inFlightFence, NULL);
   renderer_android_destroy_pipeline();
   vkFreeCommandBuffers(g_device, cmdPool, 1, &cmdBuf);
   vkDestroyCommandPool(g_device, cmdPool, NULL);
@@ -1166,8 +1332,7 @@ static void *render_thread(void *arg) {
  * Called from Android Activity.onCreate()
  */
 JNIEXPORT void JNICALL Java_com_aspauldingcode_wawona_WawonaNative_nativeInit(
-    JNIEnv *env, jobject thiz) {
-  (void)env;
+    JNIEnv *env, jobject thiz, jstring cacheDir) {
   (void)thiz;
   pthread_mutex_lock(&g_lock);
   if (g_instance != VK_NULL_HANDLE) {
@@ -1178,15 +1343,22 @@ JNIEXPORT void JNICALL Java_com_aspauldingcode_wawona_WawonaNative_nativeInit(
 
   // Initialize the Rust compositor core
   if (!g_core) {
-    // Set up XDG_RUNTIME_DIR for the Wayland socket
-    const char *cache_dir = getenv("TMPDIR");
-    if (!cache_dir)
-      cache_dir = "/data/local/tmp";
+    // Set up XDG_RUNTIME_DIR for the Wayland socket (use app cache dir from Java)
+    const char *cache_dir = "/data/local/tmp";
+    const char *cache_dir_utf = NULL;
+    if (cacheDir) {
+      cache_dir_utf = (*env)->GetStringUTFChars(env, cacheDir, NULL);
+      if (cache_dir_utf)
+        cache_dir = cache_dir_utf;
+    }
     char runtime_dir[256];
     snprintf(runtime_dir, sizeof(runtime_dir), "%s/wawona-runtime", cache_dir);
     mkdir(runtime_dir, 0700);
     setenv("XDG_RUNTIME_DIR", runtime_dir, 1);
+    setenv("TMPDIR", cache_dir, 1);
     LOGI("XDG_RUNTIME_DIR=%s", runtime_dir);
+    if (cache_dir_utf)
+      (*env)->ReleaseStringUTFChars(env, cacheDir, cache_dir_utf);
 
     g_core = WWNCoreNew();
     if (g_core) {
@@ -1312,10 +1484,10 @@ Java_com_aspauldingcode_wawona_WawonaNative_nativeSetSurface(JNIEnv *env,
   }
   LOGI("Swapchain created");
 
-  // Start render thread with delay to ensure surface is ready
+  // Start render thread with brief delay to ensure surface is ready
   LOGI("Starting render thread...");
   g_running = 1;
-  usleep(500000); // 500ms delay to let surface stabilize
+  usleep(50000); // 50ms delay (was 500ms; resize path uses nativeResizeSurface)
   int thread_result =
       pthread_create(&g_render_thread, NULL, render_thread, NULL);
   if (thread_result != 0) {
@@ -1409,15 +1581,150 @@ Java_com_aspauldingcode_wawona_WawonaNative_nativeDestroySurface(JNIEnv *env,
     g_window = NULL;
   }
 
-  // Stop and free the compositor core
+  LOGI("Surface destroyed (compositor core preserved)");
+  pthread_mutex_unlock(&g_lock);
+}
+
+/**
+ * Resize surface — recreate swapchain only, keep Vulkan instance/device/surface.
+ * Much faster than destroy+set; avoids blank screen during keyboard show/hide.
+ */
+JNIEXPORT void JNICALL
+Java_com_aspauldingcode_wawona_WawonaNative_nativeResizeSurface(JNIEnv *env,
+                                                                jobject thiz,
+                                                                jint width,
+                                                                jint height) {
+  (void)env;
+  (void)thiz;
+  pthread_mutex_lock(&g_lock);
+
+  if (!g_surface || !g_device || !g_window || width <= 0 || height <= 0) {
+    LOGI("nativeResizeSurface: skip (need full init or invalid size)");
+    pthread_mutex_unlock(&g_lock);
+    return;
+  }
+
+  LOGI("Resizing surface to %dx%d (swapchain-only)", (int)width, (int)height);
+
+  g_running = 0;
+  if (g_render_thread) {
+    pthread_join(g_render_thread, NULL);
+    g_render_thread = 0;
+  }
+
+  if (g_device != VK_NULL_HANDLE)
+    vkDeviceWaitIdle(g_device);
+
+  /* Destroy swapchain resources only */
+  if (g_framebuffers) {
+    for (uint32_t i = 0; i < g_swapchainImageCount; i++)
+      vkDestroyFramebuffer(g_device, g_framebuffers[i], NULL);
+    free(g_framebuffers);
+    g_framebuffers = NULL;
+  }
+  if (g_imageViews) {
+    for (uint32_t i = 0; i < g_swapchainImageCount; i++)
+      vkDestroyImageView(g_device, g_imageViews[i], NULL);
+    free(g_imageViews);
+    g_imageViews = NULL;
+  }
+  if (g_swapchain && g_device) {
+    vkDestroySwapchainKHR(g_device, g_swapchain, NULL);
+    g_swapchain = VK_NULL_HANDLE;
+  }
+
+  renderer_android_destroy_pipeline();
+
+  ANativeWindow_setBuffersGeometry(g_window, (int32_t)width, (int32_t)height, 0);
+
+  if (create_swapchain_with_extent(g_physicalDevice, (uint32_t)width,
+                                  (uint32_t)height) != 0) {
+    LOGE("Resize swapchain failed");
+    pthread_mutex_unlock(&g_lock);
+    return;
+  }
+
+  g_output_width = (uint32_t)width;
+  g_output_height = (uint32_t)height;
+  apply_output_scale();
+
+  g_running = 1;
+  int thread_result =
+      pthread_create(&g_render_thread, NULL, render_thread, NULL);
+  if (thread_result != 0) {
+    LOGE("Failed to create render thread after resize: %d", thread_result);
+    g_running = 0;
+    pthread_mutex_unlock(&g_lock);
+    return;
+  }
+
+  LOGI("Surface resized successfully (no full teardown)");
+  pthread_mutex_unlock(&g_lock);
+}
+
+/**
+ * Lightweight output-size sync — updates the compositor output dimensions
+ * and reconfigures connected clients WITHOUT tearing down the render pipeline.
+ * Use this when the view size may have drifted (e.g. after a new waypipe
+ * client connects) but the Vulkan swapchain is still valid.
+ */
+JNIEXPORT void JNICALL
+Java_com_aspauldingcode_wawona_WawonaNative_nativeSyncOutputSize(JNIEnv *env,
+                                                                 jobject thiz,
+                                                                 jint width,
+                                                                 jint height) {
+  (void)env;
+  (void)thiz;
+  if (width <= 0 || height <= 0 || !g_core)
+    return;
+
+  uint32_t w = (uint32_t)width;
+  uint32_t h = (uint32_t)height;
+
+  if (w == g_output_width && h == g_output_height)
+    return;
+
+  LOGI("nativeSyncOutputSize: %ux%u → %ux%u", g_output_width, g_output_height,
+       w, h);
+  g_output_width = w;
+  g_output_height = h;
+  apply_output_scale();
+}
+
+/**
+ * Set the Android display density so auto-scale can compute the right factor.
+ * Called from Java before surface setup; density is DisplayMetrics.density
+ * (e.g. 2.0 for xhdpi, 2.75 for xxhdpi-420dpi, 3.0 for xxhdpi).
+ */
+JNIEXPORT void JNICALL
+Java_com_aspauldingcode_wawona_WawonaNative_nativeSetDisplayDensity(
+    JNIEnv *env, jobject thiz, jfloat density) {
+  (void)env;
+  (void)thiz;
+  g_display_density = density;
+  LOGI("Display density set to %.3f", (double)density);
+  apply_output_scale();
+}
+
+/**
+ * Final shutdown — tears down the compositor core.
+ * Called from Activity.onDestroy(), NOT from surface lifecycle callbacks.
+ */
+JNIEXPORT void JNICALL
+Java_com_aspauldingcode_wawona_WawonaNative_nativeShutdown(JNIEnv *env,
+                                                           jobject thiz) {
+  (void)env;
+  (void)thiz;
+  pthread_mutex_lock(&g_lock);
+
   if (g_core) {
-    LOGI("Stopping compositor core...");
+    LOGI("Shutting down compositor core...");
     WWNCoreStop(g_core);
     WWNCoreFree(g_core);
     g_core = NULL;
   }
 
-  LOGI("Surface destroyed");
+  LOGI("Compositor shutdown complete");
   pthread_mutex_unlock(&g_lock);
 }
 
@@ -1568,6 +1875,9 @@ Java_com_aspauldingcode_wawona_WawonaNative_nativeApplySettings(
        respectSafeArea ? "enabled" : "disabled", g_safeAreaLeft, g_safeAreaTop,
        g_safeAreaRight, g_safeAreaBottom);
 
+  // Reapply output scale (auto-scale toggle may have changed)
+  apply_output_scale();
+
   LOGI("Wawona settings applied successfully with safe area support");
   pthread_mutex_unlock(&g_lock);
 }
@@ -1617,8 +1927,54 @@ Java_com_aspauldingcode_wawona_WawonaNative_nativeCommitText(JNIEnv *env,
   if (!utf8)
     return;
   LOGI("Text input commit: %s", utf8);
-  if (g_core)
+  if (!g_core) {
+    (*env)->ReleaseStringUTFChars(env, text, utf8);
+    return;
+  }
+
+  /* Check whether every character has a Linux keycode mapping (mirrors the
+   * iOS allMappable check in insertText:). */
+  int all_mappable = 1;
+  for (const char *p = utf8; *p; p++) {
+    if ((unsigned char)*p > 127) {
+      all_mappable = 0;
+      break;
+    }
+    int ns;
+    if (char_to_linux_keycode(*p, &ns) == 0) {
+      all_mappable = 0;
+      break;
+    }
+  }
+
+  if (!all_mappable) {
+    /* Non-ASCII or unmappable — use text-input-v3 (emoji, CJK, etc.) */
     WWNCoreTextInputCommit(g_core, utf8);
+    (*env)->ReleaseStringUTFChars(env, text, utf8);
+    return;
+  }
+
+  /* All characters are mappable — synthesize wl_keyboard.key events for
+   * maximum compatibility (same pattern as iOS charToLinuxKeycode path).
+   * This ensures remote clients via waypipe that only speak wl_keyboard
+   * still receive the input.
+   *
+   * Modifier state is driven entirely by the Shift key press/release —
+   * the Rust core's XKB state machine (update_key) updates the
+   * depressed/latched/locked mask automatically. */
+  uint32_t ts = 0;
+  for (const char *p = utf8; *p; p++) {
+    int needs_shift = 0;
+    uint32_t kc = char_to_linux_keycode(*p, &needs_shift);
+    if (kc == 0)
+      continue;
+    if (needs_shift)
+      WWNCoreInjectKey(g_core, KEY_LEFTSHIFT, 1, ts);
+    WWNCoreInjectKey(g_core, kc, 1, ts);
+    WWNCoreInjectKey(g_core, kc, 0, ts);
+    if (needs_shift)
+      WWNCoreInjectKey(g_core, KEY_LEFTSHIFT, 0, ts);
+  }
   (*env)->ReleaseStringUTFChars(env, text, utf8);
 }
 
@@ -1659,7 +2015,8 @@ Java_com_aspauldingcode_wawona_WawonaNative_nativeGetCursorRect(
   int32_t x = 0, y = 0, w = 0, h = 0;
   if (g_core)
     WWNCoreTextInputGetCursorRect(g_core, &x, &y, &w, &h);
-  jint buf[4] = {x, y, w, h};
+  int sf = compute_auto_scale_factor();
+  jint buf[4] = {x * sf, y * sf, w * sf, h * sf};
   (*env)->SetIntArrayRegion(env, outRect, 0, 4, buf);
 }
 
@@ -1673,14 +2030,10 @@ Java_com_aspauldingcode_wawona_WawonaNative_nativeTouchDown(
   (void)env;
   (void)thiz;
   if (g_core) {
-    if (g_active_touches == 0) {
-      WWNCoreInjectPointerEnter(g_core, g_pointer_window_id, (double)x,
-                                (double)y, (uint32_t)timestampMs);
-    }
+    int sf = compute_auto_scale_factor();
     g_active_touches++;
-    WWNCoreInjectTouchDown(g_core, id, (double)x, (double)y,
+    WWNCoreInjectTouchDown(g_core, id, (double)x / sf, (double)y / sf,
                            (uint32_t)timestampMs);
-    WWNCoreInject_touch_frame(g_core);
   }
 }
 
@@ -1693,12 +2046,9 @@ Java_com_aspauldingcode_wawona_WawonaNative_nativeTouchUp(JNIEnv *env,
   if (g_core) {
     WWNCoreInjectTouchUp(g_core, id, (uint32_t)timestampMs);
     g_active_touches--;
-    if (g_active_touches <= 0) {
+    if (g_active_touches < 0) {
       g_active_touches = 0;
-      WWNCoreInjectPointerLeave(g_core, g_pointer_window_id,
-                                (uint32_t)timestampMs);
     }
-    WWNCoreInject_touch_frame(g_core);
   }
 }
 
@@ -1708,9 +2058,9 @@ Java_com_aspauldingcode_wawona_WawonaNative_nativeTouchMotion(
   (void)env;
   (void)thiz;
   if (g_core) {
-    WWNCoreInjectTouchMotion(g_core, id, (double)x, (double)y,
+    int sf = compute_auto_scale_factor();
+    WWNCoreInjectTouchMotion(g_core, id, (double)x / sf, (double)y / sf,
                              (uint32_t)timestampMs);
-    WWNCoreInject_touch_frame(g_core);
   }
 }
 
@@ -1722,7 +2072,6 @@ Java_com_aspauldingcode_wawona_WawonaNative_nativeTouchCancel(JNIEnv *env,
   if (g_core) {
     WWNCoreInjectTouchCancel(g_core);
     g_active_touches = 0;
-    WWNCoreInjectPointerLeave(g_core, g_pointer_window_id, 0);
   }
 }
 
@@ -1746,36 +2095,38 @@ Java_com_aspauldingcode_wawona_WawonaNative_nativeKeyEvent(
 
   uint32_t linux_keycode = android_keycode_to_linux((uint32_t)keycode);
 
-  /* Update modifier state before injecting key */
-  int pressed = (state == 1);
-  uint32_t mod_bit = 0;
-  if (linux_keycode == 42)
-    mod_bit = XKB_MOD_SHIFT; /* KEY_LEFTSHIFT */
-  else if (linux_keycode == 54)
-    mod_bit = XKB_MOD_SHIFT; /* KEY_RIGHTSHIFT */
-  else if (linux_keycode == 29)
-    mod_bit = XKB_MOD_CTRL; /* KEY_LEFTCTRL */
-  else if (linux_keycode == 97)
-    mod_bit = XKB_MOD_CTRL; /* KEY_RIGHTCTRL */
-  else if (linux_keycode == 56)
-    mod_bit = XKB_MOD_ALT; /* KEY_LEFTALT */
-  else if (linux_keycode == 100)
-    mod_bit = XKB_MOD_ALT; /* KEY_RIGHTALT */
-  else if (linux_keycode == 125)
-    mod_bit = XKB_MOD_LOGO; /* KEY_LEFTMETA */
-  else if (linux_keycode == 126)
-    mod_bit = XKB_MOD_LOGO; /* KEY_RIGHTMETA */
-
-  if (mod_bit) {
-    if (pressed)
-      g_modifiers_depressed |= mod_bit;
-    else
-      g_modifiers_depressed &= ~mod_bit;
-    WWNCoreInjectModifiers(g_core, g_modifiers_depressed, 0, 0, 0);
-  }
-
+  /* Let the Rust core's XKB state machine (update_key) handle modifier
+   * tracking automatically.  We intentionally do NOT call
+   * WWNCoreInjectModifiers here — mixing update_mask with update_key
+   * corrupts XKB's internal key-tracking state and prevents modifier
+   * releases from clearing correctly. */
   WWNCoreInjectKey(g_core, linux_keycode, (uint32_t)state,
                    (uint32_t)timestampMs);
+}
+
+JNIEXPORT void JNICALL
+Java_com_aspauldingcode_wawona_WawonaNative_nativeInjectKey(
+    JNIEnv *env, jobject thiz, jint linuxKeycode, jboolean pressed,
+    jint timestampMs) {
+  (void)env;
+  (void)thiz;
+  if (!g_core)
+    return;
+  WWNCoreInjectKey(g_core, (uint32_t)linuxKeycode, pressed ? 1u : 0u,
+                  (uint32_t)timestampMs);
+}
+
+JNIEXPORT void JNICALL
+Java_com_aspauldingcode_wawona_WawonaNative_nativeInjectModifiers(
+    JNIEnv *env, jobject thiz, jint depressed, jint latched, jint locked,
+    jint group) {
+  (void)env;
+  (void)thiz;
+  if (!g_core)
+    return;
+  g_modifiers_depressed = (uint32_t)depressed;
+  WWNCoreInjectModifiers(g_core, (uint32_t)depressed, (uint32_t)latched,
+                        (uint32_t)locked, (uint32_t)group);
 }
 
 JNIEXPORT void JNICALL
@@ -1796,7 +2147,8 @@ Java_com_aspauldingcode_wawona_WawonaNative_nativePointerMotion(
   (void)env;
   (void)thiz;
   if (g_core) {
-    WWNCoreInjectPointerMotion(g_core, g_pointer_window_id, x, y,
+    int sf = compute_auto_scale_factor();
+    WWNCoreInjectPointerMotion(g_core, g_pointer_window_id, x / sf, y / sf,
                                (uint32_t)timestampMs);
   }
 }
@@ -1820,7 +2172,8 @@ Java_com_aspauldingcode_wawona_WawonaNative_nativePointerEnter(
   (void)env;
   (void)thiz;
   if (g_core) {
-    WWNCoreInjectPointerEnter(g_core, g_pointer_window_id, x, y,
+    int sf = compute_auto_scale_factor();
+    WWNCoreInjectPointerEnter(g_core, g_pointer_window_id, x / sf, y / sf,
                               (uint32_t)timestampMs);
   }
 }
@@ -1960,7 +2313,7 @@ Java_com_aspauldingcode_wawona_WawonaNative_nativeKeyboardFocus(
     JNIEnv *env, jobject thiz, jboolean hasFocus) {
   (void)env;
   (void)thiz;
-  if (!g_core)
+  if (!g_core || g_pointer_window_id == 0)
     return;
   if (hasFocus) {
     WWNCoreInjectKeyboardEnter(g_core, g_pointer_window_id, NULL, 0, 0);
@@ -2002,63 +2355,31 @@ static void resolve_ssh_binary_paths(void) {
 
     LOGI("[SSH] Native lib dir: %s", nativeLibDir);
 
-    const char *cacheDir = getenv("XDG_RUNTIME_DIR");
-    if (!cacheDir)
-      cacheDir = "/data/local/tmp";
-    char sshDest[512], sshpassDest[512];
-    snprintf(sshDest, sizeof(sshDest), "%s/ssh", cacheDir);
-    snprintf(sshpassDest, sizeof(sshpassDest), "%s/sshpass", cacheDir);
-
-    char sshSrc[512], sshpassSrc[512];
-    snprintf(sshSrc, sizeof(sshSrc), "%s/libssh_bin.so", nativeLibDir);
-    snprintf(sshpassSrc, sizeof(sshpassSrc), "%s/libsshpass_bin.so",
+    char sshPath[512], sshpassPath[512];
+    snprintf(sshPath, sizeof(sshPath), "%s/libssh_bin.so", nativeLibDir);
+    snprintf(sshpassPath, sizeof(sshpassPath), "%s/libsshpass_bin.so",
              nativeLibDir);
 
+    /*
+     * On Android Q+ (API 29+), apps cannot execute binaries from app-private
+     * dirs (cache, files) due to W^X — exec fails with "Permission denied".
+     * Use the native lib dir directly (/data/app/.../lib/arm64/): system-
+     * extracted from APK, executable by design (extractNativeLibs=true).
+     */
     struct stat st;
-    int need_copy_ssh = 1, need_copy_sshpass = 1;
-    struct stat srcSt;
-    if (stat(sshDest, &st) == 0 && stat(sshSrc, &srcSt) == 0 &&
-        st.st_size == srcSt.st_size)
-      need_copy_ssh = 0;
-    if (stat(sshpassDest, &st) == 0 && stat(sshpassSrc, &srcSt) == 0 &&
-        st.st_size == srcSt.st_size)
-      need_copy_sshpass = 0;
-
-    for (int i = 0; i < 2; i++) {
-      const char *srcPath = (i == 0) ? sshSrc : sshpassSrc;
-      const char *dstPath = (i == 0) ? sshDest : sshpassDest;
-      int need = (i == 0) ? need_copy_ssh : need_copy_sshpass;
-      const char *label = (i == 0) ? "ssh" : "sshpass";
-      if (!need) {
-        LOGI("[SSH] %s already up to date at %s", label, dstPath);
-        continue;
-      }
-      int src_fd = open(srcPath, O_RDONLY);
-      if (src_fd < 0) {
-        LOGE("[SSH] Cannot open %s: %s", srcPath, strerror(errno));
-        continue;
-      }
-      int dst_fd = open(dstPath, O_WRONLY | O_CREAT | O_TRUNC, 0755);
-      if (dst_fd < 0) {
-        LOGE("[SSH] Cannot create %s: %s", dstPath, strerror(errno));
-        close(src_fd);
-        continue;
-      }
-      char buf[65536];
-      ssize_t n;
-      while ((n = read(src_fd, buf, sizeof(buf))) > 0) {
-        write(dst_fd, buf, n);
-      }
-      close(src_fd);
-      close(dst_fd);
-      chmod(dstPath, 0755);
-      LOGI("[SSH] Installed %s to %s", label, dstPath);
+    if (stat(sshPath, &st) == 0) {
+      strncpy(g_ssh_bin_path, sshPath, sizeof(g_ssh_bin_path) - 1);
+      LOGI("[SSH] Using ssh from native lib: %s", g_ssh_bin_path);
+    } else {
+      LOGE("[SSH] libssh_bin.so not found at %s: %s", sshPath, strerror(errno));
     }
-
-    strncpy(g_ssh_bin_path, sshDest, sizeof(g_ssh_bin_path) - 1);
-    strncpy(g_sshpass_bin_path, sshpassDest, sizeof(g_sshpass_bin_path) - 1);
-    LOGI("[SSH] ssh binary: %s", g_ssh_bin_path);
-    LOGI("[SSH] sshpass binary: %s", g_sshpass_bin_path);
+    if (stat(sshpassPath, &st) == 0) {
+      strncpy(g_sshpass_bin_path, sshpassPath, sizeof(g_sshpass_bin_path) - 1);
+      LOGI("[SSH] Using sshpass from native lib: %s", g_sshpass_bin_path);
+    } else {
+      LOGE("[SSH] libsshpass_bin.so not found at %s: %s", sshpassPath,
+           strerror(errno));
+    }
   } else {
     LOGE("[SSH] dladdr failed - cannot locate native lib directory");
   }
@@ -2078,6 +2399,7 @@ typedef struct {
   int threads;
   char video[64];
   int debug;
+  int ssh_port;
   int oneshot;
   int no_gpu;
   int login_shell;
@@ -2087,194 +2409,6 @@ typedef struct {
 
 static WaypipeConfig g_waypipe_config;
 
-// SSH bridge: connects to remote via OpenSSH and runs a remote command.
-// Bridges data between a local Unix socket and the SSH channel.
-typedef struct {
-  char local_socket_path[512];
-  char host[256];
-  char user[128];
-  char password[256];
-  char remote_cmd[4096];
-  int port;
-  volatile int *stop_flag;
-} SSHBridgeConfig;
-
-static SSHBridgeConfig g_ssh_bridge;
-
-// SSH bridge thread: connects to remote via OpenSSH (fork/exec),
-// runs a remote command, then bridges data between the local waypipe
-// Unix socket and the SSH process's stdin/stdout pipes.
-static void *ssh_bridge_thread(void *arg) {
-  SSHBridgeConfig *cfg = (SSHBridgeConfig *)arg;
-  int local_fd = -1;
-  pid_t ssh_pid = -1;
-  int ssh_stdin[2] = {-1, -1};
-  int ssh_stdout[2] = {-1, -1};
-  int ssh_stderr[2] = {-1, -1};
-
-  LOGI("[SSH-BRIDGE] Connecting via OpenSSH to %s@%s:%d", cfg->user, cfg->host,
-       cfg->port);
-
-  if (pipe(ssh_stdin) < 0 || pipe(ssh_stdout) < 0 || pipe(ssh_stderr) < 0) {
-    LOGE("[SSH-BRIDGE] pipe() failed: %s", strerror(errno));
-    return NULL;
-  }
-
-  char port_str[16];
-  snprintf(port_str, sizeof(port_str), "%d", cfg->port);
-
-  ssh_pid = fork();
-  if (ssh_pid < 0) {
-    LOGE("[SSH-BRIDGE] fork() failed: %s", strerror(errno));
-    return NULL;
-  }
-
-  if (ssh_pid == 0) {
-    close(ssh_stdin[1]);
-    close(ssh_stdout[0]);
-    close(ssh_stderr[0]);
-    dup2(ssh_stdin[0], STDIN_FILENO);
-    dup2(ssh_stdout[1], STDOUT_FILENO);
-    dup2(ssh_stderr[1], STDERR_FILENO);
-    close(ssh_stdin[0]);
-    close(ssh_stdout[1]);
-    close(ssh_stderr[1]);
-
-    if (cfg->password[0] != '\0') {
-      setenv("SSHPASS", cfg->password, 1);
-    }
-
-    /* Dropbear (dbclient) bundled as ssh: use -y to auto-accept host keys,
-       -T for no-pty mode (we're bridging raw data) */
-    execl(g_ssh_bin_path, "ssh", "-y", "-T", "-p", port_str, "-l", cfg->user,
-          cfg->host, cfg->remote_cmd, (char *)NULL);
-
-    fprintf(stderr, "[SSH-BRIDGE] exec failed: %s (path=%s)\n", strerror(errno),
-            g_ssh_bin_path);
-    _exit(127);
-  }
-
-  close(ssh_stdin[0]);
-  ssh_stdin[0] = -1;
-  close(ssh_stdout[1]);
-  ssh_stdout[1] = -1;
-  close(ssh_stderr[1]);
-  ssh_stderr[1] = -1;
-  LOGI("[SSH-BRIDGE] SSH child process started (pid %d)", (int)ssh_pid);
-
-  LOGI("[SSH-BRIDGE] Waiting for local socket: %s", cfg->local_socket_path);
-  for (int i = 0; i < 100 && !*(cfg->stop_flag); i++) {
-    struct stat st;
-    if (stat(cfg->local_socket_path, &st) == 0 && (st.st_mode & S_IFSOCK))
-      break;
-    usleep(100000);
-  }
-
-  local_fd = socket(AF_UNIX, SOCK_STREAM, 0);
-  if (local_fd < 0) {
-    LOGE("[SSH-BRIDGE] Unix socket: %s", strerror(errno));
-    goto cleanup;
-  }
-  struct sockaddr_un addr;
-  memset(&addr, 0, sizeof(addr));
-  addr.sun_family = AF_UNIX;
-  strncpy(addr.sun_path, cfg->local_socket_path, sizeof(addr.sun_path) - 1);
-  if (connect(local_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-    LOGE("[SSH-BRIDGE] Unix connect to %s: %s", cfg->local_socket_path,
-         strerror(errno));
-    goto cleanup;
-  }
-  LOGI("[SSH-BRIDGE] Connected to local waypipe socket");
-
-  fcntl(local_fd, F_SETFL, fcntl(local_fd, F_GETFL, 0) | O_NONBLOCK);
-  fcntl(ssh_stdout[0], F_SETFL, fcntl(ssh_stdout[0], F_GETFL, 0) | O_NONBLOCK);
-  fcntl(ssh_stderr[0], F_SETFL, fcntl(ssh_stderr[0], F_GETFL, 0) | O_NONBLOCK);
-
-  {
-    char buf[65536];
-    LOGI("[SSH-BRIDGE] Forwarding data...");
-
-    while (!*(cfg->stop_flag)) {
-      int did_work = 0;
-
-      ssize_t n = read(local_fd, buf, sizeof(buf));
-      if (n > 0) {
-        did_work = 1;
-        ssize_t off = 0;
-        while (off < n) {
-          ssize_t w = write(ssh_stdin[1], buf + off, n - off);
-          if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-            usleep(500);
-            continue;
-          }
-          if (w < 0) {
-            LOGE("[SSH-BRIDGE] write ssh stdin: %s", strerror(errno));
-            goto cleanup;
-          }
-          off += w;
-        }
-      } else if (n == 0) {
-        LOGI("[SSH-BRIDGE] local socket EOF");
-        break;
-      } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
-        LOGE("[SSH-BRIDGE] read local: %s", strerror(errno));
-        break;
-      }
-
-      n = read(ssh_stdout[0], buf, sizeof(buf));
-      if (n > 0) {
-        did_work = 1;
-        ssize_t off = 0;
-        while (off < n) {
-          ssize_t w = write(local_fd, buf + off, n - off);
-          if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-            usleep(500);
-            continue;
-          }
-          if (w < 0) {
-            LOGE("[SSH-BRIDGE] write local: %s", strerror(errno));
-            goto cleanup;
-          }
-          off += w;
-        }
-      } else if (n == 0) {
-        LOGI("[SSH-BRIDGE] SSH stdout EOF");
-        break;
-      } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
-        LOGE("[SSH-BRIDGE] read ssh stdout: %s", strerror(errno));
-        break;
-      }
-
-      ssize_t en = read(ssh_stderr[0], buf, sizeof(buf) - 1);
-      if (en > 0) {
-        buf[en] = '\0';
-        LOGI("[SSH-BRIDGE] remote stderr: %s", buf);
-      }
-
-      if (!did_work)
-        usleep(1000);
-    }
-  }
-
-cleanup:
-  LOGI("[SSH-BRIDGE] Shutting down");
-  if (ssh_stdin[1] >= 0)
-    close(ssh_stdin[1]);
-  if (ssh_stdout[0] >= 0)
-    close(ssh_stdout[0]);
-  if (ssh_stderr[0] >= 0)
-    close(ssh_stderr[0]);
-  if (local_fd >= 0)
-    close(local_fd);
-  if (ssh_pid > 0) {
-    kill(ssh_pid, SIGTERM);
-    int status;
-    waitpid(ssh_pid, &status, 0);
-    LOGI("[SSH-BRIDGE] SSH process exit status: %d", WEXITSTATUS(status));
-  }
-  LOGI("[SSH-BRIDGE] Thread finished");
-  return NULL;
-}
 
 static void *waypipe_thread_func(void *arg) {
   (void)arg;
@@ -2297,7 +2431,7 @@ static void *waypipe_thread_func(void *arg) {
        getenv("WAYLAND_DISPLAY") ? getenv("WAYLAND_DISPLAY") : "(null)");
 
   // Build waypipe argv
-  const char *argv[32];
+  const char *argv[64];
   int argc = 0;
   argv[argc++] = "waypipe";
 
@@ -2317,9 +2451,10 @@ static void *waypipe_thread_func(void *arg) {
     argv[argc++] = "--oneshot";
   }
 
-  if (g_waypipe_config.no_gpu) {
-    argv[argc++] = "--no-gpu";
-  }
+  /* Android lacks accessible DRM render nodes; always disable the GPU/DMABUF
+   * path so waypipe negotiates CPU-side shm copies instead of trying to import
+   * DMA-BUF handles that will fail on the Android side. */
+  argv[argc++] = "--no-gpu";
 
   if (g_waypipe_config.login_shell) {
     argv[argc++] = "--login-shell";
@@ -2343,84 +2478,67 @@ static void *waypipe_thread_func(void *arg) {
 
   if (g_waypipe_config.ssh_enabled && g_waypipe_config.ssh_host[0]) {
     // ── SSH mode ──
-    // Architecture:
-    //   Local:  waypipe --socket /path/wp.sock --oneshot client
-    //           (creates /path/wp.sock, connects to compositor, waits for
-    //           server)
-    //   Remote: Python script that creates a Unix socket, starts
-    //           "waypipe --socket <sock> server -- <cmd>", and bridges
-    //           the socket data to SSH channel stdin/stdout.
-    //   Bridge: SSH bridge thread connects to local wp.sock and forwards
-    //           data to/from the SSH channel.
+    // Uses waypipe's native "ssh" subcommand. Waypipe creates a local Unix
+    // socket, spawns the SSH client with -R /remote.sock:/local.sock, and
+    // the remote waypipe server connects back through the SSH tunnel.
+    // Dropbear (dbclient) is patched to support -R with Unix socket paths
+    // via streamlocal-forward@openssh.com.
 
-    // Socket path for local waypipe client
-    static char wp_socket_path[512];
-    snprintf(wp_socket_path, sizeof(wp_socket_path), "%s/waypipe-bridge.sock",
-             xdg_dir ? xdg_dir : "/tmp");
-    unlink(wp_socket_path); // remove stale
-
-    const char *rcmd = g_waypipe_config.remote_command[0]
-                           ? g_waypipe_config.remote_command
-                           : "weston-terminal";
-
-    char compress_arg[128] = "";
-    if (g_waypipe_config.compress[0] &&
-        strcmp(g_waypipe_config.compress, "none") != 0) {
-      snprintf(compress_arg, sizeof(compress_arg), " --compress %s",
-               g_waypipe_config.compress);
+    if (!g_ssh_bin_path[0]) {
+      LOGE("SSH binary (libssh_bin.so) not found — cannot start waypipe SSH");
+      return NULL;
     }
 
-    // Remote command: Python script that creates a Unix socket for waypipe
-    // server to connect to, then bridges the socket to SSH stdin/stdout.
-    // Uses heredoc so newlines are preserved correctly.
-    static char remote_cmd[4096];
-    snprintf(
-        remote_cmd, sizeof(remote_cmd),
-        "python3 << 'PYEOF'\n"
-        "import socket, sys, os, threading\n"
-        "sp = '/tmp/waypipe-wawona-' + str(os.getpid()) + '.sock'\n"
-        "try: os.unlink(sp)\n"
-        "except: pass\n"
-        "s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)\n"
-        "s.bind(sp)\n"
-        "s.listen(1)\n"
-        "os.system('waypipe -s ' + sp + '%s -o server -- \"%s\" &')\n"
-        "s.settimeout(10)\n"
-        "try:\n"
-        "  c, _ = s.accept()\n"
-        "except:\n"
-        "  sys.stderr.write('waypipe server did not connect within 10s\\n')\n"
-        "  os.unlink(sp)\n"
-        "  sys.exit(1)\n"
-        "def tx():\n"
-        "  try:\n"
-        "    while True:\n"
-        "      d = c.recv(65536)\n"
-        "      if not d: break\n"
-        "      os.write(1, d)\n"
-        "  except: pass\n"
-        "threading.Thread(target=tx, daemon=True).start()\n"
-        "try:\n"
-        "  while True:\n"
-        "    d = os.read(0, 65536)\n"
-        "    if not d: break\n"
-        "    c.sendall(d)\n"
-        "except: pass\n"
-        "c.close()\n"
-        "s.close()\n"
-        "try: os.unlink(sp)\n"
-        "except: pass\n"
-        "PYEOF",
-        compress_arg, rcmd);
+    static char quoted_rcmd[520];
+    const char *raw_rcmd = g_waypipe_config.remote_command[0]
+                               ? g_waypipe_config.remote_command
+                               : "weston-terminal";
+    snprintf(quoted_rcmd, sizeof(quoted_rcmd), "\"%s\"", raw_rcmd);
+    const char *rcmd = quoted_rcmd;
 
-    // Set --socket for local waypipe client
+    static char port_str[16];
+    int ssh_port = g_waypipe_config.ssh_port > 0 ? g_waypipe_config.ssh_port : 22;
+    snprintf(port_str, sizeof(port_str), "%d", ssh_port);
+
+    if (g_waypipe_config.ssh_password[0]) {
+      setenv("SSHPASS", g_waypipe_config.ssh_password, 1);
+    }
+
+    {
+      const char *xdg = getenv("XDG_RUNTIME_DIR");
+      if (xdg)
+        setenv("HOME", xdg, 1);
+    }
+
+    /* --socket sets the LOCAL (client) socket prefix; waypipe appends
+     * "-client-RAND.sock".  Using a relative path works because we chdir to
+     * XDG_RUNTIME_DIR before calling waypipe_main, so the socket lands there. */
+    static char wp_socket_prefix[] = "./waypipe";
     argv[argc++] = "--socket";
-    argv[argc++] = wp_socket_path;
-    argv[argc++] = "--debug";
-    argv[argc++] = "client";
+    argv[argc++] = wp_socket_prefix;
+
+    /* --remote-socket sets the SERVER socket prefix used on the remote Linux
+     * host.  It must be an absolute path so OpenSSH sshd can create the
+     * streamlocal socket.  This also appears in the remote "waypipe --socket"
+     * command, so it must be a path that is valid on the remote machine. */
+    static char wp_remote_socket_prefix[] = "/tmp/waypipe";
+    argv[argc++] = "--remote-socket";
+    argv[argc++] = wp_remote_socket_prefix;
+
+    argv[argc++] = "--ssh-bin";
+    argv[argc++] = g_ssh_bin_path;
+    argv[argc++] = "ssh";
+    argv[argc++] = "-y";
+    argv[argc++] = "-T";
+    argv[argc++] = "-p";
+    argv[argc++] = port_str;
+    argv[argc++] = "-l";
+    argv[argc++] = g_waypipe_config.ssh_user;
+    argv[argc++] = g_waypipe_config.ssh_host;
+    /* Dropbear does not support "--" (OpenSSH option separator); omit it */
+    argv[argc++] = rcmd;
     argv[argc] = NULL;
 
-    // Verify compositor socket before waypipe starts
     {
       const char *wl_disp = getenv("WAYLAND_DISPLAY");
       if (xdg_dir && wl_disp) {
@@ -2435,36 +2553,11 @@ static void *waypipe_thread_func(void *arg) {
       }
     }
 
-    // Configure and launch SSH bridge thread
-    memset(&g_ssh_bridge, 0, sizeof(g_ssh_bridge));
-    g_ssh_bridge.port = 22;
-    g_ssh_bridge.stop_flag = &g_waypipe_stop_requested;
-    strncpy(g_ssh_bridge.host, g_waypipe_config.ssh_host,
-            sizeof(g_ssh_bridge.host) - 1);
-    strncpy(g_ssh_bridge.user, g_waypipe_config.ssh_user,
-            sizeof(g_ssh_bridge.user) - 1);
-    strncpy(g_ssh_bridge.password, g_waypipe_config.ssh_password,
-            sizeof(g_ssh_bridge.password) - 1);
-    strncpy(g_ssh_bridge.remote_cmd, remote_cmd,
-            sizeof(g_ssh_bridge.remote_cmd) - 1);
-    strncpy(g_ssh_bridge.local_socket_path, wp_socket_path,
-            sizeof(g_ssh_bridge.local_socket_path) - 1);
-
-    pthread_t ssh_tid;
-    if (pthread_create(&ssh_tid, NULL, ssh_bridge_thread, &g_ssh_bridge) != 0) {
-      LOGE("Failed to create SSH bridge thread");
-      g_waypipe_running = 0;
-      return NULL;
-    }
-
-    LOGI("Calling waypipe_main (client, socket=%s) with %d args:",
-         wp_socket_path, argc);
+    LOGI("Calling waypipe_main (ssh mode) with %d args:", argc);
     for (int i = 0; i < argc; i++) {
       LOGI("  argv[%d] = %s", i, argv[i]);
     }
 
-    // Android apps can't access CWD ("/") - waypipe opens "." internally.
-    // chdir to XDG_RUNTIME_DIR which the app owns.
     char saved_cwd[512] = "";
     if (xdg_dir) {
       getcwd(saved_cwd, sizeof(saved_cwd));
@@ -2476,29 +2569,30 @@ static void *waypipe_thread_func(void *arg) {
     }
 
     setenv("RUST_BACKTRACE", "full", 1);
+    if (xdg_dir) {
+      setenv("TMPDIR", xdg_dir, 1);
+    }
 
-    // Capture waypipe stderr to a file (safe, non-blocking unlike pipes)
     char stderr_log[512];
     snprintf(stderr_log, sizeof(stderr_log), "%s/waypipe-stderr.log",
-             xdg_dir ? xdg_dir : "/tmp");
+             xdg_dir ? xdg_dir : "/data/local/tmp");
     int log_fd = open(stderr_log, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     int saved_stderr = -1;
     if (log_fd >= 0) {
       saved_stderr = dup(STDERR_FILENO);
       dup2(log_fd, STDERR_FILENO);
       close(log_fd);
+      setvbuf(stderr, NULL, _IONBF, 0); /* unbuffered so log viewer can refresh live */
     }
 
     result = waypipe_main(argc, argv);
 
-    // Restore stderr immediately
     if (saved_stderr >= 0) {
       dup2(saved_stderr, STDERR_FILENO);
       close(saved_stderr);
     }
-    LOGI("waypipe_main (client) returned %d", result);
+    LOGI("waypipe_main (ssh) returned %d", result);
 
-    // Read and log waypipe's stderr output
     {
       int rfd = open(stderr_log, O_RDONLY);
       if (rfd >= 0) {
@@ -2514,16 +2608,24 @@ static void *waypipe_thread_func(void *arg) {
       }
     }
 
-    // Restore CWD
     if (saved_cwd[0])
       chdir(saved_cwd);
 
-    g_waypipe_stop_requested = 1;
-    pthread_join(ssh_tid, NULL);
-    unlink(wp_socket_path);
-
   } else {
-    // Non-SSH mode - also needs chdir for the same reason
+    // Non-SSH mode: run waypipe as a client with a local socket.
+    // waypipe requires a subcommand (client/server) to function.
+    if (xdg_dir) {
+      setenv("TMPDIR", xdg_dir, 1);
+    }
+    static char wp_socket_path_local[512];
+    snprintf(wp_socket_path_local, sizeof(wp_socket_path_local),
+             "%s/waypipe-local.sock", xdg_dir ? xdg_dir : "/data/local/tmp");
+    unlink(wp_socket_path_local);
+
+    argv[argc++] = "--socket";
+    argv[argc++] = wp_socket_path_local;
+    argv[argc++] = "client";
+
     char saved_cwd2[512] = "";
     if (xdg_dir) {
       getcwd(saved_cwd2, sizeof(saved_cwd2));
@@ -2538,6 +2640,7 @@ static void *waypipe_thread_func(void *arg) {
     LOGI("waypipe_main returned %d", result);
     if (saved_cwd2[0])
       chdir(saved_cwd2);
+    unlink(wp_socket_path_local);
   }
 
   g_waypipe_running = 0;
@@ -2570,8 +2673,30 @@ Java_com_aspauldingcode_wawona_WawonaNative_nativeRunWaypipe(
 
   str = (*env)->GetStringUTFChars(env, sshHost, NULL);
   if (str) {
-    strncpy(g_waypipe_config.ssh_host, str,
-            sizeof(g_waypipe_config.ssh_host) - 1);
+    /* Support "host:port" syntax — parse port if present */
+    const char *colon = strrchr(str, ':');
+    long parsed_port = 0;
+    if (colon && colon != str) {
+      char *end = NULL;
+      parsed_port = strtol(colon + 1, &end, 10);
+      if (end && *end == '\0' && parsed_port > 0 && parsed_port < 65536) {
+        /* Valid port — copy only the host part */
+        size_t hostlen = (size_t)(colon - str);
+        if (hostlen >= sizeof(g_waypipe_config.ssh_host))
+          hostlen = sizeof(g_waypipe_config.ssh_host) - 1;
+        memcpy(g_waypipe_config.ssh_host, str, hostlen);
+        g_waypipe_config.ssh_host[hostlen] = '\0';
+        g_waypipe_config.ssh_port = (int)parsed_port;
+      } else {
+        strncpy(g_waypipe_config.ssh_host, str,
+                sizeof(g_waypipe_config.ssh_host) - 1);
+        g_waypipe_config.ssh_port = 22;
+      }
+    } else {
+      strncpy(g_waypipe_config.ssh_host, str,
+              sizeof(g_waypipe_config.ssh_host) - 1);
+      g_waypipe_config.ssh_port = 22;
+    }
     (*env)->ReleaseStringUTFChars(env, sshHost, str);
   }
 
@@ -2864,7 +2989,7 @@ Java_com_aspauldingcode_wawona_WawonaNative_nativeTestPing(
 }
 
 // ---------------------------------------------------------------------------
-// Test SSH: OpenSSH-based connection + auth test via fork/exec
+// Test SSH: Dropbear-based connection + auth test via fork/exec
 // ---------------------------------------------------------------------------
 #include <poll.h>
 
@@ -2884,10 +3009,21 @@ Java_com_aspauldingcode_wawona_WawonaNative_nativeTestSSH(
   char port_str[16];
   snprintf(port_str, sizeof(port_str), "%d", port);
 
-  LOGI("Testing SSH connection to %s@%s:%d (OpenSSH)", user_str, host_str,
+  LOGI("Testing SSH connection to %s@%s:%d (Dropbear)", user_str, host_str,
        port);
 
   resolve_ssh_binary_paths();
+
+  /* Ensure XDG_RUNTIME_DIR (and thus HOME for Dropbear) is set before fork */
+  if (!getenv("XDG_RUNTIME_DIR")) {
+    const char *cache_dir = getenv("TMPDIR");
+    if (!cache_dir)
+      cache_dir = "/data/local/tmp";
+    char runtime_dir[256];
+    snprintf(runtime_dir, sizeof(runtime_dir), "%s/wawona-runtime", cache_dir);
+    mkdir(runtime_dir, 0700);
+    setenv("XDG_RUNTIME_DIR", runtime_dir, 1);
+  }
 
   if (!g_ssh_bin_path[0]) {
     snprintf(result, sizeof(result),
@@ -2898,8 +3034,8 @@ Java_com_aspauldingcode_wawona_WawonaNative_nativeTestSSH(
   struct timeval t_start, t_end;
   gettimeofday(&t_start, NULL);
 
-  int out_pipe[2];
-  if (pipe(out_pipe) < 0) {
+  int out_pipe[2], err_pipe[2];
+  if (pipe(out_pipe) < 0 || pipe(err_pipe) < 0) {
     snprintf(result, sizeof(result), "FAIL: pipe() failed: %s",
              strerror(errno));
     goto cleanup_strings;
@@ -2911,22 +3047,43 @@ Java_com_aspauldingcode_wawona_WawonaNative_nativeTestSSH(
              strerror(errno));
     close(out_pipe[0]);
     close(out_pipe[1]);
+    close(err_pipe[0]);
+    close(err_pipe[1]);
     goto cleanup_strings;
   }
 
   if (pid == 0) {
     close(out_pipe[0]);
+    close(err_pipe[0]);
     dup2(out_pipe[1], STDOUT_FILENO);
-    dup2(out_pipe[1], STDERR_FILENO);
+    dup2(err_pipe[1], STDERR_FILENO);
     close(out_pipe[1]);
+    close(err_pipe[1]);
 
     if (pass_str[0] != '\0') {
       setenv("SSHPASS", pass_str, 1);
     }
+    /* Dropbear needs HOME for ~/.ssh/known_hosts; use XDG_RUNTIME_DIR (writable) */
+    {
+      const char *xdg = getenv("XDG_RUNTIME_DIR");
+      if (xdg)
+        setenv("HOME", xdg, 1);
+    }
 
-    /* Dropbear (dbclient) bundled as ssh: -y auto-accept host key */
-    execl(g_ssh_bin_path, "ssh", "-y", "-T", "-p", port_str, "-l", user_str,
-          host_str, "uname -a", (char *)NULL);
+    /* Build target: user@host or just host if user empty. Pass "uname -a" as
+     * single arg to avoid Dropbear misparsing "-a". Android Dropbear has
+     * SSHPASS env support (patched getpass), so no sshpass - avoids argv bugs. */
+    char target[512];
+    if (user_str[0])
+      snprintf(target, sizeof(target), "%s@%s", user_str, host_str);
+    else
+      snprintf(target, sizeof(target), "%s", host_str);
+
+    const char *argv_ssh[] = {
+        "ssh", "-y", "-T", "-p", port_str, target, "uname -a", NULL
+    };
+    LOGI("[SSH Test] exec: ssh -y -T -p %s %s uname -a", port_str, target);
+    execv(g_ssh_bin_path, (char *const *)argv_ssh);
 
     fprintf(stderr, "exec failed: %s (path=%s)\n", strerror(errno),
             g_ssh_bin_path);
@@ -2934,7 +3091,10 @@ Java_com_aspauldingcode_wawona_WawonaNative_nativeTestSSH(
   }
 
   close(out_pipe[1]);
+  close(err_pipe[1]);
 
+  /* Read stdout only for Remote: line (uname output). Stderr may contain
+   * "ssh:" warnings (e.g. host key) which we discard to match iOS/macOS. */
   char uname_buf[512] = {0};
   int total = 0;
   struct pollfd pf = {out_pipe[0], POLLIN, 0};
@@ -2951,6 +3111,24 @@ Java_com_aspauldingcode_wawona_WawonaNative_nativeTestSSH(
   close(out_pipe[0]);
   uname_buf[total] = '\0';
 
+  /* Drain stderr; use for failure output when stdout is empty */
+  char err_buf[512] = {0};
+  {
+    int err_total = 0;
+    struct pollfd pe = {err_pipe[0], POLLIN, 0};
+    while (err_total < (int)sizeof(err_buf) - 1) {
+      if (poll(&pe, 1, 100) <= 0)
+        break;
+      ssize_t n = read(err_pipe[0], err_buf + err_total,
+                      sizeof(err_buf) - 1 - err_total);
+      if (n <= 0)
+        break;
+      err_total += (int)n;
+    }
+    err_buf[err_total] = '\0';
+  }
+  close(err_pipe[0]);
+
   int status;
   waitpid(pid, &status, 0);
 
@@ -2963,14 +3141,25 @@ Java_com_aspauldingcode_wawona_WawonaNative_nativeTestSSH(
     if (nl)
       *nl = '\0';
     snprintf(result, sizeof(result),
-             "OK: SSH connected and authenticated (OpenSSH)\nRemote: "
+             "OK: SSH connected and authenticated (Dropbear)\nRemote: "
              "%s\nLatency: %ldms",
              uname_buf, latency_ms);
   } else {
+    const char *out = uname_buf[0] ? uname_buf : err_buf;
     snprintf(result, sizeof(result),
-             "FAIL: SSH failed (exit %d)\nOutput: %s\nLatency: %ldms",
-             WIFEXITED(status) ? WEXITSTATUS(status) : -1, uname_buf,
-             latency_ms);
+             "FAIL: SSH failed (exit %d)\nHost: %s\nOutput: %s\nLatency: %ldms",
+             WIFEXITED(status) ? WEXITSTATUS(status) : -1,
+             host_str, out[0] ? out : "(no output)", latency_ms);
+    /* If hostname doesn't resolve, suggest using IP (skip if error shows "ssh"
+     * - that indicates a Dropbear argv bug, not a config alias issue) */
+    if (out[0] && !strstr(out, "resolving 'ssh'") &&
+        (strstr(out, "No address associated with hostname") ||
+         strstr(out, "Could not resolve hostname"))) {
+      size_t len = strlen(result);
+      if (len < sizeof(result) - 120)
+        snprintf(result + len, sizeof(result) - len,
+                 "\n\nTip: Use the IP address in Settings → SSH → SSH Host. Android does not read ~/.ssh/config.");
+    }
   }
 
 cleanup_strings:

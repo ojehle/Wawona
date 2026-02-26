@@ -7,6 +7,8 @@
   androidSDK ? null,
   rustBackend ? null,
   glslang ? pkgs.glslang,
+  targetPkgs,
+  ...
 }:
 
 let
@@ -14,24 +16,34 @@ let
 
   androidToolchain = import ../toolchains/android.nix { inherit lib pkgs; };
   
-  gradleDeps = pkgs.callPackage ../gradle-deps.nix {
-    inherit wawonaSrc androidSDK;
-    inherit (pkgs) gradle jdk17;
-    inherit gradlegen;
-  };
-
-  gradlegen = pkgs.callPackage ../generators/gradlegen.nix { };
-
-  westonSimpleShmSrc = pkgs.callPackage ../libs/weston-simple-shm/patched-src.nix {};
-
   projectVersion =
     if (wawonaVersion != null && wawonaVersion != "") then wawonaVersion
     else
       let v = lib.removeSuffix "\n" (lib.fileContents (wawonaSrc + "/VERSION"));
       in if v == "" then "0.0.1" else v;
 
+  gradleDeps = pkgs.callPackage ../gradle-deps.nix {
+    inherit wawonaSrc androidSDK;
+    inherit (pkgs) gradle jdk17;
+    inherit gradlegen;
+  };
+
+  gradlegen = pkgs.callPackage ../generators/gradlegen.nix { wawonaVersion = projectVersion; };
+
+  androidIconAssets =
+    if builtins.pathExists ../generators/android-icon-assets.nix then
+      pkgs.callPackage ../generators/android-icon-assets.nix {
+        inherit wawonaSrc;
+      }
+    else
+      null;
+
+  westonSimpleShmSrc = pkgs.callPackage ../libs/weston-simple-shm/patched-src.nix {};
+
   opensshBin = buildModule.buildForAndroid "openssh" { };
   sshpassBin = buildModule.buildForAndroid "sshpass" { };
+  westonBin = buildModule.buildForAndroid "weston" { };
+  rustBackendPath = if rustBackend != null then toString rustBackend else "";
 
   androidDeps = common.commonDeps ++ [
     "swiftshader"
@@ -50,7 +62,7 @@ let
       name:
       if name == "pixman" then
         if platform == "android" then
-          buildModule.android.pixman
+          buildModule.buildForAndroid "pixman" { }
         else
           pkgs.pixman
       else if name == "vulkan-headers" then
@@ -58,13 +70,13 @@ let
       else if name == "vulkan-loader" then
         pkgs.vulkan-loader
       else if name == "xkbcommon" then
-        buildModule.${platform}.${name}
+        buildModule.buildForAndroid "xkbcommon" { }
       else if name == "openssl" then
-        buildModule.${platform}.${name}
+        buildModule.buildForAndroid "openssl" { }
       else if name == "libssh2" then
-        buildModule.${platform}.${name}
+        buildModule.buildForAndroid "libssh2" { }
       else
-        buildModule.${platform}.${name}
+        buildModule.buildForAndroid name { }
     ) depNames;
 
   # Filter commonSources for Android: remove .m files and Apple-only headers
@@ -79,13 +91,16 @@ let
     ) common.commonSources;
 
   # Android-specific sources (not filtered by pathExists since some are
-  # generated at build time by postPatch)
+  # generated at build time by postPatch, or are shared .c files that
+  # filterSources may fail to resolve on Nix store paths)
   androidExtraSources = [
     "src/stubs/egl_buffer_handler.c"
     "src/platform/android/android_jni.c"
     "src/platform/android/input_android.c"
     "src/rendering/renderer_android.c"
     "src/rendering/renderer_android.h"
+    "src/platform/macos/WWNSettings.c"
+    "src/platform/macos/WWNSettings.h"
   ];
 
   androidSourcesFiltered = (common.filterSources androidCommonSources) ++ androidExtraSources;
@@ -95,6 +110,8 @@ let
     androidSDK.emulator
     androidSDK.androidsdk
     pkgs.util-linux
+    pkgs.jdk17
+    pkgs.lldb
   ];
 
   nixSdkRoot = "${androidSDK.androidsdk}/libexec/android-sdk";
@@ -103,6 +120,7 @@ let
     set +e
 
     NIX_SDK_PATH="${nixSdkPath}"
+    NDK_ROOT="${androidToolchain.androidndkRoot}"
     export PATH="$NIX_SDK_PATH:$PATH"
     export ANDROID_SDK_ROOT="${nixSdkRoot}"
     export ANDROID_HOME="$ANDROID_SDK_ROOT"
@@ -122,6 +140,12 @@ let
         echo "[Wawona] Install Android Studio or Android command-line tools for arm64."
         echo "[Wawona] The Nix-provided emulator is x86_64 and requires Rosetta 2."
       fi
+    fi
+
+    DEBUG_MODE=false
+    if [ "''${1:-}" = "--debug" ]; then
+      DEBUG_MODE=true
+      shift
     fi
 
     APK_PATH="$1"
@@ -349,17 +373,160 @@ let
       adb install "$APK_PATH"
     fi
 
-    echo "[Wawona] Launching Wawona..."
-    adb shell am start -n com.aspauldingcode.wawona/.MainActivity
+    PKG="com.aspauldingcode.wawona"
 
-    sleep 5
+    resolve_app_pid() {
+      PIDS_RAW=$(adb shell pidof $PKG 2>/dev/null | tr -d '\r')
+      if [ -z "$PIDS_RAW" ]; then
+        echo ""
+        return 0
+      fi
 
-    echo "=== Recent crash logs ==="
-    adb logcat -d -v time | grep -i -E "(wawona|androidruntime|fatal|exception|error)" | tail -200
+      set -- $PIDS_RAW
+      if [ $# -gt 1 ]; then
+        echo "[Wawona] Multiple app PIDs detected: $PIDS_RAW (using newest)"
+      fi
 
-    echo ""
-    echo "=== Starting live logcat stream ==="
-    adb logcat -v time -s Wawona:D WawonaJNI:D WawonaNative:D AndroidRuntime:E
+      echo "$PIDS_RAW" | tr ' ' '\n' | awk 'NF { last=$1 } END { print last }'
+    }
+
+    if [ "$DEBUG_MODE" = "true" ]; then
+      # ── Debug launch: am start -D, deploy lldb-server, attach LLDB ──
+
+      start_lldb_server_for_pid() {
+        TARGET_PID="$1"
+        adb forward tcp:8700 jdwp:$TARGET_PID 2>/dev/null || true
+
+        if adb shell "run-as $PKG ls ./lldb-server" 2>/dev/null | grep -q "lldb-server"; then
+          echo "[Wawona] Starting lldb-server (app sandbox, pid $TARGET_PID)..."
+          adb shell "run-as $PKG sh -c './lldb-server gdbserver --attach $TARGET_PID 0.0.0.0:$LLDB_PORT >/dev/null 2>&1'" &
+        else
+          echo "[Wawona] Starting lldb-server (/data/local/tmp, pid $TARGET_PID)..."
+          adb shell "/data/local/tmp/lldb-server gdbserver --attach $TARGET_PID 0.0.0.0:$LLDB_PORT >/dev/null 2>&1" &
+        fi
+
+        LLDB_SERVER_HOST_PID=$!
+        sleep 2
+      }
+
+      echo "[Wawona] Launching Wawona in debug mode..."
+      adb shell am start -D -n $PKG/.MainActivity
+
+      echo "[Wawona] Waiting for process..."
+      PID=""
+      for i in $(seq 1 30); do
+        PID=$(resolve_app_pid)
+        if [ -n "$PID" ]; then break; fi
+        sleep 0.5
+      done
+
+      if [ -z "$PID" ]; then
+        echo "[Wawona] ERROR: Could not get process PID. App may have crashed."
+        adb logcat -d -v time | grep -i -E "(wawona|androidruntime|fatal|exception|error)" | tail -100
+        exit 1
+      fi
+
+      echo "[Wawona] App PID: $PID (paused — no code has run yet)"
+
+      LLDB_SERVER=$(find "$NDK_ROOT/toolchains/llvm/prebuilt" -name "lldb-server" -path "*/aarch64/*" -type f 2>/dev/null | head -1)
+      if [ -z "$LLDB_SERVER" ]; then
+        echo "[Wawona] ERROR: Could not find aarch64 lldb-server in NDK at $NDK_ROOT"
+        exit 1
+      fi
+
+      LLDB_BIN="$(which lldb)"
+      if [ -z "$LLDB_BIN" ]; then
+        echo "[Wawona] ERROR: lldb not found in PATH"
+        exit 1
+      fi
+
+      adb shell "pkill -9 lldb-server" 2>/dev/null || true
+      sleep 0.5
+      adb push "$LLDB_SERVER" /data/local/tmp/lldb-server 2>/dev/null
+      adb shell "chmod 755 /data/local/tmp/lldb-server"
+      adb shell "run-as $PKG sh -c 'cat /data/local/tmp/lldb-server > ./lldb-server && chmod 700 ./lldb-server'" 2>/dev/null
+
+      LLDB_PORT=5039
+      adb forward tcp:$LLDB_PORT tcp:$LLDB_PORT 2>/dev/null || true
+
+      start_lldb_server_for_pid "$PID"
+
+      CURRENT_PID=$(resolve_app_pid)
+      if [ -n "$CURRENT_PID" ] && [ "$CURRENT_PID" != "$PID" ]; then
+        echo "[Wawona] App PID changed before LLDB attach: $PID -> $CURRENT_PID"
+        PID="$CURRENT_PID"
+        kill $LLDB_SERVER_HOST_PID 2>/dev/null || true
+        adb shell "pkill -9 lldb-server" 2>/dev/null || true
+        start_lldb_server_for_pid "$PID"
+        echo "[Wawona] Reattached lldb-server to PID $PID"
+      fi
+
+      if ! kill -0 $LLDB_SERVER_HOST_PID 2>/dev/null; then
+        echo "[Wawona] ERROR: lldb-server failed to start. Falling back to logcat."
+        adb logcat -c 2>/dev/null || true
+        echo "resume" | jdb -connect sun.jdi.SocketAttach:hostname=localhost,port=8700 2>/dev/null &
+        echo "--- Wawona Android Crash Monitor ---"
+        adb logcat -v time -s Wawona:D WawonaJNI:D WawonaNative:D AndroidRuntime:E DEBUG:I
+        exit 0
+      fi
+
+      APP_LOG="/tmp/wawona-android.log"
+      rm -f "$APP_LOG"
+      touch "$APP_LOG"
+      adb logcat -c 2>/dev/null || true
+      adb logcat -v time -s Wawona:D WawonaJNI:D WawonaNative:D AndroidRuntime:E DEBUG:I >> "$APP_LOG" &
+      LOGCAT_PID=$!
+
+      echo "--- Wawona Android Logs (PID $PID) ---"
+      tail -f "$APP_LOG" &
+      TAIL_PID=$!
+
+      trap "kill $TAIL_PID $LOGCAT_PID $LLDB_SERVER_HOST_PID 2>/dev/null || true; adb shell 'pkill -9 lldb-server' 2>/dev/null || true" EXIT INT TERM
+
+      (sleep 4 && \
+       echo "resume" | jdb -connect sun.jdi.SocketAttach:hostname=localhost,port=8700 2>/dev/null; \
+       true) &
+      JDB_PID=$!
+
+      echo "[Wawona] LLDB connecting to PID $PID on port $LLDB_PORT..."
+      echo "[Wawona] Java VM will resume in 4s (native code hasn't run yet)."
+      echo "[Wawona] On crash, LLDB stops and you get an interactive prompt."
+      echo ""
+
+      exec "$LLDB_BIN" -Q \
+        -o "gdb-remote $LLDB_PORT" \
+        -o "process handle SIGSEGV -n true -p false -s true" \
+        -o "process handle SIGPIPE -n false -p true -s false" \
+        -o "process handle SIGABRT -n true -p false -s true" \
+        -o "process handle SIGBUS  -n true -p false -s true" \
+        -o "process handle SIGFPE  -n true -p false -s true" \
+        -o "process handle SIGILL  -n true -p false -s true" \
+        -o "continue"
+
+    else
+      # ── Normal launch: am start, stream logcat ──
+
+      echo "[Wawona] Launching Wawona..."
+      adb shell am start -n $PKG/.MainActivity
+
+      echo "[Wawona] Waiting for process..."
+      PID=""
+      for i in $(seq 1 15); do
+        PID=$(resolve_app_pid)
+        if [ -n "$PID" ]; then break; fi
+        sleep 0.5
+      done
+
+      if [ -n "$PID" ]; then
+        echo "[Wawona] App PID: $PID"
+      else
+        echo "[Wawona] Warning: Could not resolve app PID (app may still be starting)"
+      fi
+
+      echo "--- Wawona Android Logs ---"
+      echo "[Wawona] Tip: use 'nix run .#wawona-android -- --debug' to attach LLDB"
+      adb logcat -v time -s Wawona:D WawonaJNI:D WawonaNative:D AndroidRuntime:E DEBUG:I
+    fi
   '';
 
 in
@@ -801,6 +968,342 @@ object ScreencopyHelper {
 }
 SCREENCOPY
       fi
+      # ModifierAccessoryBar.kt may be untracked
+      if [ ! -f src/platform/android/java/com/aspauldingcode/wawona/ModifierAccessoryBar.kt ]; then
+        mkdir -p src/platform/android/java/com/aspauldingcode/wawona
+        cat > src/platform/android/java/com/aspauldingcode/wawona/ModifierAccessoryBar.kt <<'MODBAR'
+package com.aspauldingcode.wawona
+
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+
+private object LinuxKey {
+    const val ESC = 1
+    const val GRAVE = 41
+    const val TAB = 15
+    const val SLASH = 53
+    const val MINUS = 12
+    const val HOME = 102
+    const val UP = 103
+    const val END = 107
+    const val PAGEUP = 104
+    const val LEFTSHIFT = 42
+    const val LEFTCTRL = 29
+    const val LEFTALT = 56
+    const val LEFTMETA = 125
+    const val LEFT = 105
+    const val DOWN = 108
+    const val RIGHT = 106
+    const val PAGEDOWN = 109
+}
+
+private object XkbMod {
+    const val SHIFT = 1 shl 0
+    const val CTRL = 1 shl 2
+    const val ALT = 1 shl 3
+    const val LOGO = 1 shl 6
+}
+
+private const val DOUBLE_TAP_THRESHOLD_MS = 400L
+
+@Composable
+fun ModifierAccessoryBar(
+    modifier: Modifier = Modifier,
+    onDismissKeyboard: () -> Unit
+) {
+    val ts = System.currentTimeMillis().toInt() and 0x7FFF_FFFF
+
+    var modShiftActive by remember { mutableStateOf(false) }
+    var modShiftLocked by remember { mutableStateOf(false) }
+    var modCtrlActive by remember { mutableStateOf(false) }
+    var modCtrlLocked by remember { mutableStateOf(false) }
+    var modAltActive by remember { mutableStateOf(false) }
+    var modAltLocked by remember { mutableStateOf(false) }
+    var modSuperActive by remember { mutableStateOf(false) }
+    var modSuperLocked by remember { mutableStateOf(false) }
+
+    var lastModShiftTap by remember { mutableLongStateOf(0L) }
+    var lastModCtrlTap by remember { mutableLongStateOf(0L) }
+    var lastModAltTap by remember { mutableLongStateOf(0L) }
+    var lastModSuperTap by remember { mutableLongStateOf(0L) }
+
+    fun clearStickyModifiers() {
+        if (modShiftActive && !modShiftLocked) modShiftActive = false
+        if (modCtrlActive && !modCtrlLocked) modCtrlActive = false
+        if (modAltActive && !modAltLocked) modAltActive = false
+        if (modSuperActive && !modSuperLocked) modSuperActive = false
+    }
+
+    fun handleModifierTap(
+        active: Boolean,
+        locked: Boolean,
+        lastTap: Long,
+        onActive: (Boolean) -> Unit,
+        onLocked: (Boolean) -> Unit,
+        onLastTap: (Long) -> Unit
+    ) {
+        val now = System.currentTimeMillis()
+        val elapsed = now - lastTap
+        onLastTap(now)
+
+        when {
+            locked -> {
+                onActive(false)
+                onLocked(false)
+            }
+            active && elapsed < DOUBLE_TAP_THRESHOLD_MS -> {
+                onLocked(true)
+            }
+            active -> {
+                onActive(false)
+                onLocked(false)
+            }
+            else -> {
+                onActive(true)
+                onLocked(false)
+            }
+        }
+    }
+
+    fun sendAccessoryKey(keycode: Int) {
+        var mods = 0
+        if (modShiftActive) {
+            mods = mods or XkbMod.SHIFT
+            WawonaNative.nativeInjectKey(LinuxKey.LEFTSHIFT, true, ts)
+        }
+        if (modCtrlActive) {
+            mods = mods or XkbMod.CTRL
+            WawonaNative.nativeInjectKey(LinuxKey.LEFTCTRL, true, ts)
+        }
+        if (modAltActive) {
+            mods = mods or XkbMod.ALT
+            WawonaNative.nativeInjectKey(LinuxKey.LEFTALT, true, ts)
+        }
+        if (modSuperActive) {
+            mods = mods or XkbMod.LOGO
+            WawonaNative.nativeInjectKey(LinuxKey.LEFTMETA, true, ts)
+        }
+        if (mods != 0) {
+            WawonaNative.nativeInjectModifiers(mods, 0, 0, 0)
+        }
+        WawonaNative.nativeInjectKey(keycode, true, ts)
+        WawonaNative.nativeInjectKey(keycode, false, ts)
+        if (modShiftActive) WawonaNative.nativeInjectKey(LinuxKey.LEFTSHIFT, false, ts)
+        if (modCtrlActive) WawonaNative.nativeInjectKey(LinuxKey.LEFTCTRL, false, ts)
+        if (modAltActive) WawonaNative.nativeInjectKey(LinuxKey.LEFTALT, false, ts)
+        if (modSuperActive) WawonaNative.nativeInjectKey(LinuxKey.LEFTMETA, false, ts)
+        if (mods != 0) WawonaNative.nativeInjectModifiers(0, 0, 0, 0)
+        clearStickyModifiers()
+    }
+
+    val barBg = Color(0xFF1C1C1E)
+    val keyInactive = Color(0xFF3A3A3C)
+    val keySticky = Color(0xFF0A84FF).copy(alpha = 0.6f)
+    val keyLocked = Color(0xFF0A84FF).copy(alpha = 0.85f)
+    val keyText = Color.White
+
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        color = barBg,
+        contentColor = keyText
+    ) {
+        val rowMod = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 4.dp, vertical = 2.dp)
+            .height(36.dp)
+
+        Column(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = rowMod,
+            horizontalArrangement = Arrangement.spacedBy(3.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            listOf(
+                "ESC" to { sendAccessoryKey(LinuxKey.ESC) },
+                "`" to { sendAccessoryKey(LinuxKey.GRAVE) },
+                "TAB" to { sendAccessoryKey(LinuxKey.TAB) },
+                "/" to { sendAccessoryKey(LinuxKey.SLASH) },
+                "—" to { sendAccessoryKey(LinuxKey.MINUS) },
+                "HOME" to { sendAccessoryKey(LinuxKey.HOME) },
+                "↑" to { sendAccessoryKey(LinuxKey.UP) },
+                "END" to { sendAccessoryKey(LinuxKey.END) },
+                "PGUP" to { sendAccessoryKey(LinuxKey.PAGEUP) }
+            ).forEach { (label, action) ->
+                AccessoryKey(
+                    label, keyInactive, keyText,
+                    onClick = { action() },
+                    modifier = Modifier.weight(1f)
+                )
+            }
+        }
+
+        Row(
+            modifier = rowMod,
+            horizontalArrangement = Arrangement.spacedBy(3.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            AccessoryModKey(
+                label = "⇧",
+                active = modShiftActive,
+                locked = modShiftLocked,
+                inactiveColor = keyInactive,
+                stickyColor = keySticky,
+                lockedColor = keyLocked
+            ) {
+                handleModifierTap(
+                    modShiftActive, modShiftLocked, lastModShiftTap,
+                    { modShiftActive = it },
+                    { modShiftLocked = it },
+                    { lastModShiftTap = it }
+                )
+            }
+            AccessoryModKey(
+                label = "CTRL",
+                active = modCtrlActive,
+                locked = modCtrlLocked,
+                inactiveColor = keyInactive,
+                stickyColor = keySticky,
+                lockedColor = keyLocked
+            ) {
+                handleModifierTap(
+                    modCtrlActive, modCtrlLocked, lastModCtrlTap,
+                    { modCtrlActive = it },
+                    { modCtrlLocked = it },
+                    { lastModCtrlTap = it }
+                )
+            }
+            AccessoryModKey(
+                label = "ALT",
+                active = modAltActive,
+                locked = modAltLocked,
+                inactiveColor = keyInactive,
+                stickyColor = keySticky,
+                lockedColor = keyLocked
+            ) {
+                handleModifierTap(
+                    modAltActive, modAltLocked, lastModAltTap,
+                    { modAltActive = it },
+                    { modAltLocked = it },
+                    { lastModAltTap = it }
+                )
+            }
+            AccessoryModKey(
+                label = "⌘",
+                active = modSuperActive,
+                locked = modSuperLocked,
+                inactiveColor = keyInactive,
+                stickyColor = keySticky,
+                lockedColor = keyLocked
+            ) {
+                handleModifierTap(
+                    modSuperActive, modSuperLocked, lastModSuperTap,
+                    { modSuperActive = it },
+                    { modSuperLocked = it },
+                    { lastModSuperTap = it }
+                )
+            }
+            listOf(
+                "←" to LinuxKey.LEFT,
+                "↓" to LinuxKey.DOWN,
+                "→" to LinuxKey.RIGHT,
+                "PGDN" to LinuxKey.PAGEDOWN
+            ).forEach { (label, keycode) ->
+                AccessoryKey(
+                    label, keyInactive, keyText,
+                    onClick = { sendAccessoryKey(keycode) },
+                    modifier = Modifier.weight(1f)
+                )
+            }
+            AccessoryKey(
+                "⌨↓", keyInactive, keyText,
+                onClick = onDismissKeyboard,
+                modifier = Modifier.weight(1f)
+            )
+        }
+        }
+    }
+}
+
+@Composable
+private fun AccessoryKey(
+    label: String,
+    bgColor: Color,
+    textColor: Color,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    TextButton(
+        onClick = onClick,
+        modifier = modifier.height(32.dp).padding(0.dp),
+        colors = ButtonDefaults.textButtonColors(
+            containerColor = bgColor,
+            contentColor = textColor
+        ),
+        contentPadding = PaddingValues(0.dp),
+        shape = RoundedCornerShape(6.dp)
+    ) {
+        Text(
+            text = label,
+            fontSize = 12.sp,
+            maxLines = 1
+        )
+    }
+}
+
+@Composable
+private fun RowScope.AccessoryModKey(
+    label: String,
+    active: Boolean,
+    locked: Boolean,
+    inactiveColor: Color,
+    stickyColor: Color,
+    lockedColor: Color,
+    onClick: () -> Unit
+) {
+    val bg = when {
+        locked -> lockedColor
+        active -> stickyColor
+        else -> inactiveColor
+    }
+    val borderMod = if (locked) {
+        Modifier.border(2.dp, Color(0xFF0A84FF), RoundedCornerShape(6.dp))
+    } else {
+        Modifier
+    }
+    Box(modifier = Modifier.weight(1f).then(borderMod)) {
+        AccessoryKey(
+            label, bg, Color.White,
+            onClick = onClick,
+            modifier = Modifier.fillMaxWidth()
+        )
+    }
+}
+MODBAR
+      fi
     '';
 
     # Fix egl_buffer_handler for Android (create Android-compatible stubs)
@@ -979,13 +1482,14 @@ SCREENCOPY
 
       # Link shared library with Rust backend
       RUST_LIB_FLAGS=""
-      if [ -n "${toString (if rustBackend != null then "yes" else "")}" ] && [ -f "${rustBackend}/lib/libwawona_core.so" ]; then
+      if [ -n "${rustBackendPath}" ] && [ -f "${rustBackendPath}/lib/libwawona_core.so" ]; then
         echo "Linking against Rust backend shared library: libwawona_core.so"
-        cp ${rustBackend}/lib/libwawona_core.so .
+        cp "${rustBackendPath}/lib/libwawona_core.so" .
         RUST_LIB_FLAGS="-L. -lwawona_core"
-      elif [ -n "${toString (if rustBackend != null then "yes" else "")}" ] && [ -f "${rustBackend}/lib/libwawona.a" ]; then
-        echo "Linking Rust backend from ${rustBackend}/lib/libwawona.a (archive)"
-        RUST_LIB_FLAGS="-Wl,--whole-archive ${rustBackend}/lib/libwawona.a -Wl,--no-whole-archive"
+      elif [ -n "${rustBackendPath}" ] && [ -f "${rustBackendPath}/lib/libwawona.a" ]; then
+        echo "Linking against Rust static backend: libwawona.a"
+        cp "${rustBackendPath}/lib/libwawona.a" .
+        RUST_LIB_FLAGS="-L. -lwawona"
       else
         echo "WARNING: Rust backend not available, building without it"
       fi
@@ -1032,6 +1536,11 @@ SCREENCOPY
       cp -r ../src/platform/android/java .
       cp -r ../src/platform/android/res .
       cp ../src/platform/android/AndroidManifest.xml .
+
+      # Merge Wawona launcher icon assets (adaptive + monochrome for Android 16+)
+      if [ -n "${toString androidIconAssets}" ] && [ -d "${androidIconAssets}/res" ]; then
+        cp -r ${androidIconAssets}/res/* res/
+      fi
       
       # Place native libs where Gradle expects them (jniLibs)
       mkdir -p jniLibs/arm64-v8a
@@ -1067,6 +1576,24 @@ SCREENCOPY
         echo "Bundled sshpass executable as libsshpass_bin.so"
       else
         echo "WARNING: sshpass binary not found at ${sshpassBin}/bin/sshpass"
+      fi
+
+      # Bundle weston executables
+      if [ -d "${westonBin}/lib/arm64-v8a" ]; then
+        for lib in ${westonBin}/lib/arm64-v8a/*.so; do
+           if [ -f "$lib" ]; then
+              base=$(basename "$lib" .so)
+              # Normalize libweston*.so -> weston* so runtime lookups match
+              # MainActivity ProcessBuilder("$libDir/libweston*_bin.so")
+              norm_base="''${base#lib}"
+              out_name="lib''${norm_base}_bin.so"
+              cp "$lib" "jniLibs/arm64-v8a/''${out_name}"
+              chmod +x "jniLibs/arm64-v8a/''${out_name}"
+              echo "Bundled weston executable as ''${out_name}"
+           fi
+        done
+      else
+        echo "WARNING: weston lib directory not found"
       fi
 
       # Fix SONAMEs in copied libs
@@ -1132,9 +1659,7 @@ SCREENCOPY
     installPhase = ''
             runHook preInstall
 
-            # Go back to source root (buildPhase ends inside project-root/)
-            cd $NIX_BUILD_TOP/source
-            
+            # installPhase cwd = project-root (where buildPhase ended)
             mkdir -p $out/bin
             mkdir -p $out/lib
             
@@ -1165,8 +1690,9 @@ SCREENCOPY
             chmod +x $out/bin/wawona-android-run
 
             # Output project dir for gradlegen (Android Studio openable)
+            # cwd is project-root, so copy current dir contents into $project
             mkdir -p $project
-            cp -r project-root/* $project/
+            cp -r . "$project/"
             
             runHook postInstall
     '';

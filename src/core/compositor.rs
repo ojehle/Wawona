@@ -120,6 +120,8 @@ pub struct CompositorConfig {
     pub keyboard_repeat_rate: i32,
     /// Keyboard repeat delay (ms)
     pub keyboard_repeat_delay: i32,
+    /// Whether to advertise zwp_fullscreen_shell_v1
+    pub advertise_fullscreen_shell: bool,
 }
 
 impl Default for CompositorConfig {
@@ -132,6 +134,7 @@ impl Default for CompositorConfig {
             output_scale: 1.0,
             keyboard_repeat_rate: 33,
             keyboard_repeat_delay: 500,
+            advertise_fullscreen_shell: false,
         }
     }
 }
@@ -176,6 +179,8 @@ pub enum CompositorEvent {
     WindowCloseRequested { window_id: u32 },
     /// Window was minimized or unminimized
     WindowMinimized { window_id: u32, minimized: bool },
+    /// Window was maximized or unmaximized
+    WindowMaximized { window_id: u32, maximized: bool },
     /// Window requests interactive move
     WindowMoveRequested { window_id: u32, seat_id: u32, serial: u32 },
     /// Window requests interactive resize

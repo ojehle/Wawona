@@ -38,7 +38,7 @@ case "$PLATFORM" in
     ;;
   ios)
     echo "iOS build: requires cross-compilation with MoltenVK/KosmicKrisp static libs"
-    echo "See docs/2026-GPU-Drivers.md and plan for static linkage"
+    echo "See docs/2026-graphics.md for driver and CTS details"
     exit 1
     ;;
   *)

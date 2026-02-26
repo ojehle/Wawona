@@ -416,7 +416,7 @@ Waypipe enables remote Wayland application display over SSH.
 - Waypipe Rust backend exposes `waypipe_main()` C entry point for JNI integration
 - SSH bridge thread forks/execs Dropbear with `SSHPASS` env var for password auth
 
-See [2026-waypipe-ios-full-plan.md](./2026-waypipe-ios-full-plan.md) for iOS-specific details.
+See [2026-waypipe.md](./2026-waypipe.md) for platform details, iOS transport, and Android implementation.
 
 ---
 
@@ -453,7 +453,7 @@ Render loop (C pthread in android_jni.c):
 
 Waypipe + SSH (C pthreads in android_jni.c):
   SharedPreferences → nativeRunWaypipe → resolve_ssh_binary_paths()
-    → dladdr() finds native lib dir → copy libssh_bin.so/libsshpass_bin.so to cache
+    → dladdr() finds native lib dir → use libssh_bin.so/libsshpass_bin.so directly (no copy)
     → waypipe_main(argc, argv) [Rust entry point]
       → SSH bridge thread: fork() → exec(ssh_bin_path) [Dropbear dbclient]
         → SSHPASS env var → remote waypipe server → Wayland forwarding
@@ -466,8 +466,8 @@ Android doesn't ship with SSH tools. Wawona bundles **Dropbear SSH** (lightweigh
 1. **Build-time**: Nix cross-compiles Dropbear (`dbclient`) and sshpass for `aarch64-linux-android`
 2. **APK bundling**: Binaries packaged as `libssh_bin.so` and `libsshpass_bin.so` in `jniLibs/arm64-v8a/`
 3. **Runtime extraction**: `AndroidManifest.xml` sets `extractNativeLibs="true"` so Android extracts libs to `/data/app/.../lib/arm64/`
-4. **Path resolution**: `resolve_ssh_binary_paths()` uses `dladdr()` to find native lib directory, copies binaries to app cache (`XDG_RUNTIME_DIR`), makes them executable
-5. **Execution**: SSH bridge thread uses `exec()` with absolute paths to extracted binaries
+4. **Path resolution**: `resolve_ssh_binary_paths()` uses `dladdr()` to find native lib directory; uses binaries in place (no copy — Android Q+ forbids exec from app-private dirs due to W^X)
+5. **Execution**: SSH bridge thread uses `exec()` with absolute paths to binaries in `/data/app/.../lib/arm64/`
 
 **Key implementation details:**
 - Dropbear's `dbclient` is renamed to `ssh` for compatibility
@@ -521,4 +521,17 @@ Waypipe is integrated via Rust FFI: `waypipe_main()` is exposed as a C-callable 
 
 ---
 
-*Last updated: 2026-02-20*
+---
+
+## **12. Window Decoration & Force SSD**
+
+Wawona implements `zxdg_decoration_manager_v1` with policy: `PreferClient`, `PreferServer`, or `ForceServer`. When **Force SSD** is enabled, the compositor always sends `configure(server_side)`; the host draws the only window chrome (macOS titlebar, etc.); clients must not draw CSD.
+
+- **WindowCreated** carries `decoration_mode` and `fullscreen_shell`; host chooses window style (titled vs borderless)
+- **DecorationModeChanged** event and C API; platform updates NSWindow style on mode change
+- **Fullscreen shell (kiosk)** → borderless fullscreen, no host chrome
+- **set_window_geometry** stored separately from window size; used for hit-testing and content rect
+
+---
+
+*Last updated: 2026-02-24*

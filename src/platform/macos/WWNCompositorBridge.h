@@ -135,6 +135,8 @@ typedef struct {
 
 - (void)injectTouchCancel;
 
+- (void)injectTouchFrame;
+
 // MARK: - Text Input (IME / Emoji)
 
 /// Commit a composed string (emoji, IME output, etc.) to the focused

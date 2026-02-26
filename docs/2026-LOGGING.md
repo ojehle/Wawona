@@ -1,12 +1,14 @@
-# Wawona's logging format:
+# Wawona Logging Format
 
-Please write ALL logging to follow this format, uniformly:
+All logging must follow this format uniformly:
 
+```
 2026-01-18 15:02:42 [BRIDGE] Creating WawonaCore via direct C API
+```
 
-- date/timestamp
-- who's logging it? inside [brackets]
-- the message
-- no emojis!
+## Format
 
-if you start doin' slop with this, I will be upset.
+- **Date/timestamp** — `YYYY-MM-DD HH:MM:SS`
+- **Component** — inside `[brackets]` (e.g. `[BRIDGE]`, `[CORE]`, `[FFI]`)
+- **Message** — plain text
+- **No emojis**

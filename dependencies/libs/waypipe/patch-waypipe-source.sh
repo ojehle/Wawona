@@ -3,7 +3,8 @@ set -e
 # Make source files writable for patching
 chmod -R u+w src/ || true
 
-# Patch Cargo.toml for iOS compatibility
+# === Phase 1: Cargo.toml ===
+# Remove bins, rlib+staticlib, default-run
 if [ -f "Cargo.toml" ]; then
   python3 <<'PY'
 import pathlib
@@ -46,7 +47,8 @@ if p.exists():
 PY
 fi
 
-# Patch main.rs to use unlink instead of unlinkat on iOS
+# === Phase 2: main.rs platform fixes ===
+# unlinkat→unlink, socket flags, logger, User::from_uid
 if [ -f "src/main.rs" ]; then
   # Use Python for robust replacement (handles & and other special characters)
   python3 <<'PY'
@@ -61,11 +63,12 @@ if p.exists():
     s = s.replace('unistd::unlinkat(&self.folder, file_name, unistd::UnlinkatFlags::NoRemoveDir)', 
                   '{ let _ = file_name; unistd::unlink(&self.full_path) }')
     
-    # Remove iOS-specific socket flags that cause EINVAL on iOS
-    s = s.replace('socket::SockFlag::SOCK_NONBLOCK | socket::SockFlag::SOCK_CLOEXEC', 'socket::SockFlag::empty()')
-    s = s.replace('socket::SockFlag::SOCK_CLOEXEC | socket::SockFlag::SOCK_NONBLOCK', 'socket::SockFlag::empty()')
-    s = s.replace('socket::SockFlag::SOCK_NONBLOCK', 'socket::SockFlag::empty()')
-    s = s.replace('socket::SockFlag::SOCK_CLOEXEC', 'socket::SockFlag::empty()')
+    # NOTE: Do NOT strip SOCK_NONBLOCK / SOCK_CLOEXEC here.
+    # Phase 5 injects socket_wrapper.rs which re-exports a custom SockFlag type
+    # and applies these flags via fcntl() after socket creation (since iOS rejects
+    # them as direct socket() flags with EINVAL).  Stripping the flags here would
+    # prevent the wrapper from ever setting O_NONBLOCK, leaving all waypipe
+    # sockets in blocking mode and stalling the event loop after the first frame.
     
     # Correct unwrap calls for tty check
     s = re.sub(r'nix::unistd::isatty\(([^\n]*?)\)\.unwrap\(\)', r'nix::unistd::isatty(\1).unwrap_or(false)', s)
@@ -78,7 +81,8 @@ if p.exists():
 PY
 fi
 
-# iOS doesn't support memfd seals (F_ADD_SEALS/F_GET_SEALS); ignore those failures
+# === Phase 3: memfd / F_* seals ===
+# F_ADD_SEALS/F_GET_SEALS for iOS
 python3 <<'PY'
 import pathlib
 
@@ -479,10 +483,8 @@ BUILDRS_EOF
   echo "✓ Patched shaders/build.rs"
 fi
 
-# Patch waypipe source to handle iOS socket flag differences
-# iOS doesn't have SOCK_NONBLOCK and SOCK_CLOEXEC flags
-# We need to set these flags after socket creation using fcntl
-
+# === Phase 5: socket_wrapper ===
+# Replace nix syscalls (pipe2, waitid, ppoll, socket) with iOS-compatible wrappers
 # Create socket_wrapper.rs with compat functions
 cat > src/socket_wrapper.rs <<'SOCKWRAP_EOF'
 #![allow(unused_imports)]
@@ -676,7 +678,8 @@ Err(Errno::EEXIST)
 }
 SOCKWRAP_EOF
 
-# Add SocketSpec::SplitFD for libssh2 native transport
+# === Phase 4: SocketSpec::SplitFD ===
+# Add enum variant, --socket-fds parsing, unreachable match arms
 if [ -f "src/main.rs" ]; then
   python3 <<'PY'
 import os
@@ -1087,6 +1090,135 @@ DRMPATCH
   else
     echo "Warning: render_id block not found in dmabuf.rs"
   fi
+
+  # iOS App Store compliance: no runtime dylib loading (dlopen).
+  # All libraries must be static or wrapped in .framework bundles.
+  # Patch setup_vulkan_instance() to return Ok(None) immediately on iOS
+  # so no dlopen("libvulkan.dylib") occurs. Settings UI is unaffected.
+  python3 <<'IOS_NO_DYLIB_PATCH'
+import sys
+
+# --- 1. Patch dmabuf.rs: skip Vulkan dlopen on iOS ---
+with open('src/dmabuf.rs', 'r') as f:
+    content = f.read()
+
+old_vulkan_fn = 'pub fn setup_vulkan_instance(\n    debug: bool,'
+new_vulkan_fn = '''pub fn setup_vulkan_instance(
+    debug: bool,'''
+
+# Insert an early return right after the opening brace of the function
+old_body_start = ') -> Result<Option<Arc<VulkanInstance>>, String> {\n    let app_name'
+new_body_start = """) -> Result<Option<Arc<VulkanInstance>>, String> {
+    // iOS: no dylib loading allowed (App Store compliance).
+    // Vulkan, kosmickrisp, MoltenVK are not shipped as dylibs.
+    if cfg!(target_os = "ios") {
+        debug!("Vulkan disabled on iOS (no dylib loading for App Store compliance)");
+        return Ok(None);
+    }
+    let app_name"""
+
+if old_body_start in content:
+    content = content.replace(old_body_start, new_body_start)
+    with open('src/dmabuf.rs', 'w') as f:
+        f.write(content)
+    print("✓ Patched setup_vulkan_instance(): skip dlopen on iOS")
+else:
+    print("WARNING: Could not find setup_vulkan_instance body start in dmabuf.rs")
+
+# --- 2. Patch video.rs: skip ffmpeg dlopen on iOS ---
+with open('src/video.rs', 'r') as f:
+    content = f.read()
+
+old_video_body = ') -> Result<Option<VulkanVideo>, String> {\n    /* loading libavcodec'
+new_video_body = """) -> Result<Option<VulkanVideo>, String> {
+    // iOS: no dylib loading allowed (App Store compliance).
+    if cfg!(target_os = "ios") {
+        debug!("Video encoding disabled on iOS (no dylib loading for App Store compliance)");
+        return Ok(None);
+    }
+    /* loading libavcodec"""
+
+if old_video_body in content:
+    content = content.replace(old_video_body, new_video_body)
+    with open('src/video.rs', 'w') as f:
+        f.write(content)
+    print("✓ Patched setup_video(): skip dlopen on iOS")
+else:
+    print("WARNING: Could not find setup_video body start in video.rs")
+
+# --- 3. Patch gbm.rs: skip GBM dlopen on iOS (already Linux-only, belt-and-suspenders) ---
+with open('src/gbm.rs', 'r') as f:
+    content = f.read()
+
+old_gbm_body = 'pub fn setup_gbm_device(device: Option<u64>) -> Result<Option<Rc<GBMDevice>>, String> {\n    let mut id_list'
+new_gbm_body = """pub fn setup_gbm_device(device: Option<u64>) -> Result<Option<Rc<GBMDevice>>, String> {
+    if cfg!(target_os = "ios") {
+        return Ok(None);
+    }
+    let mut id_list"""
+
+if old_gbm_body in content:
+    content = content.replace(old_gbm_body, new_gbm_body)
+    with open('src/gbm.rs', 'w') as f:
+        f.write(content)
+    print("✓ Patched setup_gbm_device(): skip dlopen on iOS")
+else:
+    print("WARNING: Could not find setup_gbm_device body start in gbm.rs")
+
+# --- 4. Patch main.rs: auto-enable no_gpu on iOS ---
+# (main.rs is renamed to lib.rs later in the build; at this point it's still main.rs)
+# This makes waypipe automatically use --no-gpu behavior on iOS,
+# which filters out all dmabuf protocol messages and tells the remote
+# server not to use dmabufs either. Same as passing --no-gpu manually.
+import os
+main_rs = 'src/main.rs' if os.path.exists('src/main.rs') else 'src/lib.rs'
+with open(main_rs, 'r') as f:
+    content = f.read()
+
+old_nogpu = 'no_gpu: *no_gpu || cfg!(not(feature = "dmabuf")),'
+new_nogpu = 'no_gpu: *no_gpu || cfg!(not(feature = "dmabuf")) || cfg!(target_os = "ios"),'
+
+if old_nogpu in content:
+    content = content.replace(old_nogpu, new_nogpu)
+    with open(main_rs, 'w') as f:
+        f.write(content)
+    print(f"✓ Patched {main_rs}: auto-enable no_gpu on iOS (no dmabuf/dylib)")
+else:
+    print(f"WARNING: Could not find no_gpu initialization in {main_rs}")
+
+IOS_NO_DYLIB_PATCH
+fi
+
+# --- 5. Patch tracking.rs: make DMABUF Unavailable non-fatal when no_gpu ---
+# Safety net: if the remote server doesn't respect CONN_NO_DMABUF_SUPPORT and
+# a zwp_linux_dmabuf_v1 bind still arrives, don't crash; just pass through.
+if [ -f "src/tracking.rs" ]; then
+  python3 <<'TRACKING_DMABUF_PATCH'
+with open('src/tracking.rs', 'r') as f:
+    content = f.read()
+
+old_fatal = '''if matches!(glob.dmabuf_device, DmabufDevice::Unavailable) {
+                    return Err(tag!("Failed to set up a device to handle DMABUFS"));
+                }'''
+
+new_nonfatal = '''if matches!(glob.dmabuf_device, DmabufDevice::Unavailable) {
+                    if cfg!(target_os = "ios") || glob.opts.no_gpu {
+                        debug!("DMABUF unavailable (no_gpu/iOS), passing bind through");
+                        check_space!(msg.len(), 0, remaining_space);
+                        copy_msg(msg, dst);
+                        return Ok(ProcMsg::Done);
+                    }
+                    return Err(tag!("Failed to set up a device to handle DMABUFS"));
+                }'''
+
+if old_fatal in content:
+    content = content.replace(old_fatal, new_nonfatal)
+    with open('src/tracking.rs', 'w') as f:
+        f.write(content)
+    print("✓ Patched tracking.rs: DMABUF Unavailable non-fatal on iOS/no_gpu")
+else:
+    print("WARNING: Could not find DMABUF fatal check in tracking.rs")
+TRACKING_DMABUF_PATCH
 fi
 
 # Patch src/video.rs to use correct library extension on iOS
@@ -1623,9 +1755,10 @@ fi
 # Note: Waypipe configured to use libssh2 on iOS
 echo "✓ Waypipe configured to use libssh2"
 
-# Fix double waypipe bug and command construction in transport_ssh2.rs
+# === Phase 6 & 7: transport_ssh2 and streamlocal forwarding ===
+# Create/fix transport_ssh2 module; use streamlocal-forward@openssh.com (native waypipe on remote)
 if [ -f "src/transport_ssh2.rs" ]; then
-    echo "Fixing src/transport_ssh2.rs..."
+    echo "Checking src/transport_ssh2.rs for streamlocal transport..."
     python3 <<'EOF'
 import os
 import re
@@ -1633,55 +1766,28 @@ path = "src/transport_ssh2.rs"
 with open(path, "r") as f:
     content = f.read()
 
-# 1. Skip 'waypipe' and any existing socket flags in build_remote_command
-buggy_loop = 'while i < waypipe_args.len() {'
-if buggy_loop in content and 'if a == "waypipe"' not in content:
-    fixed_loop = """    let mut skip_next = 0;
-    while i < waypipe_args.len() {
-        if skip_next > 0 { skip_next -= 1; i += 1; continue; }
-        let a = waypipe_args[i].to_str().unwrap_or("");
-        if a == "waypipe" { i += 1; continue; }
-        if a == "--socket" || a == "-s" { skip_next = 1; i += 1; continue; }"""
-    content = content.replace(buggy_loop, fixed_loop)
+# Ensure transport_ssh2.rs uses streamlocal (not socat/nc or --socket-fds)
+needs_rewrite = False
+if "socat" in content:
+    print("WARNING: transport_ssh2.rs still contains socat references - needs rewrite")
+    needs_rewrite = True
+if "--socket-fds" in content:
+    print("WARNING: transport_ssh2.rs still contains --socket-fds - needs rewrite")
+    needs_rewrite = True
+if "streamlocal_ffi" not in content:
+    print("WARNING: transport_ssh2.rs missing streamlocal_ffi - needs rewrite")
+    needs_rewrite = True
 
-# 2. Add remote stderr bridging to the loop
-# We need to find the loop and add stderr reading.
-stderr_read = """            // SSH -> Local
-            if let Ok(mut g) = sess.lock() {
-                // Read stdout
-                while let Ok(n) = g.1.read(&mut ssh_buf) {
-                    if n > 0 { ssh_pending.extend_from_slice(&ssh_buf[..n]); }
-                    else if g.1.eof() { return; }
-                    else { break; }
-                }
-                // Bridge stderr to local stderr for debugging
-                let mut err_buf = [0u8; 4096];
-                while let Ok(n) = g.1.stderr().read(&mut err_buf) {
-                    if n > 0 {
-                        use std::io::Write;
-                        let _ = std::io::stderr().write_all(&err_buf[..n]);
-                    } else { break; }
-                }
-            }"""
-old_read = """            // SSH -> Local
-            if let Ok(mut g) = sess.lock() {
-                while let Ok(n) = g.1.read(&mut ssh_buf) {
-                    if n > 0 { ssh_pending.extend_from_slice(&ssh_buf[..n]); }
-                    else if g.1.eof() { return; }
-                    else { break; }
-                }
-            }"""
-if old_read in content:
-    content = content.replace(old_read, stderr_read)
-
-with open(path, "w") as f:
-    f.write(content)
-print("✓ Fixed transport_ssh2.rs build_remote_command and bridged stderr")
+if needs_rewrite:
+    os.remove(path)
+    print("Removed stale transport_ssh2.rs -- will be recreated")
+else:
+    print("✓ transport_ssh2.rs already has streamlocal transport")
 EOF
 fi
 
 
-# Create transport_ssh2.rs if it doesn't exist (normally done by ios.nix standalone build)
+# Create transport_ssh2.rs if it doesn't exist or was removed by the check above
 if [ ! -f "src/transport_ssh2.rs" ]; then
     echo "Creating src/transport_ssh2.rs (libssh2 transport for iOS)..."
     cat > "src/transport_ssh2.rs" << 'TRANSPORT_SSH2_EOF'
@@ -1700,56 +1806,36 @@ macro_rules! sshlog {
     }};
 }
 
-fn build_remote_command(waypipe_args: &[&std::ffi::OsStr]) -> String {
+fn build_remote_command(socket_path: &str, waypipe_args: &[&std::ffi::OsStr]) -> String {
     let mut pre_server_args = Vec::new();
     let mut post_server_args = Vec::new();
-    
+
     let mut i = 0;
     let mut past_server = false;
     while i < waypipe_args.len() {
         let a = waypipe_args[i].to_str().unwrap_or("");
-        
-        if a == "waypipe" {
-            i += 1; 
-            continue;
-        }
-        
-        if (a == "--socket" || a == "-s") && i + 1 < waypipe_args.len() {
-            i += 2;
-            continue;
-        }
-        
-        if a == "--socket-fds" && i + 1 < waypipe_args.len() {
-            i += 2;
-            continue;
-        }
-        
-        if a == "server" {
-            past_server = true;
-            i += 1;
-            continue;
-        }
-        
-        if a == "--" {
-            i += 1;
-            continue;
-        }
-        
+
+        if a == "waypipe" { i += 1; continue; }
+        if (a == "--socket" || a == "-s") && i + 1 < waypipe_args.len() { i += 2; continue; }
+        if a == "--socket-fds" && i + 1 < waypipe_args.len() { i += 2; continue; }
+        if a == "--unlink-socket" { i += 1; continue; }
+        if a == "server" { past_server = true; i += 1; continue; }
+        if a == "--" { i += 1; continue; }
+
         if past_server && !a.is_empty() {
             post_server_args.push(a);
         } else if !past_server && !a.is_empty() {
             pre_server_args.push(a);
         }
-        
         i += 1;
     }
-    
+
     if post_server_args.is_empty() {
         post_server_args.push("weston-terminal");
     }
-    
-    // Construct robust shell wrapper: Creates a socket, runs waypipe server, bridges stdio to it via nc
-    let mut waypipe_cmd = vec!["waypipe".to_string(), "--socket $S".to_string()];
+
+    // Native unmodified waypipe on the remote -- uses the streamlocal-forwarded socket
+    let mut waypipe_cmd = vec!["waypipe".to_string(), "--socket".to_string(), socket_path.to_string()];
     waypipe_cmd.extend(pre_server_args.iter().map(|s| s.to_string()));
     waypipe_cmd.push("server".to_string());
     waypipe_cmd.push("--".to_string());
@@ -1757,11 +1843,71 @@ fn build_remote_command(waypipe_args: &[&std::ffi::OsStr]) -> String {
     let waypipe_str = waypipe_cmd.join(" ");
 
     let shell_script = format!(
-        "S=/tmp/wp-$$.sock; {} & WP_PID=$!; while [ ! -S $S ]; do if ! kill -0 $WP_PID 2>/dev/null; then exit 1; fi; sleep 0.1; done; if command -v socat >/dev/null 2>&1; then socat - UNIX-CONNECT:$S; else nc -U $S; fi; kill $WP_PID 2>/dev/null; rm -f $S",
+        "[ -n \"$XDG_RUNTIME_DIR\" ] || XDG_RUNTIME_DIR=/run/user/$(id -u); \
+         if [ -z \"$WAYLAND_DISPLAY\" ]; then \
+           for d in wayland-0 wayland-1 wayland-2; do \
+             if [ -S \"$XDG_RUNTIME_DIR/$d\" ]; then WAYLAND_DISPLAY=$d; break; fi; \
+           done; \
+         fi; \
+         if [ -z \"$WAYLAND_DISPLAY\" ] || [ ! -S \"$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY\" ]; then \
+           echo '[WAYPIPE-SSH-REMOTE] missing Wayland socket' >&2; \
+           echo '[WAYPIPE-SSH-REMOTE] XDG_RUNTIME_DIR='\"$XDG_RUNTIME_DIR\" >&2; \
+           echo '[WAYPIPE-SSH-REMOTE] WAYLAND_DISPLAY='\"$WAYLAND_DISPLAY\" >&2; \
+           ls -la \"$XDG_RUNTIME_DIR\" >&2 || true; \
+         fi; \
+         XDG_RUNTIME_DIR=\"$XDG_RUNTIME_DIR\" WAYLAND_DISPLAY=\"$WAYLAND_DISPLAY\" {}",
         waypipe_str
     );
 
     format!("sh -c '{}'", shell_script.replace("'", "'\\''"))
+}
+
+// Raw FFI bindings to our patched libssh2 streamlocal functions.
+// libssh2_channel_forward_listen_streamlocal() sends a
+// streamlocal-forward@openssh.com global request, creating a listening
+// Unix socket on the remote. Connections are delivered back as
+// forwarded-streamlocal@openssh.com channels.
+mod streamlocal_ffi {
+    use std::os::raw::{c_char, c_int, c_uint, c_void};
+    extern "C" {
+        pub fn libssh2_channel_forward_listen_streamlocal(
+            session: *mut c_void,
+            socket_path: *const c_char,
+            queue_maxsize: c_int,
+        ) -> *mut c_void;
+        pub fn libssh2_channel_forward_accept(
+            listener: *mut c_void,
+        ) -> *mut c_void;
+        pub fn libssh2_channel_forward_cancel(
+            listener: *mut c_void,
+        ) -> c_int;
+        pub fn libssh2_channel_read_ex(
+            channel: *mut c_void,
+            stream_id: c_int,
+            buf: *mut c_char,
+            buflen: usize,
+        ) -> isize;
+        pub fn libssh2_channel_write_ex(
+            channel: *mut c_void,
+            stream_id: c_int,
+            buf: *const c_char,
+            buflen: usize,
+        ) -> isize;
+        pub fn libssh2_channel_flush_ex(
+            channel: *mut c_void,
+            stream_id: c_int,
+        ) -> c_int;
+        pub fn libssh2_channel_eof(channel: *mut c_void) -> c_int;
+        pub fn libssh2_channel_free(channel: *mut c_void) -> c_int;
+    }
+}
+
+/// Safety: the bridge thread takes sole ownership of the session, channel,
+/// and stream -- nothing else touches them after the spawn.
+struct SendBridge<F>(F);
+unsafe impl<F> Send for SendBridge<F> {}
+impl<F: FnOnce()> SendBridge<F> {
+    fn run(self) { (self.0)() }
 }
 
 pub fn connect_ssh2(
@@ -1784,11 +1930,9 @@ pub fn connect_ssh2(
     sess.handshake().map_err(|e| e.to_string())?;
     sshlog!("SSH handshake complete");
 
-    // Try agent auth first, then password auth
     let auth_user = if user.is_empty() { std::env::var("USER").unwrap_or_default() } else { user.to_string() };
     if sess.userauth_agent(&auth_user).is_err() {
         sshlog!("Agent auth failed, trying password...");
-        // Password will come from environment or fail
         let pass = std::env::var("WAYPIPE_SSH_PASSWORD").unwrap_or_default();
         if !pass.is_empty() {
             sess.userauth_password(&auth_user, &pass).map_err(|e| format!("Password auth failed: {}", e))?;
@@ -1798,16 +1942,100 @@ pub fn connect_ssh2(
     }
     sshlog!("Authenticated as {}", auth_user);
 
-    let remote_cmd = build_remote_command(remote_waypipe_args);
+    // Generate a unique socket path on the remote for streamlocal forwarding
+    let pid = std::process::id();
+    let rnd: u32 = unsafe { nix::libc::arc4random() };
+    let remote_sock = format!("/tmp/wp-{}-{:08x}.sock", pid, rnd);
+    sshlog!("Remote streamlocal socket: {}", remote_sock);
+
+    // Step 1: Request streamlocal-forward on the remote via our patched libssh2.
+    // This creates a listening Unix socket on the remote server.
+    let raw_sess_guard = sess.raw();
+    let raw_sess: *mut std::os::raw::c_void = &*raw_sess_guard as *const _ as *mut _;
+    drop(raw_sess_guard);
+    let c_path = std::ffi::CString::new(remote_sock.as_str()).map_err(|e| e.to_string())?;
+    let listener = unsafe {
+        streamlocal_ffi::libssh2_channel_forward_listen_streamlocal(
+            raw_sess,
+            c_path.as_ptr(),
+            16,
+        )
+    };
+    if listener.is_null() {
+        return Err(format!(
+            "streamlocal-forward@openssh.com failed for {}. \
+             Ensure remote sshd has AllowStreamLocalForwarding yes (OpenSSH >= 6.7)",
+            remote_sock
+        ));
+    }
+    sshlog!("Streamlocal forward established: {}", remote_sock);
+
+    // Step 2: Start remote waypipe via exec channel.
+    // Remote waypipe will connect to the forwarded socket -- it's native, unmodified waypipe.
+    let remote_cmd = build_remote_command(&remote_sock, remote_waypipe_args);
     sshlog!("Remote cmd: {}", remote_cmd);
 
-    let mut channel = sess.channel_session().map_err(|e| e.to_string())?;
-    channel.exec(&remote_cmd).map_err(|e| e.to_string())?;
-    sshlog!("Remote command started");
+    let mut exec_channel = sess.channel_session().map_err(|e| e.to_string())?;
+    exec_channel.exec(&remote_cmd).map_err(|e| e.to_string())?;
+    sshlog!("Remote waypipe started");
+
+    // Step 3: Accept the forwarded-streamlocal channel with timeout + diagnostics.
+    // Use non-blocking mode so we can also read remote stderr for error messages.
+    sess.set_blocking(false);
+    let accept_start = std::time::Instant::now();
+    let accept_timeout = std::time::Duration::from_secs(15);
+    let mut fwd_raw: *mut std::os::raw::c_void = std::ptr::null_mut();
+    let mut remote_stderr = String::new();
+
+    loop {
+        let try_accept = unsafe {
+            streamlocal_ffi::libssh2_channel_forward_accept(listener)
+        };
+        if !try_accept.is_null() {
+            fwd_raw = try_accept;
+            break;
+        }
+
+        // Drain remote stderr for diagnostics while we wait
+        let mut err_buf = [0u8; 4096];
+        if let Ok(n) = exec_channel.stderr().read(&mut err_buf) {
+            if n > 0 {
+                if let Ok(s) = std::str::from_utf8(&err_buf[..n]) {
+                    remote_stderr.push_str(s);
+                }
+            }
+        }
+
+        if accept_start.elapsed() >= accept_timeout {
+            sshlog!("Accept timed out after {:?}", accept_start.elapsed());
+            if !remote_stderr.is_empty() {
+                sshlog!("Remote stderr:\n{}", remote_stderr);
+            }
+            unsafe { streamlocal_ffi::libssh2_channel_forward_cancel(listener); }
+            let mut msg = format!(
+                "Timed out after {}s waiting for forwarded-streamlocal channel.",
+                accept_timeout.as_secs()
+            );
+            if !remote_stderr.is_empty() {
+                msg.push_str(&format!("\nRemote stderr: {}", remote_stderr.trim()));
+            } else {
+                msg.push_str(" No output from remote -- is waypipe installed on the server?");
+            }
+            return Err(msg);
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    if !remote_stderr.is_empty() {
+        sshlog!("Remote stderr (during accept): {}", remote_stderr.trim());
+    }
+    sshlog!("Accepted forwarded-streamlocal channel in {:?}", accept_start.elapsed());
 
     sess.set_blocking(false);
 
-    // Create a UnixStream pair to bridge local<->SSH
+    // Step 4: Bridge data between forwarded channel and local UnixStream pair.
+    // We use raw libssh2 FFI for the forwarded channel since the ssh2 crate
+    // doesn't expose a way to construct a Channel from a raw pointer.
     let (local_end, mut thread_end) = UnixStream::pair().map_err(|e| e.to_string())?;
     let local_fd = local_end.into_raw_fd();
     thread_end.set_nonblocking(true).map_err(|e| e.to_string())?;
@@ -1815,11 +2043,11 @@ pub fn connect_ssh2(
     let sess_fd = sess.as_raw_fd();
     let stream_fd = thread_end.as_raw_fd();
 
-    // Single-thread poll loop: no mutex, no deadlock. Non-blocking I/O on both ends.
-    thread::spawn(move || {
+    let bridge = SendBridge(move || {
         let _sess = sess;
-        let mut thread_end = thread_end; // keep stream fd alive
-        let mut channel = channel;
+        let _exec = exec_channel;
+        let mut thread_end = thread_end;
+        let fwd_ch = fwd_raw;
         use nix::poll::{PollFd, PollFlags};
         use nix::sys::time::TimeSpec;
         use std::io::ErrorKind;
@@ -1827,8 +2055,8 @@ pub fn connect_ssh2(
         use std::os::fd::BorrowedFd;
 
         let mut buf = [0u8; 16384];
-        let mut pending_ssh: Option<(Vec<u8>, usize)> = None; // Local->SSH: (data, offset)
-        let mut pending_local: Option<(Vec<u8>, usize)> = None; // SSH->Local: (data, offset)
+        let mut pending_ssh: Option<(Vec<u8>, usize)> = None;
+        let mut pending_local: Option<(Vec<u8>, usize)> = None;
 
         let mut fds = [
             PollFd::new(unsafe { BorrowedFd::borrow_raw(stream_fd) }, PollFlags::POLLIN),
@@ -1838,29 +2066,51 @@ pub fn connect_ssh2(
 
         loop {
             if let Some((ref data, ref mut offset)) = pending_ssh {
-                match channel.write(&data[*offset..]) {
-                    Ok(n) => {
-                        *offset += n;
-                        if *offset >= data.len() {
-                            let _ = channel.flush();
-                            pending_ssh = None;
-                        }
+                let rc = unsafe {
+                    streamlocal_ffi::libssh2_channel_write_ex(
+                        fwd_ch, 0,
+                        data[*offset..].as_ptr() as *const _,
+                        data.len() - *offset)
+                };
+                if rc > 0 {
+                    *offset += rc as usize;
+                    if *offset >= data.len() {
+                        unsafe { streamlocal_ffi::libssh2_channel_flush_ex(fwd_ch, 0); }
+                        pending_ssh = None;
                     }
-                    Err(e) if e.kind() == ErrorKind::WouldBlock => {}
-                    Err(e) => { sshlog!("Bridge exit: channel write err {:?}", e); break; }
-                }
+                } else if rc == -37 { /* LIBSSH2_ERROR_EAGAIN */ }
+                else if rc < 0 { sshlog!("Bridge exit: channel write err {}", rc); break; }
             }
 
             if let Some((ref data, ref mut offset)) = pending_local {
                 match thread_end.write(&data[*offset..]) {
                     Ok(n) => {
                         *offset += n;
-                        if *offset >= data.len() {
-                            pending_local = None;
-                        }
+                        if *offset >= data.len() { pending_local = None; }
                     }
                     Err(e) if e.kind() == ErrorKind::WouldBlock => {}
                     Err(e) => { sshlog!("Bridge exit: local write err {:?}", e); break; }
+                }
+            }
+
+            // Proactively drain libssh2's internal buffer.  libssh2
+            // reads from the TCP socket into an internal buffer; after
+            // the first read the TCP socket may be empty so POLLIN
+            // won't fire even though channel_read would return data.
+            // Draining here prevents frame data from stalling.
+            if pending_local.is_none() {
+                let rc = unsafe {
+                    streamlocal_ffi::libssh2_channel_read_ex(
+                        fwd_ch, 0,
+                        buf.as_mut_ptr() as *mut _,
+                        buf.len())
+                };
+                if rc > 0 {
+                    pending_local = Some((buf[..rc as usize].to_vec(), 0));
+                    continue;
+                } else if rc == 0 || unsafe { streamlocal_ffi::libssh2_channel_eof(fwd_ch) } != 0 {
+                    sshlog!("Bridge exit: forwarded channel EOF");
+                    break;
                 }
             }
 
@@ -1884,28 +2134,20 @@ pub fn connect_ssh2(
                 }
             }
 
-            // Also read stderr from the remote process to debug errors like invalid flags
             if fds[1].revents().map_or(false, |r| r.contains(PollFlags::POLLIN)) && pending_local.is_none() {
-                // Try reading stdout first
-                match channel.read(&mut buf) {
-                    Ok(0) => { sshlog!("Bridge exit: channel stdout EOF (remote process ended)"); break; }
-                    Ok(n) => { pending_local = Some((buf[..n].to_vec(), 0)); }
-                    Err(e) if e.kind() == ErrorKind::WouldBlock => {}
-                    Err(e) => { sshlog!("Bridge exit: channel stdout read err {:?}", e); break; }
-                }
-                
-                // Then try reading stderr, unbuffered
-                let mut err_buf = [0u8; 8192];
-                match channel.stderr().read(&mut err_buf) {
-                    Ok(n) if n > 0 => {
-                        if let Ok(s) = std::str::from_utf8(&err_buf[..n]) {
-                            // Print the stderr directly to our log output
-                            use std::io::Write;
-                            let _ = write!(std::io::stderr(), "[WAYPIPE-SSH-REMOTE-STDERR] {}", s);
-                        }
-                    }
-                    _ => {} // EOF or WouldBlock, ignore
-                }
+                let rc = unsafe {
+                    streamlocal_ffi::libssh2_channel_read_ex(
+                        fwd_ch, 0,
+                        buf.as_mut_ptr() as *mut _,
+                        buf.len())
+                };
+                if rc > 0 {
+                    pending_local = Some((buf[..rc as usize].to_vec(), 0));
+                } else if rc == 0 || unsafe { streamlocal_ffi::libssh2_channel_eof(fwd_ch) } != 0 {
+                    sshlog!("Bridge exit: forwarded channel EOF");
+                    break;
+                } else if rc == -37 { /* LIBSSH2_ERROR_EAGAIN */ }
+                else if rc < 0 { sshlog!("Bridge exit: channel read err {}", rc); break; }
             }
 
             if fds[0].revents().map_or(false, |r| r.contains(PollFlags::POLLERR | PollFlags::POLLHUP))
@@ -1915,10 +2157,12 @@ pub fn connect_ssh2(
                 break;
             }
         }
+
+        unsafe { streamlocal_ffi::libssh2_channel_free(fwd_ch); }
     });
+    thread::spawn(move || bridge.run());
 
     sshlog!("Bridge thread started, local_fd={}", local_fd);
-    // Keep the tcp alive via raw fd
     let _ = tcp_raw_fd;
     Ok(unsafe { OwnedFd::from_raw_fd(local_fd) })
 }
@@ -2127,6 +2371,8 @@ pub fn main() -> std::process::ExitCode {
 }
 """
 
+# === Phase 8: Wire into run_client_oneshot ===
+# Branch to transport_ssh2 when with_libssh2
 # SSH bridge hook: Wire transport_ssh2 into run_client_oneshot if not already done
 if "run_client_oneshot_libssh2" not in content:
     old_block = """    /* After the socket has been created, start ssh if necessary */

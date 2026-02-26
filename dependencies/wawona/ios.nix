@@ -1,11 +1,15 @@
 {
   lib,
   pkgs,
+  buildPackages,
   buildModule,
   wawonaSrc,
   wawonaVersion ? null,
   rustBackend,
   rustBackendSim ? null,
+  weston,
+  targetPkgs,
+  ...
 }:
 
 let
@@ -19,7 +23,7 @@ let
           export XCODE_APP
           export DEVELOPER_DIR="$XCODE_APP/Contents/Developer"
           export PATH="$DEVELOPER_DIR/usr/bin:$PATH"
-          export SDKROOT="$DEVELOPER_DIR/Platforms/${if platform == "ios" then "iPhoneOS" else "MacOSX"}.platform/Developer/SDKs/${if platform == "ios" then "iPhoneOS" else "MacOSX"}.sdk"
+          export SDKROOT="$DEVELOPER_DIR/Platforms/${if platform == "ios-sim" then "iPhoneSimulator" else if platform == "ios" then "iPhoneOS" else "MacOSX"}.platform/Developer/SDKs/${if platform == "ios-sim" then "iPhoneSimulator" else if platform == "ios" then "iPhoneOS" else "MacOSX"}.sdk"
         fi
       fi
     '';
@@ -49,35 +53,48 @@ let
 
   westonSimpleShmSrc = pkgs.callPackage ../libs/weston-simple-shm/patched-src.nix {};
 
-  # waypipe built separately via dependencies/libs/waypipe/ios.nix (libwaypipe.a)
-  # Cannot link with libwawona.a due to duplicate Rust stdlib - use nix build .#waypipe-ios
-  iosDeps = [ ];
+  effectiveRustBackend = if rustBackendSim != null then rustBackendSim else rustBackend;
+
+  # iOS build needs these copied into ios-dependencies for headers/libs used by
+  # generated protocol code and for linking Weston/Waypipe clients.
+  iosDeps = [
+    "libwayland"
+    "xkbcommon"
+    "libffi"
+    "pixman"
+    "zstd"
+    "lz4"
+    "libssh2"
+    "mbedtls"
+    "openssl"
+    "epoll-shim"
+    "waypipe"
+  ];
 
   getDeps =
     platform: depNames:
     map (
       name:
       if name == "pixman" then
-        # Pixman needs to be built for the target platform
         if platform == "ios" then
-          buildModule.ios.pixman
+          buildModule.buildForIOS "pixman" { simulator = true; }
         else
-          pkgs.pixman # macOS can use nixpkgs pixman
+          pkgs.pixman
       else if name == "vulkan-headers" then
         pkgs.vulkan-headers
       else if name == "vulkan-loader" then
         pkgs.vulkan-loader
       else if name == "xkbcommon" then
         if platform == "ios" then
-          buildModule.buildForIOS "xkbcommon" { }
+          buildModule.buildForIOS "xkbcommon" { simulator = true; }
         else
           pkgs.libxkbcommon
       else if name == "libssh2" then
-        buildModule.ios.libssh2
+        buildModule.buildForIOS "libssh2" { simulator = true; }
       else if name == "mbedtls" then
-        buildModule.ios.mbedtls
+        buildModule.buildForIOS "mbedtls" { simulator = true; }
       else
-        buildModule.${platform}.${name}
+        buildModule.buildForIOS name { simulator = true; }
     ) depNames;
 
   iosSources = common.commonSources ++ [
@@ -163,42 +180,39 @@ let
     "-Wno-format-pedantic"
   ];
 
-  releaseCFlags = [
-    "-O3"
-    "-DNDEBUG"
-    "-flto"
+  debugCFlags = [
+    "-O0"
+    "-g"
+    "-DDEBUG=1"
+    "-fno-omit-frame-pointer"
   ];
-  releaseObjCFlags = [
-    "-O3"
-    "-DNDEBUG"
-    "-flto"
+  debugObjCFlags = [
+    "-O0"
+    "-g"
+    "-DDEBUG=1"
+    "-fno-omit-frame-pointer"
   ];
 
 in
-  pkgs.stdenv.mkDerivation rec {
+  pkgs.stdenv.mkDerivation { # Removed 'rec'
     name = "wawona-ios";
-    version = projectVersion;
+    version = wawonaVersion; # Changed to wawonaVersion
     src = wawonaSrc;
 
-    nativeBuildInputs = with pkgs; [
-      pkg-config
+    dontStrip = true;
+
+    nativeBuildInputs = [ # Changed to list directly
+      pkgs.pkg-config
       xcodeUtils.findXcodeScript
       buildPackages.wayland-scanner
     ];
 
-    buildInputs = (getDeps "ios" iosDeps) ++ [
-      pkgs.vulkan-headers
-      buildModule.ios.libwayland
-      buildModule.ios.xkbcommon
-      buildModule.ios.libffi
-      buildModule.ios.pixman
-      buildModule.ios.libssh2
-      buildModule.ios.mbedtls
-      (buildModule.buildForIOS "openssl" { })
-      buildModule.ios.zstd
-      buildModule.ios.lz4
-      buildModule.ios.epoll-shim
-    ];
+    buildInputs =
+      (getDeps "ios" iosDeps)
+      ++ [
+        weston
+        effectiveRustBackend
+      ];
 
     # Fix gbm-wrapper.c include path and egl_buffer_handler.h for iOS
     postPatch = ''
@@ -272,10 +286,10 @@ in
 
     # Metal shader compilation
     preBuild = ''
-      ${xcodeEnv "ios"}
+      ${xcodeEnv "ios-sim"}
 
       if command -v metal >/dev/null 2>&1; then
-        metal -c src/rendering/metal_shaders.metal -o metal_shaders.air -isysroot "$SDKROOT" -miphoneos-version-min=26.0 || true
+        metal -c src/rendering/metal_shaders.metal -o metal_shaders.air -isysroot "$SDKROOT" -mios-simulator-version-min=26.0 || true
         if [ -f metal_shaders.air ] && command -v metallib >/dev/null 2>&1; then
           metallib metal_shaders.air -o metal_shaders.metallib || true
         fi
@@ -283,7 +297,7 @@ in
     '';
 
     preConfigure = ''
-      ${xcodeEnv "ios"}
+      ${xcodeEnv "ios-sim"}
 
       ${copyDeps "ios-dependencies"}
 
@@ -326,9 +340,9 @@ in
       IOS_ARCH="arm64"
       export CC="$IOS_CC"
       export CXX="$IOS_CXX"
-      export CFLAGS="-arch $IOS_ARCH -isysroot $SDKROOT -miphoneos-version-min=26.0 -fPIC"
-      export CXXFLAGS="-arch $IOS_ARCH -isysroot $SDKROOT -miphoneos-version-min=26.0 -fPIC"
-      export LDFLAGS="-arch $IOS_ARCH -isysroot $SDKROOT -miphoneos-version-min=26.0 -lobjc"
+      export CFLAGS="-arch $IOS_ARCH -isysroot $SDKROOT -mios-simulator-version-min=26.0 -fPIC"
+      export CXXFLAGS="-arch $IOS_ARCH -isysroot $SDKROOT -mios-simulator-version-min=26.0 -fPIC"
+      export LDFLAGS="-arch $IOS_ARCH -isysroot $SDKROOT -mios-simulator-version-min=26.0 -lobjc"
     '';
 
     buildPhase = ''
@@ -337,7 +351,7 @@ in
       # Compile generated protocols
       $CC -c ios-dependencies/include/xdg-shell-protocol.c \
           -Iios-dependencies/include -Iios-dependencies/include/wayland \
-          -fPIC -arch $IOS_ARCH -isysroot "$SDKROOT" -miphoneos-version-min=26.0 \
+          -fPIC -arch $IOS_ARCH -isysroot "$SDKROOT" -mios-simulator-version-min=26.0 \
           -o xdg-shell-protocol.o
       OBJ_FILES="xdg-shell-protocol.o"
 
@@ -357,8 +371,8 @@ in
                 -Iios-dependencies/include -Iios-dependencies/include/wayland \
                 -fobjc-arc -fPIC \
                 ${lib.concatStringsSep " " commonObjCFlags} \
-                ${lib.concatStringsSep " " releaseObjCFlags} \
-                -arch $IOS_ARCH -isysroot "$SDKROOT" -miphoneos-version-min=26.0 \
+                ${lib.concatStringsSep " " debugObjCFlags} \
+                -arch $IOS_ARCH -isysroot "$SDKROOT" -mios-simulator-version-min=26.0 \
                -DTARGET_OS_IPHONE=1 \
                -DUSE_RUST_CORE=1 \
                -o "$obj_file"
@@ -370,14 +384,216 @@ in
                -Iios-dependencies/include -Iios-dependencies/include/wayland \
                -fPIC \
                ${lib.concatStringsSep " " commonCFlags} \
-               ${lib.concatStringsSep " " releaseObjCFlags} \
-               -arch $IOS_ARCH -isysroot "$SDKROOT" -miphoneos-version-min=26.0 \
+               ${lib.concatStringsSep " " debugCFlags} \
+               -arch $IOS_ARCH -isysroot "$SDKROOT" -mios-simulator-version-min=26.0 \
                -DUSE_RUST_CORE=1 \
                -o "$obj_file"
           fi
           OBJ_FILES="$OBJ_FILES $obj_file"
         fi
       done
+
+      # Ensure iOS entry point is always present for final executable.
+      if [ ! -f platform_macos_main.m.o ]; then
+        $CC -c "src/platform/macos/main.m" \
+            -Isrc -Isrc/util -Isrc/core -Isrc/rendering -Isrc/input -Isrc/ui -Isrc/ui/Helpers \
+            -Isrc/platform/macos -Isrc/platform/ios -Isrc/logging -Isrc/launcher -Isrc/extensions \
+            -Iios-dependencies/include -Iios-dependencies/include/wayland \
+            -fobjc-arc -fPIC \
+            ${lib.concatStringsSep " " commonObjCFlags} \
+            ${lib.concatStringsSep " " debugObjCFlags} \
+            -arch $IOS_ARCH -isysroot "$SDKROOT" -mios-simulator-version-min=26.0 \
+            -DTARGET_OS_IPHONE=1 -DUSE_RUST_CORE=1 \
+            -o platform_macos_main.m.o
+      fi
+      OBJ_FILES="$OBJ_FILES platform_macos_main.m.o"
+
+      # Ensure bridge/settings objects exist for symbols referenced by main.m.
+      if [ ! -f platform_macos_WWNCompositorBridge.m.o ]; then
+        $CC -c "src/platform/macos/WWNCompositorBridge.m" \
+            -Isrc -Isrc/util -Isrc/core -Isrc/rendering -Isrc/input -Isrc/ui -Isrc/ui/Helpers \
+            -Isrc/platform/macos -Isrc/platform/ios -Isrc/logging -Isrc/launcher -Isrc/extensions \
+            -Iios-dependencies/include -Iios-dependencies/include/wayland \
+            -fobjc-arc -fPIC \
+            ${lib.concatStringsSep " " commonObjCFlags} \
+            ${lib.concatStringsSep " " debugObjCFlags} \
+            -arch $IOS_ARCH -isysroot "$SDKROOT" -mios-simulator-version-min=26.0 \
+            -DTARGET_OS_IPHONE=1 -DUSE_RUST_CORE=1 \
+            -o platform_macos_WWNCompositorBridge.m.o
+      fi
+      OBJ_FILES="$OBJ_FILES platform_macos_WWNCompositorBridge.m.o"
+
+      if [ ! -f platform_macos_WWNSettings.c.o ]; then
+        $CC -c "src/platform/macos/WWNSettings.c" \
+            -Isrc -Isrc/util -Isrc/core -Isrc/rendering -Isrc/input -Isrc/ui -Isrc/ui/Helpers \
+            -Isrc/platform/macos -Isrc/platform/ios -Isrc/logging -Isrc/launcher -Isrc/extensions \
+            -Iios-dependencies/include -Iios-dependencies/include/wayland \
+            -fPIC \
+            ${lib.concatStringsSep " " commonCFlags} \
+            ${lib.concatStringsSep " " debugCFlags} \
+            -arch $IOS_ARCH -isysroot "$SDKROOT" -mios-simulator-version-min=26.0 \
+            -DUSE_RUST_CORE=1 \
+            -o platform_macos_WWNSettings.c.o
+      fi
+      OBJ_FILES="$OBJ_FILES platform_macos_WWNSettings.c.o"
+
+      if [ ! -f platform_macos_WWNSettings.m.o ]; then
+        $CC -c "src/platform/macos/WWNSettings.m" \
+            -Isrc -Isrc/util -Isrc/core -Isrc/rendering -Isrc/input -Isrc/ui -Isrc/ui/Helpers \
+            -Isrc/platform/macos -Isrc/platform/ios -Isrc/logging -Isrc/launcher -Isrc/extensions \
+            -Iios-dependencies/include -Iios-dependencies/include/wayland \
+            -fobjc-arc -fPIC \
+            ${lib.concatStringsSep " " commonObjCFlags} \
+            ${lib.concatStringsSep " " debugObjCFlags} \
+            -arch $IOS_ARCH -isysroot "$SDKROOT" -mios-simulator-version-min=26.0 \
+            -DTARGET_OS_IPHONE=1 -DUSE_RUST_CORE=1 \
+            -o platform_macos_WWNSettings.m.o
+      fi
+      OBJ_FILES="$OBJ_FILES platform_macos_WWNSettings.m.o"
+
+      if [ ! -f platform_ios_WWNCompositorView_ios.m.o ] && [ -f "src/platform/ios/WWNCompositorView_ios.m" ]; then
+        $CC -c "src/platform/ios/WWNCompositorView_ios.m" \
+            -Isrc -Isrc/util -Isrc/core -Isrc/rendering -Isrc/input -Isrc/ui -Isrc/ui/Helpers \
+            -Isrc/platform/macos -Isrc/platform/ios -Isrc/logging -Isrc/launcher -Isrc/extensions \
+            -Iios-dependencies/include -Iios-dependencies/include/wayland \
+            -fobjc-arc -fPIC \
+            ${lib.concatStringsSep " " commonObjCFlags} \
+            ${lib.concatStringsSep " " debugObjCFlags} \
+            -arch $IOS_ARCH -isysroot "$SDKROOT" -mios-simulator-version-min=26.0 \
+            -DTARGET_OS_IPHONE=1 -DUSE_RUST_CORE=1 \
+            -o platform_ios_WWNCompositorView_ios.m.o
+      fi
+      if [ -f platform_ios_WWNCompositorView_ios.m.o ]; then
+        OBJ_FILES="$OBJ_FILES platform_ios_WWNCompositorView_ios.m.o"
+      fi
+
+      if [ ! -f platform_ios_WWNSceneDelegate.m.o ] && [ -f "src/platform/ios/WWNSceneDelegate.m" ]; then
+        $CC -c "src/platform/ios/WWNSceneDelegate.m" \
+            -Isrc -Isrc/util -Isrc/core -Isrc/rendering -Isrc/input -Isrc/ui -Isrc/ui/Helpers \
+            -Isrc/platform/macos -Isrc/platform/ios -Isrc/logging -Isrc/launcher -Isrc/extensions \
+            -Iios-dependencies/include -Iios-dependencies/include/wayland \
+            -fobjc-arc -fPIC \
+            ${lib.concatStringsSep " " commonObjCFlags} \
+            ${lib.concatStringsSep " " debugObjCFlags} \
+            -arch $IOS_ARCH -isysroot "$SDKROOT" -mios-simulator-version-min=26.0 \
+            -DTARGET_OS_IPHONE=1 -DUSE_RUST_CORE=1 \
+            -o platform_ios_WWNSceneDelegate.m.o
+      fi
+      if [ -f platform_ios_WWNSceneDelegate.m.o ]; then
+        OBJ_FILES="$OBJ_FILES platform_ios_WWNSceneDelegate.m.o"
+      fi
+
+      if [ ! -f ui_Settings_WWNSettingsSplitViewController.m.o ] && [ -f "src/ui/Settings/WWNSettingsSplitViewController.m" ]; then
+        $CC -c "src/ui/Settings/WWNSettingsSplitViewController.m" \
+            -Isrc -Isrc/util -Isrc/core -Isrc/rendering -Isrc/input -Isrc/ui -Isrc/ui/Helpers \
+            -Isrc/platform/macos -Isrc/platform/ios -Isrc/logging -Isrc/launcher -Isrc/extensions \
+            -Iios-dependencies/include -Iios-dependencies/include/wayland \
+            -fobjc-arc -fPIC \
+            ${lib.concatStringsSep " " commonObjCFlags} \
+            ${lib.concatStringsSep " " debugObjCFlags} \
+            -arch $IOS_ARCH -isysroot "$SDKROOT" -mios-simulator-version-min=26.0 \
+            -DTARGET_OS_IPHONE=1 -DUSE_RUST_CORE=1 \
+            -o ui_Settings_WWNSettingsSplitViewController.m.o
+      fi
+      if [ -f ui_Settings_WWNSettingsSplitViewController.m.o ]; then
+        OBJ_FILES="$OBJ_FILES ui_Settings_WWNSettingsSplitViewController.m.o"
+      fi
+
+      if [ ! -f ui_Settings_WWNSettingsSidebarViewController.m.o ] && [ -f "src/ui/Settings/WWNSettingsSidebarViewController.m" ]; then
+        $CC -c "src/ui/Settings/WWNSettingsSidebarViewController.m" \
+            -Isrc -Isrc/util -Isrc/core -Isrc/rendering -Isrc/input -Isrc/ui -Isrc/ui/Helpers \
+            -Isrc/platform/macos -Isrc/platform/ios -Isrc/logging -Isrc/launcher -Isrc/extensions \
+            -Iios-dependencies/include -Iios-dependencies/include/wayland \
+            -fobjc-arc -fPIC \
+            ${lib.concatStringsSep " " commonObjCFlags} \
+            ${lib.concatStringsSep " " debugObjCFlags} \
+            -arch $IOS_ARCH -isysroot "$SDKROOT" -mios-simulator-version-min=26.0 \
+            -DTARGET_OS_IPHONE=1 -DUSE_RUST_CORE=1 \
+            -o ui_Settings_WWNSettingsSidebarViewController.m.o
+      fi
+      if [ -f ui_Settings_WWNSettingsSidebarViewController.m.o ]; then
+        OBJ_FILES="$OBJ_FILES ui_Settings_WWNSettingsSidebarViewController.m.o"
+      fi
+
+      if [ ! -f ui_Settings_WWNSettingsModel.m.o ] && [ -f "src/ui/Settings/WWNSettingsModel.m" ]; then
+        $CC -c "src/ui/Settings/WWNSettingsModel.m" \
+            -Isrc -Isrc/util -Isrc/core -Isrc/rendering -Isrc/input -Isrc/ui -Isrc/ui/Helpers \
+            -Isrc/platform/macos -Isrc/platform/ios -Isrc/logging -Isrc/launcher -Isrc/extensions \
+            -Iios-dependencies/include -Iios-dependencies/include/wayland \
+            -fobjc-arc -fPIC \
+            ${lib.concatStringsSep " " commonObjCFlags} \
+            ${lib.concatStringsSep " " debugObjCFlags} \
+            -arch $IOS_ARCH -isysroot "$SDKROOT" -mios-simulator-version-min=26.0 \
+            -DTARGET_OS_IPHONE=1 -DUSE_RUST_CORE=1 \
+            -o ui_Settings_WWNSettingsModel.m.o
+      fi
+      if [ -f ui_Settings_WWNSettingsModel.m.o ]; then
+        OBJ_FILES="$OBJ_FILES ui_Settings_WWNSettingsModel.m.o"
+      fi
+
+      if [ ! -f ui_Settings_WWNPreferences.m.o ] && [ -f "src/ui/Settings/WWNPreferences.m" ]; then
+        $CC -c "src/ui/Settings/WWNPreferences.m" \
+            -Isrc -Isrc/util -Isrc/core -Isrc/rendering -Isrc/input -Isrc/ui -Isrc/ui/Helpers \
+            -Isrc/platform/macos -Isrc/platform/ios -Isrc/logging -Isrc/launcher -Isrc/extensions \
+            -Iios-dependencies/include -Iios-dependencies/include/wayland \
+            -fobjc-arc -fPIC \
+            ${lib.concatStringsSep " " commonObjCFlags} \
+            ${lib.concatStringsSep " " debugObjCFlags} \
+            -arch $IOS_ARCH -isysroot "$SDKROOT" -mios-simulator-version-min=26.0 \
+            -DTARGET_OS_IPHONE=1 -DUSE_RUST_CORE=1 \
+            -o ui_Settings_WWNPreferences.m.o
+      fi
+      if [ -f ui_Settings_WWNPreferences.m.o ]; then
+        OBJ_FILES="$OBJ_FILES ui_Settings_WWNPreferences.m.o"
+      fi
+
+      if [ ! -f ui_Helpers_WWNImageLoader.m.o ] && [ -f "src/ui/Helpers/WWNImageLoader.m" ]; then
+        $CC -c "src/ui/Helpers/WWNImageLoader.m" \
+            -Isrc -Isrc/util -Isrc/core -Isrc/rendering -Isrc/input -Isrc/ui -Isrc/ui/Helpers \
+            -Isrc/platform/macos -Isrc/platform/ios -Isrc/logging -Isrc/launcher -Isrc/extensions \
+            -Iios-dependencies/include -Iios-dependencies/include/wayland \
+            -fobjc-arc -fPIC \
+            ${lib.concatStringsSep " " commonObjCFlags} \
+            ${lib.concatStringsSep " " debugObjCFlags} \
+            -arch $IOS_ARCH -isysroot "$SDKROOT" -mios-simulator-version-min=26.0 \
+            -DTARGET_OS_IPHONE=1 -DUSE_RUST_CORE=1 \
+            -o ui_Helpers_WWNImageLoader.m.o
+      fi
+      if [ -f ui_Helpers_WWNImageLoader.m.o ]; then
+        OBJ_FILES="$OBJ_FILES ui_Helpers_WWNImageLoader.m.o"
+      fi
+
+      if [ ! -f ui_Settings_WWNPreferencesManager.m.o ] && [ -f "src/ui/Settings/WWNPreferencesManager.m" ]; then
+        $CC -c "src/ui/Settings/WWNPreferencesManager.m" \
+            -Isrc -Isrc/util -Isrc/core -Isrc/rendering -Isrc/input -Isrc/ui -Isrc/ui/Helpers \
+            -Isrc/platform/macos -Isrc/platform/ios -Isrc/logging -Isrc/launcher -Isrc/extensions \
+            -Iios-dependencies/include -Iios-dependencies/include/wayland \
+            -fobjc-arc -fPIC \
+            ${lib.concatStringsSep " " commonObjCFlags} \
+            ${lib.concatStringsSep " " debugObjCFlags} \
+            -arch $IOS_ARCH -isysroot "$SDKROOT" -mios-simulator-version-min=26.0 \
+            -DTARGET_OS_IPHONE=1 -DUSE_RUST_CORE=1 \
+            -o ui_Settings_WWNPreferencesManager.m.o
+      fi
+      if [ -f ui_Settings_WWNPreferencesManager.m.o ]; then
+        OBJ_FILES="$OBJ_FILES ui_Settings_WWNPreferencesManager.m.o"
+      fi
+
+      if [ ! -f ui_Settings_WWNWaypipeRunner.m.o ] && [ -f "src/ui/Settings/WWNWaypipeRunner.m" ]; then
+        $CC -c "src/ui/Settings/WWNWaypipeRunner.m" \
+            -Isrc -Isrc/util -Isrc/core -Isrc/rendering -Isrc/input -Isrc/ui -Isrc/ui/Helpers \
+            -Isrc/platform/macos -Isrc/platform/ios -Isrc/logging -Isrc/launcher -Isrc/extensions \
+            -Iios-dependencies/include -Iios-dependencies/include/wayland \
+            -fobjc-arc -fPIC \
+            ${lib.concatStringsSep " " commonObjCFlags} \
+            ${lib.concatStringsSep " " debugObjCFlags} \
+            -arch $IOS_ARCH -isysroot "$SDKROOT" -mios-simulator-version-min=26.0 \
+            -DTARGET_OS_IPHONE=1 -DUSE_RUST_CORE=1 \
+            -o ui_Settings_WWNWaypipeRunner.m.o
+      fi
+      if [ -f ui_Settings_WWNWaypipeRunner.m.o ]; then
+        OBJ_FILES="$OBJ_FILES ui_Settings_WWNWaypipeRunner.m.o"
+      fi
 
       # Compile weston-simple-shm
       for src_file in deps/weston-simple-shm/clients/simple-shm.c deps/weston-simple-shm/shared/os-compatibility.c deps/weston-simple-shm/fullscreen-shell-unstable-v1-protocol.c; do
@@ -387,7 +603,7 @@ in
            -Ideps/weston-simple-shm/shared \
            -Ideps/weston-simple-shm/include \
            -Iios-dependencies/include -Iios-dependencies/include/wayland \
-           -fPIC -arch $IOS_ARCH -isysroot "$SDKROOT" -miphoneos-version-min=26.0 \
+           -fPIC -arch $IOS_ARCH -isysroot "$SDKROOT" -mios-simulator-version-min=26.0 \
            -o "$obj_file"
         OBJ_FILES="$OBJ_FILES $obj_file"
       done
@@ -403,10 +619,16 @@ in
          -framework Metal -framework MetalKit -framework IOSurface \
          -framework VideoToolbox -framework AVFoundation \
          -framework Security -framework Network \
-         ${rustBackend}/lib/libwawona.a \
-         -fobjc-arc -flto -O3 -arch $IOS_ARCH -isysroot "$SDKROOT" -miphoneos-version-min=26.0 \
+         -lweston-13 -lweston-desktop-13 -lweston-terminal \
+         ${effectiveRustBackend}/lib/libwawona.a \
+         -fobjc-arc -g -O0 -arch $IOS_ARCH -isysroot "$SDKROOT" -mios-simulator-version-min=26.0 \
          -Wl,-multiply_defined,suppress \
          -o Wawona
+
+      # Generate dSYM bundle for lldb attach
+      if command -v dsymutil >/dev/null 2>&1; then
+        dsymutil Wawona -o Wawona.dSYM || true
+      fi
 
       runHook postBuild
     '';
@@ -416,14 +638,154 @@ in
       
       mkdir -p $out/Applications/Wawona.app
       cp Wawona $out/Applications/Wawona.app/
+      if [ -d Wawona.dSYM ]; then
+        cp -R Wawona.dSYM $out/Applications/Wawona.app.dSYM
+      fi
+
+      # Simulator/device install requires an Info.plist with a bundle identifier.
+      cat > "$out/Applications/Wawona.app/Info.plist" <<'PLIST_EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key>
+  <string>en</string>
+  <key>CFBundleExecutable</key>
+  <string>Wawona</string>
+  <key>CFBundleIdentifier</key>
+  <string>com.aspauldingcode.Wawona</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>CFBundleName</key>
+  <string>Wawona</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>${projectVersion}</string>
+  <key>CFBundleVersion</key>
+  <string>1</string>
+  <key>LSRequiresIPhoneOS</key>
+  <true/>
+  <key>UILaunchStoryboardName</key>
+  <string>LaunchScreen</string>
+  <key>UIApplicationSceneManifest</key>
+  <dict>
+    <key>UIApplicationSupportsMultipleScenes</key>
+    <false/>
+    <key>UISceneConfigurations</key>
+    <dict>
+      <key>UIWindowSceneSessionRoleApplication</key>
+      <array>
+        <dict>
+          <key>UISceneConfigurationName</key>
+          <string>Default Configuration</string>
+          <key>UISceneDelegateClassName</key>
+          <string>WWNSceneDelegate</string>
+        </dict>
+      </array>
+    </dict>
+  </dict>
+  <key>UIRequiredDeviceCapabilities</key>
+  <array>
+    <string>arm64</string>
+  </array>
+  <key>UISupportedInterfaceOrientations</key>
+  <array>
+    <string>UIInterfaceOrientationPortrait</string>
+    <string>UIInterfaceOrientationLandscapeLeft</string>
+    <string>UIInterfaceOrientationLandscapeRight</string>
+  </array>
+  <key>CFBundleIcons</key>
+  <dict>
+    <key>CFBundlePrimaryIcon</key>
+    <dict>
+      <key>CFBundleIconName</key>
+      <string>AppIcon</string>
+      <key>CFBundleIconFiles</key>
+      <array>
+        <string>AppIcon</string>
+      </array>
+    </dict>
+  </dict>
+  <key>CFBundleIconName</key>
+  <string>AppIcon</string>
+</dict>
+</plist>
+PLIST_EOF
       
+      ${xcodeEnv "ios"}
+
       # Copy Metal shader library
       if [ -f metal_shaders.metallib ]; then
         cp metal_shaders.metallib $out/Applications/Wawona.app/
       fi
 
-      # Install app icons (light + dark) for iOS appearance support
-      APPICONSET="$src/src/resources/Assets.xcassets/AppIcon.appiconset"
+      # Install app icons for iOS 26+ (Icon Composer) with PNG fallback.
+      ICON_ROOT="$src/src/resources"
+      APPICONSET="$ICON_ROOT/Assets.xcassets/AppIcon.appiconset"
+      ICON_BUNDLE="$ICON_ROOT/Wawona.icon"
+      ACTOOL="''${DEVELOPER_DIR:-}/usr/bin/actool"
+      COMPILED_ASSET_CAR=0
+
+      if [ ! -f "$APPICONSET/AppIcon-Light-1024.png" ] && [ ! -f "$ICON_BUNDLE/Assets/wayland.png" ] && [ ! -f "$ICON_ROOT/wayland.png" ]; then
+        echo "ERROR: Missing iOS icon source PNG. Expected AppIcon-Light-1024.png or Wawona.icon/Assets/wayland.png"
+        exit 1
+      fi
+
+      if [ -n "''${DEVELOPER_DIR:-}" ] && [ -x "$ACTOOL" ]; then
+        ICON_TMP="$TMPDIR/wawona-ios-icon-compile"
+        rm -rf "$ICON_TMP"
+        mkdir -p "$ICON_TMP"
+
+        # Primary path: iOS 26 icon-composer bundle (Wawona.icon/icon.json + PNG asset).
+        if [ -d "$ICON_BUNDLE" ] && [ -f "$ICON_BUNDLE/icon.json" ]; then
+          cp -R "$ICON_BUNDLE" "$ICON_TMP/Wawona.icon"
+          if [ -f "$ICON_ROOT/wayland.png" ] && [ ! -f "$ICON_TMP/Wawona.icon/Assets/wayland.png" ]; then
+            mkdir -p "$ICON_TMP/Wawona.icon/Assets"
+            cp "$ICON_ROOT/wayland.png" "$ICON_TMP/Wawona.icon/Assets/wayland.png"
+          fi
+          OUT_CAR="$ICON_TMP/icon-composer-out"
+          mkdir -p "$OUT_CAR"
+          if "$ACTOOL" "$ICON_TMP/Wawona.icon" --compile "$OUT_CAR" \
+              --platform iphoneos --target-device iphone --target-device ipad \
+              --minimum-deployment-target 26.0 \
+              --app-icon Wawona --include-all-app-icons \
+              --output-format human-readable-text --notices --warnings \
+              --development-region en --enable-on-demand-resources NO \
+              --output-partial-info-plist "$OUT_CAR/assetcatalog_generated_info.plist"; then
+            if [ -f "$OUT_CAR/Assets.car" ]; then
+              cp "$OUT_CAR/Assets.car" "$out/Applications/Wawona.app/"
+              COMPILED_ASSET_CAR=1
+              echo "Installed Assets.car (from Wawona.icon / icon.json)"
+            fi
+          fi
+        fi
+
+        # Fallback path: classic AppIcon.appiconset compiles to Assets.car with AppIcon.
+        if [ "$COMPILED_ASSET_CAR" -eq 0 ] && [ -d "$APPICONSET" ]; then
+          mkdir -p "$ICON_TMP/Assets.xcassets/AppIcon.appiconset"
+          cp -R "$APPICONSET/"* "$ICON_TMP/Assets.xcassets/AppIcon.appiconset/"
+          OUT_CAR="$ICON_TMP/appiconset-out"
+          mkdir -p "$OUT_CAR"
+          if "$ACTOOL" "$ICON_TMP/Assets.xcassets" --compile "$OUT_CAR" \
+              --platform iphoneos --target-device iphone --target-device ipad \
+              --minimum-deployment-target 26.0 \
+              --app-icon AppIcon --include-all-app-icons \
+              --output-format human-readable-text --notices --warnings \
+              --development-region en --enable-on-demand-resources NO \
+              --output-partial-info-plist "$OUT_CAR/assetcatalog_generated_info.plist"; then
+            if [ -f "$OUT_CAR/Assets.car" ]; then
+              cp "$OUT_CAR/Assets.car" "$out/Applications/Wawona.app/"
+              COMPILED_ASSET_CAR=1
+              echo "Installed Assets.car (from AppIcon.appiconset)"
+            fi
+          fi
+        fi
+      else
+        echo "Warning: actool not available; iOS icon may rely on PNG fallback only."
+      fi
+
+      # Legacy PNG copies for systems/tools that still inspect standalone images.
       if [ -d "$APPICONSET" ] && [ -f "$APPICONSET/AppIcon-Light-1024.png" ]; then
         cp "$APPICONSET/AppIcon-Light-1024.png" "$out/Applications/Wawona.app/AppIcon.png"
         echo "Installed AppIcon.png (light, opaque)"
@@ -433,18 +795,22 @@ in
         echo "Installed AppIcon-Dark.png (dark)"
       fi
 
-      # Install modern Wawona.icon bundle (iOS 26+ Icon Composer format)
-      ICON_BUNDLE="$src/src/resources/Wawona.icon"
+      # Keep the source .icon bundle in-app for inspection/debugging.
       if [ -d "$ICON_BUNDLE" ]; then
         cp -R "$ICON_BUNDLE" "$out/Applications/Wawona.app/"
         echo "Installed Wawona.icon bundle"
       fi
 
-      # Bundle the dark logo PNG for Settings About header
+      # Bundle the dark logo PNG for Settings About header.
+      # Copy with BOTH the original @1x name AND without the scale suffix,
+      # because iOS UIImage/NSBundle APIs interpret @1x as a scale modifier
+      # and won't find the file by name on 2x/3x devices.
       if [ -f "$src/src/resources/Wawona-iOS-Dark-1024x1024@1x.png" ]; then
         cp "$src/src/resources/Wawona-iOS-Dark-1024x1024@1x.png" \
           "$out/Applications/Wawona.app/"
-        echo "Bundled Wawona-iOS-Dark-1024x1024@1x.png"
+        cp "$src/src/resources/Wawona-iOS-Dark-1024x1024@1x.png" \
+          "$out/Applications/Wawona.app/Wawona-iOS-Dark-1024x1024.png"
+        echo "Bundled Wawona-iOS-Dark-1024x1024@1x.png (+ unsuffixed copy)"
       fi
       
       # Static-only policy for App Store-distributable iOS builds:
@@ -482,12 +848,32 @@ in
 
       echo "Generating Xcode project..."
       ${(pkgs.callPackage ../generators/xcodegen.nix {
-         inherit pkgs;
+         inherit pkgs wawonaSrc buildModule targetPkgs;
          rustBackendIOS = rustBackend;
          rustBackendIOSSim = rustBackendSim;
          includeMacOSTarget = false;
          rustPlatform = pkgs.rustPlatform;
          wawonaVersion = projectVersion;
+         libwaylandIOS = buildModule.buildForIOS "libwayland" { };
+         xkbcommonIOS = buildModule.buildForIOS "xkbcommon" { };
+         pixmanIOS = buildModule.buildForIOS "pixman" { };
+         libffiIOS = buildModule.buildForIOS "libffi" { };
+         opensslIOS = buildModule.buildForIOS "openssl" { };
+         libssh2IOS = buildModule.buildForIOS "libssh2" { };
+         mbedtlsIOS = buildModule.buildForIOS "mbedtls" { };
+         zstdIOS = buildModule.buildForIOS "zstd" { };
+         lz4IOS = buildModule.buildForIOS "lz4" { };
+         epollShimIOS = buildModule.buildForIOS "epoll-shim" { };
+         waypipeIOS = buildModule.buildForIOS "waypipe" { };
+         westonSimpleShmIOS = buildModule.buildForIOS "weston-simple-shm" { };
+         westonIOS = buildModule.buildForIOS "weston" { };
+         cairoIOS = null;
+         pangoIOS = null;
+         glibIOS = null;
+         harfbuzzIOS = null;
+         fontconfigIOS = null;
+         freetypeIOS = null;
+         libpngIOS = null;
        }).app}/bin/xcodegen
 
       if [ ! -d "Wawona.xcodeproj" ]; then

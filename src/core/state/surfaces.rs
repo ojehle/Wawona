@@ -165,6 +165,9 @@ impl CompositorState {
     /// Flush all pending buffer releases (called after frame presentation)
     pub fn flush_buffer_releases(&mut self) {
         let releases: Vec<_> = self.pending_buffer_releases.drain(..).collect();
+        if !releases.is_empty() {
+            tracing::debug!("Flushing {} queued buffer releases", releases.len());
+        }
         for (cid, bid) in releases {
             self.release_buffer(cid, bid);
         }
@@ -234,11 +237,53 @@ impl CompositorState {
         };
         
         if let Some(wid) = window_id {
-            // Synchronize window dimensions with surface dimensions
+            // Synchronize window dimensions with surface dimensions.
+            //
+            // When xdg_surface geometry is set, use the geometry width/height
+            // so the platform window matches the content area (excluding the
+            // CSD shadow).  Store the geometry origin so pointer coordinates
+            // can be offset to surface-local coords.
+            let mut size_changed = false;
             if let Some(window) = self.get_window(wid) {
                 let mut window = window.write().unwrap();
-                window.width = surface.current.width;
-                window.height = surface.current.height;
+                let old_w = window.width;
+                let old_h = window.height;
+                let geom = self.xdg.surfaces.values()
+                    .find(|s| s.surface_id == id)
+                    .and_then(|s| s.geometry);
+                if let Some((gx, gy, gw, gh)) = geom {
+                    window.width = gw;
+                    window.height = gh;
+                    window.geometry_x = gx;
+                    window.geometry_y = gy;
+                } else {
+                    window.width = surface.current.width;
+                    window.height = surface.current.height;
+                    window.geometry_x = 0;
+                    window.geometry_y = 0;
+                }
+                if window.width != old_w || window.height != old_h {
+                    size_changed = true;
+                }
+            }
+
+            // Notify the platform when the committed surface size differs from
+            // the window size the platform created.  Fullscreen-shell windows
+            // are excluded: their size is dictated by the output, not the
+            // client buffer.
+            if size_changed && self.ext.fullscreen_shell.presented_window_id != Some(wid) {
+                if let Some(window) = self.get_window(wid) {
+                    let window = window.read().unwrap();
+                    if window.width > 0 && window.height > 0 {
+                        self.pending_compositor_events.push(
+                            crate::core::compositor::CompositorEvent::WindowSizeChanged {
+                                window_id: wid,
+                                width: window.width as u32,
+                                height: window.height as u32,
+                            }
+                        );
+                    }
+                }
             }
 
             let buffer_id = surface.current.buffer_id.map(|id| id as u64);

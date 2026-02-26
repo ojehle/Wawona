@@ -27,7 +27,12 @@ pkgs.stdenv.mkDerivation {
   patches = [ ];
   nativeBuildInputs = with buildPackages; [
     cmake
+    pkgs.python3
   ];
+  postPatch = ''
+    echo "=== Applying streamlocal patch to libssh2 ==="
+    ${pkgs.bash}/bin/bash ${./patch-streamlocal.sh}
+  '';
   buildInputs = [ openssl-ios ];
   preConfigure = ''
     if [ -z "''${XCODE_APP:-}" ]; then

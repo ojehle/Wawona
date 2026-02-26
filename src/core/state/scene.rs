@@ -38,7 +38,10 @@ impl CompositorState {
             } else {
                 toplevel_data.clamp_size(width, height)
             };
-            
+
+            toplevel_data.width = final_w;
+            toplevel_data.height = final_h;
+
             if let Some(resource) = &toplevel_data.resource {
                 let mut states = Vec::new();
                 
@@ -164,6 +167,12 @@ impl CompositorState {
         self.add_layer_to_scene(&mut new_scene, root_id, 0);
         self.add_layer_to_scene(&mut new_scene, root_id, 1);
         
+        // Pre-collect xdg_surface geometry data keyed by wl_surface ID
+        let geom_by_surface: std::collections::HashMap<u32, (i32, i32, i32, i32)> =
+            self.xdg.surfaces.values()
+                .filter_map(|s| s.geometry.map(|g| (s.surface_id, g)))
+                .collect();
+
         for window_id in self.windows.keys().copied().collect::<Vec<_>>() {
             if let Some(window) = self.get_window(window_id) {
                 let window = window.read().unwrap();
@@ -174,13 +183,35 @@ impl CompositorState {
                 node.set_position(window.x, window.y);
                 node.set_size(window.width.max(0) as u32, window.height.max(0) as u32);
 
+                // When xdg_surface geometry is set, compute a normalized
+                // content_rect so the platform renderer crops the buffer
+                // to the content area (excluding CSD/SSD shadow).
+                if let Some(&(gx, gy, gw, gh)) = geom_by_surface.get(&window.surface_id) {
+                    if let Some(surf_ref) = self.get_surface(window.surface_id) {
+                        let surf = surf_ref.read().unwrap();
+                        let buf_w = surf.current.width as f32;
+                        let buf_h = surf.current.height as f32;
+                        if buf_w > 0.0 && buf_h > 0.0 && gw > 0 && gh > 0 {
+                            node.content_rect = ContentRect {
+                                x: gx as f32 / buf_w,
+                                y: gy as f32 / buf_h,
+                                w: gw as f32 / buf_w,
+                                h: gh as f32 / buf_h,
+                            };
+                        }
+                    }
+                }
+
                 let alpha = self.ext.alpha_modifier.get_alpha_f64(window.surface_id) as f32;
                 node.opacity = alpha;
                 
                 new_scene.add_node(node);
                 new_scene.add_child(root_id, node_id);
                 
-                self.add_subsurfaces_to_scene(&mut new_scene, node_id, window.surface_id);
+                let geom_offset = geom_by_surface.get(&window.surface_id)
+                    .map(|&(gx, gy, _, _)| (gx, gy))
+                    .unwrap_or((0, 0));
+                self.add_subsurfaces_to_scene(&mut new_scene, node_id, window.surface_id, geom_offset);
             }
         }
         
@@ -216,7 +247,7 @@ impl CompositorState {
             
             new_scene.add_child(parent_node_id, node_id);
             
-            self.add_subsurfaces_to_scene(&mut new_scene, node_id, popup_surface_id);
+            self.add_subsurfaces_to_scene(&mut new_scene, node_id, popup_surface_id, (0, 0));
         }
         
         self.add_layer_to_scene(&mut new_scene, root_id, 2);
@@ -357,11 +388,25 @@ impl CompositorState {
             scene.add_node(node);
             scene.add_child(root_id, node_id);
             
-            self.add_subsurfaces_to_scene(scene, node_id, surface_id);
+            self.add_subsurfaces_to_scene(scene, node_id, surface_id, (0, 0));
         }
     }
 
-    fn add_subsurfaces_to_scene(&mut self, scene: &mut Scene, parent_node_id: u32, parent_surface_id: u32) {
+    /// Build subsurface scene nodes for `parent_surface_id`.
+    ///
+    /// `geometry_offset` is subtracted from the positions of **direct**
+    /// children only, converting surface-local coordinates to
+    /// geometry-local coordinates when the parent window's buffer is
+    /// cropped to its `set_window_geometry` content area.  Nested
+    /// subsurfaces recurse with `(0, 0)` because their positions are
+    /// already relative to their (shifted) parent.
+    fn add_subsurfaces_to_scene(
+        &mut self,
+        scene: &mut Scene,
+        parent_node_id: u32,
+        parent_surface_id: u32,
+        geometry_offset: (i32, i32),
+    ) {
         if let Some(children) = self.subsurface_children.get(&parent_surface_id).cloned() {
             for child_surface_id in children {
                 let sub_info = self.subsurfaces.get(&child_surface_id).map(|s| (s.position, s.sync));
@@ -371,7 +416,7 @@ impl CompositorState {
                     let mut node = SceneNode::new(node_id)
                         .with_surface(child_surface_id);
                     
-                    node.set_position(pos.0, pos.1);
+                    node.set_position(pos.0 - geometry_offset.0, pos.1 - geometry_offset.1);
                     
                     if let Some(surface_ref) = self.get_surface(child_surface_id) {
                         let surface = surface_ref.read().unwrap();
@@ -381,7 +426,7 @@ impl CompositorState {
                     scene.add_node(node);
                     scene.add_child(parent_node_id, node_id);
                     
-                    self.add_subsurfaces_to_scene(scene, node_id, child_surface_id);
+                    self.add_subsurfaces_to_scene(scene, node_id, child_surface_id, (0, 0));
                 }
             }
         }

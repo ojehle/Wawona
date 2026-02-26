@@ -402,11 +402,17 @@ static NSString *WWNPreferredSharedRuntimeDir(void) {
 
 // Window Decorations
 - (BOOL)forceServerSideDecorations {
+#if TARGET_OS_IPHONE
+  // iOS: CSD not supported; Force SSD is always on.
+  return YES;
+#else
   return [[NSUserDefaults standardUserDefaults]
       boolForKey:kWWNPrefsForceServerSideDecorations];
+#endif
 }
 
 - (void)setForceServerSideDecorations:(BOOL)enabled {
+#if !TARGET_OS_IPHONE
   [[NSUserDefaults standardUserDefaults]
       setBool:enabled
        forKey:kWWNPrefsForceServerSideDecorations];
@@ -415,6 +421,7 @@ static NSString *WWNPreferredSharedRuntimeDir(void) {
   [[NSNotificationCenter defaultCenter]
       postNotificationName:kWWNForceSSDChangedNotification
                     object:self];
+#endif
 }
 
 // Display

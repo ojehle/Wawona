@@ -35,6 +35,11 @@ pub struct FullscreenShellState {
     pub presented_window_id: Option<u32>,
     /// Pending mode feedback objects waiting for safe destructor dispatch
     pub pending_mode_feedbacks: Vec<ZwpFullscreenShellModeFeedbackV1>,
+    /// Clients that have bound zwp_fullscreen_shell_v1.  Used to identify
+    /// nested compositors: if a client owns both an xdg_toplevel AND a
+    /// fullscreen-shell binding, its toplevel resize must propagate as a
+    /// wl_output mode change.
+    pub bound_clients: std::collections::HashSet<wayland_server::backend::ClientId>,
 }
 
 impl FullscreenShellState {
@@ -47,7 +52,7 @@ impl FullscreenShellState {
 
 impl GlobalDispatch<ZwpFullscreenShellV1, ()> for CompositorState {
     fn bind(
-        _state: &mut Self,
+        state: &mut Self,
         _handle: &DisplayHandle,
         _client: &Client,
         resource: New<ZwpFullscreenShellV1>,
@@ -55,9 +60,9 @@ impl GlobalDispatch<ZwpFullscreenShellV1, ()> for CompositorState {
         data_init: &mut DataInit<'_, Self>,
     ) {
         let shell = data_init.init(resource, ());
-        // Advertise that we support arbitrary modes
         shell.capability(zwp_fullscreen_shell_v1::Capability::ArbitraryModes);
-        tracing::debug!("Bound zwp_fullscreen_shell_v1");
+        state.ext.fullscreen_shell.bound_clients.insert(_client.id());
+        tracing::debug!("Bound zwp_fullscreen_shell_v1 for client {:?}", _client.id());
     }
 }
 
